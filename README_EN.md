@@ -57,6 +57,8 @@ This repo already contains reusable foundations:
 - capability services
 - a thin local UI
 - an evaluation harness
+- a software-work event normalization layer
+- a SQLite memory-index foundation
 
 These are treated as baseline assets for the redesign, not as throwaway work.
 
@@ -65,6 +67,15 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `README.md`: Japanese overview
 - `README_EN.md`: English overview
 - `PLAN.md`: redesign blueprint and milestones
+
+## Newly Added Foundations
+
+- `scripts/software_work_events.py`
+  - normalizes workspace and session records into software-work events
+- `scripts/memory_index.py`
+  - local `SQLite FTS5` memory index foundation
+- `scripts/rebuild_memory_index.py`
+  - rebuild command for the event log and memory index
 
 ## Setup
 
@@ -81,6 +92,7 @@ python -m venv .venv
 .venv/bin/python scripts/fetch_demo_assets.py
 PYTHONPATH=scripts .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
+.venv/bin/python scripts/rebuild_memory_index.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

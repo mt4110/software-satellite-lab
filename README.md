@@ -56,6 +56,8 @@
 - capability services
 - thin local UI
 - evaluation harness
+- software-work event 正規化の土台
+- SQLite memory index の土台
 
 これらは捨てる前提ではなく、次の設計に引き継ぐ前提です。
 
@@ -64,6 +66,15 @@
 - `README.md`: 日本語の概要
 - `README_EN.md`: English overview
 - `PLAN.md`: 再設計の設計図とマイルストーン
+
+## 新しく入った土台
+
+- `scripts/software_work_events.py`
+  - 既存の workspace/session 記録を software-work event に正規化
+- `scripts/memory_index.py`
+  - `SQLite FTS5` ベースのローカル memory index
+- `scripts/rebuild_memory_index.py`
+  - event log と memory index の再構築コマンド
 
 ## セットアップ
 
@@ -80,6 +91,7 @@ python -m venv .venv
 .venv/bin/python scripts/fetch_demo_assets.py
 PYTHONPATH=scripts .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
+.venv/bin/python scripts/rebuild_memory_index.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

@@ -232,6 +232,10 @@ Validation:
 - sample sessions can be converted into normalized event records
 - records preserve enough detail for later retrieval and evaluation
 
+Current baseline:
+
+- `scripts/software_work_events.py` now provides the first event normalization layer over existing workspace/session entries
+
 ### M2. Local Memory Index
 
 Goal:
@@ -249,6 +253,10 @@ Validation:
 - rebuild index from files
 - basic retrieval latency is acceptable on local hardware
 - stale index behavior is explicit
+
+Current baseline:
+
+- `scripts/memory_index.py` and `scripts/rebuild_memory_index.py` now provide the first rebuildable local `SQLite FTS5` index over software-work events
 
 ### M3. Recall and Context Builder
 
