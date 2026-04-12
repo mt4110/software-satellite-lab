@@ -1,0 +1,82 @@
+{
+  "generated_at_utc": "2026-04-07T22:19:31+00:00",
+  "dry_run": false,
+  "network": {
+    "available": true,
+    "note": "reachable (status=200)"
+  },
+  "items": [
+    {
+      "id": "image-sample",
+      "kind": "image",
+      "relative_path": "assets/images/sample.png",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as PNG sample image"
+      ]
+    },
+    {
+      "id": "image-compare-sample",
+      "kind": "image",
+      "relative_path": "assets/images/sample_compare.png",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as PNG comparison image"
+      ]
+    },
+    {
+      "id": "text-image-sample",
+      "kind": "text-image",
+      "relative_path": "assets/images/sample_text.png",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as PNG OCR sample image"
+      ]
+    },
+    {
+      "id": "chart-ui-screenshot-sample",
+      "kind": "chart-or-ui-screenshot",
+      "relative_path": "assets/images/sample_chart_ui.png",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as PNG chart/UI screenshot"
+      ]
+    },
+    {
+      "id": "audio-sample",
+      "kind": "audio",
+      "relative_path": "assets/audio/sample_audio.wav",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as spoken mono 16 kHz WAV via say; spoken text: Gemma audio demo. Please transcribe this short validation clip."
+      ]
+    },
+    {
+      "id": "video-sample",
+      "kind": "video",
+      "relative_path": "assets/video/sample_video.mp4",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as MP4 via ffmpeg with visible motion across sampled frames"
+      ]
+    },
+    {
+      "id": "pdf-sample",
+      "kind": "pdf",
+      "relative_path": "assets/docs/sample.pdf",
+      "action": "generated",
+      "status": "ok",
+      "notes": [
+        "generated locally as sample PDF"
+      ]
+    }
+  ],
+  "assets_root": "assets",
+  "created_directories": []
+}

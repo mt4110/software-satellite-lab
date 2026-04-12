@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+
+# Local tooling
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.cache/
+cache/
+.codex/
+.cspellcache
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.out
+*.bak
+*.swp
+*.swo
+temp/
+tmp/
+outputs/
+scratch/
+private/
+
+# Large or generated artifacts
+artifacts/
+downloads/
+assets/**/*.bin
+assets/**/*.ckpt
+assets/**/*.onnx
+assets/**/*.pt
+assets/**/*.safetensors
+assets/**/*.tar
+assets/**/*.wav
+assets/**/*.mp4
+assets/**/*.pdf
+assets/**/*.png
+assets/**/*.jpg
+assets/**/*.jpeg
+assets/**/*.webp
+
+# Keep scaffold markers and manifests
+!assets/**/.gitkeep
+!assets/manifest.json

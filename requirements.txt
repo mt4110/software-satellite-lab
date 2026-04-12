@@ -1,0 +1,13 @@
+# Minimal Gemma 4 text + vision + audio runtime dependencies.
+# Gemma 4 vision and audio support require Python 3.10+ because
+# `transformers>=5.5.0` provides the multimodal runtime used by the
+# image/audio-capable Gemma 4 models.
+# Install with:
+#   python -m pip install -r requirements.txt
+transformers>=5.5.0,<6
+torch>=2.6.0
+torchvision>=0.21.0
+accelerate>=1.2.0
+numpy>=1.26.0
+Pillow>=10.0.0
+pypdfium2>=4.30.0

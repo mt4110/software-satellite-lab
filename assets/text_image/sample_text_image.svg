@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200">
+  <rect width="900" height="1200" fill="#f8f5ef" />
+  <rect x="80" y="90" width="740" height="1020" fill="#fffdf9" stroke="#d9d0c2" stroke-width="3" rx="16" />
+  <text x="120" y="170" fill="#2b2a28" font-size="34" font-family="Helvetica, Arial, sans-serif">Demo Text Image</text>
+  <text x="120" y="230" fill="#4b4843" font-size="22" font-family="Helvetica, Arial, sans-serif">Invoice #G4-001</text>
+  <text x="120" y="290" fill="#4b4843" font-size="22" font-family="Helvetica, Arial, sans-serif">Ship To: Gemma Lab</text>
+  <text x="120" y="350" fill="#4b4843" font-size="22" font-family="Helvetica, Arial, sans-serif">Line Item A ............ 2</text>
+  <text x="120" y="390" fill="#4b4843" font-size="22" font-family="Helvetica, Arial, sans-serif">Line Item B ............ 1</text>
+  <text x="120" y="470" fill="#4b4843" font-size="22" font-family="Helvetica, Arial, sans-serif">Notes:</text>
+  <text x="120" y="520" fill="#6b665d" font-size="20" font-family="Helvetica, Arial, sans-serif">This SVG stands in as a text-heavy image for OCR-style tests.</text>
+</svg>

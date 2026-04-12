@@ -1,0 +1,20 @@
+{
+  "version": "0.2",
+  "language": "en,ja",
+  "words": [
+    "Gemma",
+    "LoRA",
+    "SFT",
+    "cspell",
+    "multimodal",
+    "swappable"
+  ],
+  "ignorePaths": [
+    ".git",
+    ".venv",
+    ".venv-*/**",
+    "artifacts/**",
+    "assets/**",
+    "private/**"
+  ]
+}

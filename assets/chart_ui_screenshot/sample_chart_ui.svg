@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#f3f5f7" />
+  <rect x="48" y="40" width="1184" height="640" rx="28" fill="#ffffff" />
+  <rect x="88" y="90" width="220" height="560" rx="22" fill="#102a43" />
+  <rect x="360" y="92" width="820" height="72" rx="20" fill="#eef2f6" />
+  <rect x="392" y="118" width="260" height="20" rx="8" fill="#264653" />
+  <rect x="360" y="206" width="390" height="210" rx="22" fill="#f8fafc" stroke="#d8e1e8" />
+  <rect x="790" y="206" width="390" height="210" rx="22" fill="#f8fafc" stroke="#d8e1e8" />
+  <rect x="360" y="452" width="820" height="170" rx="22" fill="#f8fafc" stroke="#d8e1e8" />
+  <polyline points="400,360 470,330 540,348 610,290 680,250 710,260" fill="none" stroke="#2a9d8f" stroke-width="8" />
+  <rect x="840" y="290" width="54" height="86" rx="10" fill="#577590" />
+  <rect x="912" y="240" width="54" height="136" rx="10" fill="#43aa8b" />
+  <rect x="984" y="205" width="54" height="171" rx="10" fill="#f4a261" />
+  <rect x="1056" y="264" width="54" height="112" rx="10" fill="#e76f51" />
+  <text x="398" y="520" fill="#243b53" font-size="28" font-family="Helvetica, Arial, sans-serif">Chart / UI screenshot sample</text>
+</svg>
