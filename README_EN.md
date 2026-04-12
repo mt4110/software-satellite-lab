@@ -67,6 +67,12 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `README.md`: Japanese overview
 - `README_EN.md`: English overview
 - `PLAN.md`: redesign blueprint and milestones
+- `docs/recall_context_builder_design.md`: first implementation design for Recall / Context Builder
+
+## Git Rules
+
+- use `feat/<topic>` for feature branches
+- avoid tool-name prefixes in branch names, PR titles, and commit messages
 
 ## Newly Added Foundations
 

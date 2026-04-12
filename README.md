@@ -66,6 +66,12 @@
 - `README.md`: 日本語の概要
 - `README_EN.md`: English overview
 - `PLAN.md`: 再設計の設計図とマイルストーン
+- `docs/recall_context_builder_design.md`: 最初に取り掛かる Recall / Context Builder 設計
+
+## Git ルール
+
+- feature branch は `feat/<topic>` で統一する
+- branch 名、PR title、commit message にツール名 prefix を持ち込まない
 
 ## 新しく入った土台
 

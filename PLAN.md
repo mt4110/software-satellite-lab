@@ -279,6 +279,10 @@ Validation:
 - shadow runs on existing repo artifacts
 - retrieval quality measured with a small hand-labeled query set
 
+Current design note:
+
+- `docs/recall_context_builder_design.md` defines the first implementation shape for M3
+
 ### M4. Evaluation Loop
 
 Goal:
