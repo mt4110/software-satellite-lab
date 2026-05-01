@@ -32,14 +32,19 @@ def _resolve_root(root: Path | None = None) -> Path:
     return Path(root or repo_root()).resolve()
 
 
-def _events_by_id(*, root: Path, workspace_id: str) -> dict[str, dict[str, object]]:
+def _events_by_id_and_index_summary(
+    *,
+    root: Path,
+    workspace_id: str,
+) -> tuple[dict[str, dict[str, object]], dict[str, object]]:
     summary = rebuild_memory_index(root=root, workspace_id=workspace_id)
     event_log = read_event_log(Path(summary["event_log_path"]))
-    return {
+    events_by_id = {
         str(event.get("event_id")): event
         for event in event_log.get("events") or []
         if isinstance(event, dict) and event.get("event_id")
     }
+    return events_by_id, dict(summary)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,66 +162,79 @@ def main() -> int:
     curation_preview_latest_path: Path | None = None
     curation_preview_run_path: Path | None = None
     events_by_id: dict[str, dict[str, object]] | None = None
+    index_summary: dict[str, object] | None = None
 
-    if args.record_signal:
-        if args.signal_kind is None:
-            parser.error("--record-signal requires --signal-kind.")
-        source_event_id = args.source_event_id.strip()
-        if not source_event_id:
-            parser.error("--record-signal requires --source-event-id.")
-        events_by_id = events_by_id or _events_by_id(root=root, workspace_id=args.workspace_id)
-        source_event = events_by_id.get(source_event_id)
-        evidence = {
-            key: value
-            for key, value in {
-                "test_name": args.test_name.strip() or None,
-                "validation_command": args.test_command.strip() or None,
-                "failure_summary": args.failure_summary.strip() or None,
-                "review_id": args.review_id.strip() or None,
-                "review_url": args.review_url.strip() or None,
-                "resolution_summary": args.resolution_summary.strip() or None,
-            }.items()
-            if value is not None
-        }
-        recorded_signal = build_evaluation_signal(
-            workspace_id=args.workspace_id,
-            signal_kind=args.signal_kind,
-            source_event_id=source_event_id,
-            source_event=source_event,
-            target_event_id=args.target_event_id.strip() or None,
-            relation_kind=args.relation_kind,
-            rationale=args.rationale.strip() or None,
-            evidence=evidence,
-            origin="cli",
-        )
-        append_evaluation_signal(
-            evaluation_signal_log_path(workspace_id=args.workspace_id, root=root),
-            recorded_signal,
-            workspace_id=args.workspace_id,
-        )
+    try:
+        if args.record_signal:
+            if args.signal_kind is None:
+                parser.error("--record-signal requires --signal-kind.")
+            source_event_id = args.source_event_id.strip()
+            if not source_event_id:
+                parser.error("--record-signal requires --source-event-id.")
+            if events_by_id is None:
+                events_by_id, index_summary = _events_by_id_and_index_summary(
+                    root=root,
+                    workspace_id=args.workspace_id,
+                )
+            source_event = events_by_id.get(source_event_id)
+            evidence = {
+                key: value
+                for key, value in {
+                    "test_name": args.test_name.strip() or None,
+                    "validation_command": args.test_command.strip() or None,
+                    "failure_summary": args.failure_summary.strip() or None,
+                    "review_id": args.review_id.strip() or None,
+                    "review_url": args.review_url.strip() or None,
+                    "resolution_summary": args.resolution_summary.strip() or None,
+                }.items()
+                if value is not None
+            }
+            recorded_signal = build_evaluation_signal(
+                workspace_id=args.workspace_id,
+                signal_kind=args.signal_kind,
+                source_event_id=source_event_id,
+                source_event=source_event,
+                target_event_id=args.target_event_id.strip() or None,
+                relation_kind=args.relation_kind,
+                rationale=args.rationale.strip() or None,
+                evidence=evidence,
+                origin="cli",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(workspace_id=args.workspace_id, root=root),
+                recorded_signal,
+                workspace_id=args.workspace_id,
+            )
 
-    if args.record_comparison:
-        events_by_id = events_by_id or _events_by_id(root=root, workspace_id=args.workspace_id)
-        recorded_comparison = build_evaluation_comparison(
-            workspace_id=args.workspace_id,
-            candidate_event_ids=args.candidate_event_id,
-            winner_event_id=args.winner_event_id.strip() or None,
-            outcome=args.comparison_outcome,
-            task_label=args.comparison_label.strip() or None,
-            criteria=args.criterion,
-            rationale=args.rationale.strip() or None,
-            origin="cli",
-            events_by_id=events_by_id,
-        )
-        append_evaluation_comparison(
-            evaluation_comparison_log_path(workspace_id=args.workspace_id, root=root),
-            recorded_comparison,
-            workspace_id=args.workspace_id,
-        )
+        if args.record_comparison:
+            if events_by_id is None:
+                events_by_id, index_summary = _events_by_id_and_index_summary(
+                    root=root,
+                    workspace_id=args.workspace_id,
+                )
+            recorded_comparison = build_evaluation_comparison(
+                workspace_id=args.workspace_id,
+                candidate_event_ids=args.candidate_event_id,
+                winner_event_id=args.winner_event_id.strip() or None,
+                outcome=args.comparison_outcome,
+                task_label=args.comparison_label.strip() or None,
+                criteria=args.criterion,
+                rationale=args.rationale.strip() or None,
+                origin="cli",
+                events_by_id=events_by_id,
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(workspace_id=args.workspace_id, root=root),
+                recorded_comparison,
+                workspace_id=args.workspace_id,
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     snapshot, _latest_path, _run_path = record_evaluation_snapshot(
         root=root,
         workspace_id=args.workspace_id,
+        index_summary=index_summary,
     )
     if args.curation_preview:
         curation_preview, curation_preview_latest_path, curation_preview_run_path = record_curation_export_preview(

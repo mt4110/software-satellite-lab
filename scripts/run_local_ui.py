@@ -4031,7 +4031,6 @@ class LocalUiApp:
         self._recall_candidate_rows: dict[str, dict[str, Any]] = {}
         self._recall_selected_candidate_event_id: str | None = None
         self._recall_pinned_candidate_rows: dict[str, dict[str, Any]] = {}
-        self._evaluation_signal_rows: dict[str, dict[str, str]] = {}
 
         self.forensics_surface = tk.StringVar(value="chat")
         self.forensics_artifact_path = tk.StringVar(value="")

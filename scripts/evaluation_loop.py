@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable as IterableABC
 import copy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -111,6 +112,20 @@ def _clean_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _timestamp_sort_key(value: Any) -> tuple[bool, float, str]:
+    text = _clean_text(value)
+    if text is None:
+        return (False, 0.0, "")
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return (False, 0.0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (True, parsed.timestamp(), text)
 
 
 def _string_list(value: Any) -> list[str]:
@@ -709,7 +724,7 @@ def _latest_review_signal_kinds(signal_summaries: Iterable[Mapping[str, Any]]) -
     ]
     review_signals.sort(
         key=lambda signal: (
-            str(signal.get("recorded_at_utc") or ""),
+            _timestamp_sort_key(signal.get("recorded_at_utc")),
             str(signal.get("signal_id") or ""),
         ),
         reverse=True,
@@ -833,11 +848,25 @@ def _sort_signals(signals: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         [copy.deepcopy(dict(signal)) for signal in signals],
         key=lambda item: (
-            str(item.get("recorded_at_utc") or ""),
+            _timestamp_sort_key(item.get("recorded_at_utc")),
             str(item.get("signal_id") or ""),
         ),
         reverse=True,
     )
+
+
+def _deduplicate_signals_by_source_event(signals: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
+    for signal in _sort_signals(signals):
+        source_event_id = _clean_text(signal.get("source_event_id"))
+        if source_event_id is None:
+            continue
+        if source_event_id in seen_event_ids:
+            continue
+        seen_event_ids.add(source_event_id)
+        deduplicated.append(signal)
+    return deduplicated
 
 
 def build_evaluation_snapshot(
@@ -846,10 +875,15 @@ def build_evaluation_snapshot(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     signal_log_path: Path | None = None,
     comparison_log_path: Path | None = None,
+    index_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
-    index_summary = rebuild_memory_index(root=resolved_root, workspace_id=workspace_id)
-    event_log_path = Path(index_summary["event_log_path"])
+    resolved_index_summary = (
+        dict(index_summary)
+        if isinstance(index_summary, Mapping)
+        else rebuild_memory_index(root=resolved_root, workspace_id=workspace_id)
+    )
+    event_log_path = Path(resolved_index_summary["event_log_path"])
     event_log = read_event_log(event_log_path)
     events = [dict(event) for event in event_log.get("events") or [] if isinstance(event, Mapping)]
     events_by_id = {
@@ -890,11 +924,12 @@ def build_evaluation_snapshot(
     repaired_failure_event_ids = repair_targets & failure_event_ids
     follow_up_failure_event_ids = follow_up_targets & failure_event_ids
     addressed_failure_event_ids = repaired_failure_event_ids | follow_up_failure_event_ids
-    pending_failures = [
+    unresolved_failure_signals = [
         signal
         for signal in failure_signals
         if str(signal.get("source_event_id") or "") not in addressed_failure_event_ids
     ]
+    pending_failures = _deduplicate_signals_by_source_event(unresolved_failure_signals)
     curation_candidates = build_curation_candidates(
         signal_summaries=signal_summaries,
         comparison_summaries=comparison_summaries,
@@ -914,7 +949,7 @@ def build_evaluation_snapshot(
         "explicit_signal_count": len(explicit_signals),
         "paths": {
             "event_log_path": str(event_log_path),
-            "index_path": str(index_summary["index_path"]),
+            "index_path": str(resolved_index_summary["index_path"]),
             "signal_log_path": str(resolved_signal_log_path),
             "comparison_log_path": str(resolved_comparison_log_path),
         },
@@ -955,7 +990,7 @@ def build_evaluation_snapshot(
             "blocked_count": int(curation_state_counts.get("blocked", 0)),
             "candidates": curation_candidates,
         },
-        "index_summary": index_summary,
+        "index_summary": resolved_index_summary,
     }
 
 
@@ -965,6 +1000,7 @@ def record_evaluation_snapshot(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     signal_log_path: Path | None = None,
     comparison_log_path: Path | None = None,
+    index_summary: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     resolved_root = _resolve_root(root)
     snapshot = build_evaluation_snapshot(
@@ -972,6 +1008,7 @@ def record_evaluation_snapshot(
         workspace_id=workspace_id,
         signal_log_path=signal_log_path,
         comparison_log_path=comparison_log_path,
+        index_summary=index_summary,
     )
     latest_path = evaluation_snapshot_latest_path(workspace_id=workspace_id, root=resolved_root)
     run_path = evaluation_snapshot_run_path(workspace_id=workspace_id, root=resolved_root)

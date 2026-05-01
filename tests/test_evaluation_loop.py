@@ -5,7 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -211,6 +211,29 @@ class EvaluationLoopTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["counts"]["test_pass"], 1)
 
+    def test_pending_failures_are_counted_by_source_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            failure_event_id = "local-default:capability-matrix:matrix:row-2:vision"
+            explicit_failure = build_evaluation_signal(
+                signal_kind="test_fail",
+                source_event_id=failure_event_id,
+                rationale="Manual failure signal should not double-count the same event.",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                explicit_failure,
+                workspace_id="local-default",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+
+        self.assertEqual(snapshot["counts"]["test_fail"], 2)
+        self.assertEqual(snapshot["counts"]["pending_failures"], 1)
+        self.assertEqual(len(snapshot["pending_failures"]), 1)
+        self.assertEqual(snapshot["pending_failures"][0]["source_event_id"], failure_event_id)
+
     def test_review_resolution_signal_promotes_preview_without_exporting_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -318,7 +341,7 @@ class EvaluationLoopTests(unittest.TestCase):
             unresolved_signal = build_evaluation_signal(
                 signal_kind="review_unresolved",
                 source_event_id=event_id,
-                recorded_at_utc="2026-04-01T00:00:00+00:00",
+                recorded_at_utc="2026-04-01T00:30:00+01:00",
                 signal_id="local-default:eval:20260401T000000000000Z-p1:a",
                 rationale="Review is still open.",
             )
@@ -330,7 +353,7 @@ class EvaluationLoopTests(unittest.TestCase):
             resolved_signal = build_evaluation_signal(
                 signal_kind="review_resolved",
                 source_event_id=event_id,
-                recorded_at_utc="2026-04-01T00:01:00+00:00",
+                recorded_at_utc="2026-04-01T00:00:00Z",
                 signal_id="local-default:eval:20260401T000100000000Z-p1:b",
                 rationale="Review was resolved later.",
             )
@@ -429,6 +452,62 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(payload["recorded_signal"]["signal_kind"], "rejection")
         self.assertEqual(payload["snapshot"]["counts"]["rejection"], 1)
         self.assertEqual(payload["snapshot"]["counts"]["test_fail"], 1)
+
+    def test_cli_reuses_prebuilt_index_for_record_and_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--record-signal",
+                    "--signal-kind",
+                    "acceptance",
+                    "--source-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                    "--format",
+                    "json",
+                ],
+            ), patch(
+                "run_evaluation_loop.rebuild_memory_index",
+                wraps=rebuild_memory_index,
+            ) as cli_rebuild, patch(
+                "evaluation_loop.rebuild_memory_index",
+                wraps=rebuild_memory_index,
+            ) as snapshot_rebuild, redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["snapshot"]["counts"]["acceptance"], 1)
+        self.assertEqual(cli_rebuild.call_count, 1)
+        self.assertEqual(snapshot_rebuild.call_count, 0)
+
+    def test_cli_reports_invalid_record_arguments_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stderr = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--record-comparison",
+                    "--candidate-event-id",
+                    "one",
+                ],
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    evaluation_main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("Evaluation comparisons require at least two candidate event ids.", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_cli_records_review_resolution_and_curation_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
