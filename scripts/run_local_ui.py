@@ -11,7 +11,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 try:
     import tkinter as tk
@@ -50,12 +50,33 @@ from gemma_runtime import (
     repo_root,
     resolve_audio_model_selection,
     resolve_model_id,
+    timestamp_slug,
+    write_json,
     WarmupProgress,
     WARMUP_PHASE_ATTACH_MODEL,
     WARMUP_PHASE_LOAD_MODEL,
     WARMUP_PHASE_LOAD_PROCESSOR,
     WARMUP_PHASE_PRIME_TOKEN,
     WARMUP_PHASE_SESSION_READY,
+)
+from recall_context import DEFAULT_CONTEXT_BUDGET_CHARS, DEFAULT_LIMIT, TASK_KINDS, build_context_bundle
+from run_recall_demo import (
+    BASELINE_REQUEST_VARIANT,
+    MAX_REQUESTS as RECALL_MAX_REQUESTS,
+    build_bundle_report,
+    compare_evaluation_summaries,
+    dataset_bundle_path,
+    default_dataset_path,
+    evaluate_dataset,
+    ensure_recall_dataset,
+    format_evaluation_report,
+    format_miss_report,
+    load_latest_evaluation_summary,
+    read_bundle,
+    record_evaluation_summary,
+    request_catalog,
+    select_dataset_request,
+    sync_dataset_with_evaluation,
 )
 from text_service import (
     DEFAULT_PROMPTS as TEXT_DEFAULT_PROMPTS,
@@ -86,6 +107,7 @@ from vision_service import (
 )
 from workspace_state import WorkspaceSessionStore
 from workspace_state import (
+    DEFAULT_WORKSPACE_ID,
     SESSION_SURFACES,
     read_session_manifest,
     read_workspace_manifest,
@@ -124,6 +146,18 @@ PREWARM_DEFERRED_CANCEL_PHASES = {
     WARMUP_PHASE_LOAD_PROCESSOR,
     WARMUP_PHASE_LOAD_MODEL,
     WARMUP_PHASE_ATTACH_MODEL,
+}
+RECALL_MANUAL_LIMIT_MIN = 1
+RECALL_MANUAL_LIMIT_MAX = 32
+RECALL_MANUAL_CONTEXT_BUDGET_MIN = 1200
+RECALL_MANUAL_CONTEXT_BUDGET_MAX = 20000
+RECALL_TOP_SELECTED_COMPARE_LIMIT = 3
+RECALL_WINNER_CHIP_ORDER = ("winner_only", "shared", "source_only", "pending")
+RECALL_WINNER_CHIP_COLORS = {
+    "winner_only": {"background": "#E8F5EC", "foreground": "#166534"},
+    "shared": {"background": "#EDF2F7", "foreground": "#475569"},
+    "source_only": {"background": "#FFF4E5", "foreground": "#B45309"},
+    "pending": {"background": "#EEF2F7", "foreground": "#64748B"},
 }
 DEFAULT_ACTION_TIMEOUT_SECONDS = {
     "chat": 120.0,
@@ -518,6 +552,24 @@ def summarize_text_preview(text: str | None, *, limit: int = 180) -> str:
     return compact[: limit - 3] + "..."
 
 
+def coerce_ui_int(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        normalized = default
+    if normalized < minimum:
+        normalized = minimum
+    if maximum is not None and normalized > maximum:
+        normalized = maximum
+    return normalized
+
+
 def build_capability_badges(model_id: str | None) -> list[str]:
     resolved_model_id = (model_id or "").strip() or "selected model"
     return [
@@ -838,6 +890,32 @@ def apply_entry_compare_fields(
     change_var.set(field_map.get("Change", "n/a"))
 
 
+def apply_recall_compare_fields(
+    comparison: Mapping[str, Any] | None,
+    *,
+    before_var: tk.StringVar | Any,
+    after_var: tk.StringVar | Any,
+    change_var: tk.StringVar | Any,
+) -> None:
+    field_map = dict(build_recall_compare_fields(comparison))
+    before_var.set(field_map.get("Before", "n/a"))
+    after_var.set(field_map.get("After", "n/a"))
+    change_var.set(field_map.get("Change", "n/a"))
+
+
+def apply_recall_eval_compare_fields(
+    comparison: Mapping[str, Any] | None,
+    *,
+    previous_var: tk.StringVar | Any,
+    current_var: tk.StringVar | Any,
+    change_var: tk.StringVar | Any,
+) -> None:
+    field_map = dict(build_recall_eval_compare_fields(comparison))
+    previous_var.set(field_map.get("Previous", "n/a"))
+    current_var.set(field_map.get("Current", "n/a"))
+    change_var.set(field_map.get("Change", "n/a"))
+
+
 def build_artifact_overview_fields(snapshot: dict[str, Any]) -> list[tuple[str, str]]:
     artifact_path = snapshot.get("artifact_path")
     artifact_error = snapshot.get("artifact_error")
@@ -924,6 +1002,1424 @@ def build_entry_compare_fields(snapshot: dict[str, Any]) -> list[tuple[str, str]
         ("Selected", selected_text),
         ("Change", change_text),
     ]
+
+
+def _recall_compare_default_fields() -> list[tuple[str, str]]:
+    return [
+        ("Before", "Pin a candidate to keep the unpinned bundle here as the baseline."),
+        ("After", "Run recall with one or more pins to capture the pinned bundle here."),
+        (
+            "Change",
+            (
+                "Source rank, miss reason, selected candidates, budget, and source vs winners "
+                "differences appear here."
+            ),
+        ),
+    ]
+
+
+def _recall_bundle_source_evaluation(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    payload = bundle.get("source_evaluation")
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _recall_group_members_text(
+    row: Mapping[str, Any],
+    *,
+    count_key: str = "group_member_count",
+    labels_key: str = "group_member_labels",
+    limit: int = 3,
+) -> str:
+    group_member_count = coerce_ui_int(
+        row.get(count_key),
+        default=0,
+        minimum=0,
+    )
+    if group_member_count <= 1:
+        return ""
+    labels = [
+        summarize_text_preview(item, limit=44)
+        for item in (row.get(labels_key) or [])
+        if isinstance(item, str) and item.strip()
+    ][: min(limit, group_member_count)]
+    if not labels:
+        return str(group_member_count)
+    more = group_member_count - len(labels)
+    suffix = f"; +{more} more" if more > 0 else ""
+    return f"{group_member_count}: {'; '.join(labels)}{suffix}"
+
+
+def _recall_selected_candidate_descriptors(
+    bundle: Mapping[str, Any],
+) -> list[tuple[str, str]]:
+    descriptors: list[tuple[str, str]] = []
+    for index, item in enumerate(bundle.get("selected_candidates") or [], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        event_id = str(item.get("event_id") or f"candidate-{index}")
+        label = summarize_text_preview(
+            str(item.get("prompt_excerpt") or item.get("event_id") or "n/a"),
+            limit=56,
+        )
+        group_members = _recall_group_members_text(item, limit=2)
+        if group_members:
+            label = summarize_text_preview(f"{label} (group {group_members})", limit=96)
+        descriptors.append((event_id, label))
+    return descriptors
+
+
+def _recall_selected_candidates_text(bundle: Mapping[str, Any], *, limit: int = 3) -> str:
+    descriptors = _recall_selected_candidate_descriptors(bundle)
+    if not descriptors:
+        return "none"
+    labels = [label for _, label in descriptors[:limit]]
+    more = len(descriptors) - len(labels)
+    if more > 0:
+        labels.append(f"+{more} more")
+    return "; ".join(labels)
+
+
+def _recall_bundle_source_rank_text(bundle: Mapping[str, Any]) -> str:
+    source_evaluation = _recall_bundle_source_evaluation(bundle)
+    source_rank = source_evaluation.get("source_rank")
+    if source_rank is None:
+        return "n/a"
+    return str(int(source_rank or 0))
+
+
+def _recall_bundle_miss_reason_text(bundle: Mapping[str, Any]) -> str:
+    source_evaluation = _recall_bundle_source_evaluation(bundle)
+    if not source_evaluation:
+        return "n/a"
+    miss_reason = str(source_evaluation.get("miss_reason") or "").strip()
+    if miss_reason:
+        return miss_reason
+    if source_evaluation.get("source_selected"):
+        return "selected"
+    return "none"
+
+
+def _recall_bundle_budget_text(bundle: Mapping[str, Any]) -> str:
+    budget = dict(bundle.get("budget") or {})
+    context_budget_chars = int(budget.get("context_budget_chars") or 0)
+    used_chars = int(budget.get("used_chars") or 0)
+    effective_context_budget_chars = int(budget.get("effective_context_budget_chars") or 0)
+    summary = f"{used_chars} / {context_budget_chars} chars"
+    if effective_context_budget_chars and effective_context_budget_chars != context_budget_chars:
+        return f"{summary} (eff {effective_context_budget_chars})"
+    return summary
+
+
+def _recall_winner_labels(
+    source_evaluation: Mapping[str, Any],
+    *,
+    limit: int = 2,
+) -> list[str]:
+    winners: list[str] = []
+    for item in (source_evaluation.get("top_selected") or [])[:limit]:
+        if not isinstance(item, Mapping):
+            continue
+        winners.append(
+            summarize_text_preview(
+                str(item.get("prompt_excerpt") or item.get("event_id") or "n/a"),
+                limit=52,
+            )
+        )
+    return winners
+
+
+def _recall_top_selected_rows(row: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(row, Mapping):
+        return []
+    return [
+        dict(item)
+        for item in (row.get("top_selected") or [])
+        if isinstance(item, Mapping)
+    ]
+
+
+def _recall_primary_winner_row(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    winners = _recall_top_selected_rows(row)
+    return winners[0] if winners else None
+
+
+def recall_row_has_forensics_navigation(row: Mapping[str, Any] | None) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    artifact_path = str(row.get("artifact_path") or "").strip()
+    session_id = str(row.get("session_id") or "").strip()
+    event_id = str(row.get("event_id") or "").strip()
+    return bool(artifact_path or (session_id and event_id))
+
+
+def _parse_workspace_event_id(event_id: str | None) -> tuple[str, str, str] | None:
+    normalized = str(event_id or "").strip()
+    if not normalized:
+        return None
+    parts = [part.strip() for part in normalized.split(":", 2)]
+    if len(parts) != 3 or not all(parts):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+def _infer_surface_from_session_id(session_id: str | None) -> str | None:
+    normalized = str(session_id or "").strip().lower()
+    if not normalized:
+        return None
+    prefix = normalized.split("-", 1)[0]
+    return prefix if prefix in SESSION_SURFACES else None
+
+
+def resolve_recall_forensics_row(
+    row: Mapping[str, Any] | None,
+    *,
+    root: Path,
+    current_workspace_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+
+    event_id = str(row.get("event_id") or "").strip()
+    session_id = str(row.get("session_id") or "").strip()
+    session_surface = str(row.get("session_surface") or "").strip().lower()
+    artifact_path = str(row.get("artifact_path") or "").strip()
+    workspace_id = str(row.get("workspace_id") or "").strip()
+
+    parsed_event = _parse_workspace_event_id(event_id)
+    if parsed_event is not None:
+        parsed_workspace_id, parsed_session_id, parsed_entry_id = parsed_event
+        workspace_id = workspace_id or parsed_workspace_id
+        session_id = session_id or parsed_session_id
+        event_id = parsed_entry_id
+
+    if session_id and (not artifact_path or session_surface not in SESSION_SURFACES):
+        manifest_workspace_id = workspace_id or current_workspace_id or DEFAULT_WORKSPACE_ID
+        manifest_path = session_manifest_path(
+            session_id=session_id,
+            workspace_id=manifest_workspace_id,
+            root=root,
+        )
+        if manifest_path.exists():
+            try:
+                session_payload = read_session_manifest(manifest_path)
+            except Exception:
+                session_payload = None
+            if isinstance(session_payload, Mapping):
+                if session_surface not in SESSION_SURFACES:
+                    session_surface = str(session_payload.get("surface") or "").strip().lower()
+                if not artifact_path and event_id:
+                    selected_entry = next(
+                        (
+                            item
+                            for item in (session_payload.get("entries") or [])
+                            if isinstance(item, Mapping) and str(item.get("entry_id") or "").strip() == event_id
+                        ),
+                        None,
+                    )
+                    if isinstance(selected_entry, Mapping):
+                        artifact_ref = dict(selected_entry.get("artifact_ref") or {})
+                        artifact_path = str(artifact_ref.get("artifact_path") or "").strip()
+
+    if session_surface not in SESSION_SURFACES:
+        inferred_surface = _infer_surface_from_session_id(session_id)
+        if inferred_surface is not None:
+            session_surface = inferred_surface
+
+    if not artifact_path and not (session_id and event_id):
+        return None
+
+    return {
+        **dict(row),
+        "workspace_id": workspace_id or current_workspace_id,
+        "event_id": event_id,
+        "session_id": session_id,
+        "session_surface": session_surface if session_surface in SESSION_SURFACES else None,
+        "artifact_path": artifact_path,
+    }
+
+
+def build_recall_eval_source_navigation_row(
+    row: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(row, Mapping):
+        return None
+
+    source_event_id = str(row.get("source_event_id") or "").strip()
+    source_entry_id = str(row.get("source_entry_id") or "").strip()
+    source_session_id = str(row.get("source_session_id") or "").strip()
+    source_session_surface = str(row.get("source_session_surface") or "").strip().lower()
+    source_artifact_path = str(row.get("source_artifact_path") or "").strip()
+    source_workspace_id = str(row.get("source_workspace_id") or "").strip()
+    if not any((source_event_id, source_entry_id, source_session_id, source_artifact_path)):
+        return None
+
+    return {
+        "workspace_id": source_workspace_id,
+        "event_id": source_entry_id or source_event_id,
+        "session_id": source_session_id,
+        "session_surface": source_session_surface,
+        "artifact_path": source_artifact_path,
+        "prompt_excerpt": str(
+            row.get("source_prompt_excerpt") or row.get("query_text") or source_event_id or "source"
+        ).strip(),
+    }
+
+
+def _recall_bundle_source_vs_winners_text(bundle: Mapping[str, Any]) -> str:
+    source_evaluation = _recall_bundle_source_evaluation(bundle)
+    if not source_evaluation:
+        return "n/a"
+
+    source_label = summarize_text_preview(
+        str(
+            source_evaluation.get("source_prompt_excerpt")
+            or source_evaluation.get("source_event_id")
+            or "source"
+        ),
+        limit=52,
+    )
+    winner_labels = _recall_winner_labels(source_evaluation)
+    winners_text = "; ".join(winner_labels) if winner_labels else "none"
+    if source_evaluation.get("source_selected"):
+        if source_evaluation.get("source_selected_via_group"):
+            group_members = _recall_group_members_text(
+                source_evaluation,
+                count_key="source_group_member_count",
+                labels_key="source_group_member_labels",
+                limit=2,
+            )
+            grouped_by = str(source_evaluation.get("source_grouped_by") or "selected group")
+            group_text = group_members or str(
+                coerce_ui_int(
+                    source_evaluation.get("source_group_member_count"),
+                    default=1,
+                    minimum=1,
+                )
+            )
+            return f"{source_label} joined {grouped_by} ({group_text}) with {winners_text}"
+        return f"{source_label} made the bundle with {winners_text}"
+    if winner_labels:
+        return f"{source_label} lost to {winners_text}"
+    return f"{source_label} missed without recorded winners"
+
+
+def _recall_bundle_compare_text(
+    bundle: Mapping[str, Any] | None,
+    *,
+    empty: str,
+) -> str:
+    if bundle is None:
+        return empty
+    return "\n".join(
+        [
+            f"source rank={_recall_bundle_source_rank_text(bundle)}",
+            f"miss reason={_recall_bundle_miss_reason_text(bundle)}",
+            f"selected candidates={_recall_selected_candidates_text(bundle)}",
+            f"budget={_recall_bundle_budget_text(bundle)}",
+            f"source vs winners={_recall_bundle_source_vs_winners_text(bundle)}",
+        ]
+    )
+
+
+def _recall_change_line(label: str, before_value: str, after_value: str) -> str:
+    if before_value == after_value:
+        return f"{label}: unchanged ({before_value})"
+    return f"{label}: {before_value} -> {after_value}"
+
+
+def _recall_selected_candidates_change_text(
+    before_bundle: Mapping[str, Any],
+    after_bundle: Mapping[str, Any],
+) -> str:
+    before_descriptors = _recall_selected_candidate_descriptors(before_bundle)
+    after_descriptors = _recall_selected_candidate_descriptors(after_bundle)
+    before_event_ids = [event_id for event_id, _label in before_descriptors]
+    after_event_ids = [event_id for event_id, _label in after_descriptors]
+    if before_event_ids == after_event_ids:
+        return f"selected candidates: unchanged ({_recall_selected_candidates_text(before_bundle)})"
+
+    before_labels = {event_id: label for event_id, label in before_descriptors}
+    after_labels = {event_id: label for event_id, label in after_descriptors}
+    added = [after_labels[event_id] for event_id in after_event_ids if event_id not in before_labels]
+    removed = [before_labels[event_id] for event_id in before_event_ids if event_id not in after_labels]
+    parts: list[str] = []
+    if added:
+        parts.append(f"+ {'; '.join(added[:2])}")
+    if removed:
+        parts.append(f"- {'; '.join(removed[:2])}")
+    if parts:
+        return "selected candidates: " + " ".join(parts)
+    return (
+        "selected candidates: "
+        f"{_recall_selected_candidates_text(before_bundle)} -> {_recall_selected_candidates_text(after_bundle)}"
+    )
+
+
+def _recall_budget_change_text(
+    before_bundle: Mapping[str, Any],
+    after_bundle: Mapping[str, Any],
+) -> str:
+    before_budget = dict(before_bundle.get("budget") or {})
+    after_budget = dict(after_bundle.get("budget") or {})
+    before_text = _recall_bundle_budget_text(before_bundle)
+    after_text = _recall_bundle_budget_text(after_bundle)
+    if before_text == after_text:
+        return f"budget: unchanged ({before_text})"
+    delta_used_chars = int(after_budget.get("used_chars") or 0) - int(before_budget.get("used_chars") or 0)
+    delta_suffix = f" ({delta_used_chars:+d} used)" if delta_used_chars else ""
+    return f"budget: {before_text} -> {after_text}{delta_suffix}"
+
+
+def build_recall_compare_fields(
+    comparison: Mapping[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if not isinstance(comparison, Mapping):
+        return _recall_compare_default_fields()
+    before_bundle = comparison.get("before_bundle")
+    after_bundle = comparison.get("after_bundle")
+    if not isinstance(before_bundle, Mapping) or not isinstance(after_bundle, Mapping):
+        return _recall_compare_default_fields()
+
+    before_text = _recall_bundle_compare_text(
+        before_bundle,
+        empty="Unpinned bundle not available.",
+    )
+    after_text = _recall_bundle_compare_text(
+        after_bundle,
+        empty="Pinned bundle not available.",
+    )
+    change_text = "\n".join(
+        [
+            _recall_change_line(
+                "source rank",
+                _recall_bundle_source_rank_text(before_bundle),
+                _recall_bundle_source_rank_text(after_bundle),
+            ),
+            _recall_change_line(
+                "miss reason",
+                _recall_bundle_miss_reason_text(before_bundle),
+                _recall_bundle_miss_reason_text(after_bundle),
+            ),
+            _recall_selected_candidates_change_text(before_bundle, after_bundle),
+            _recall_budget_change_text(before_bundle, after_bundle),
+            _recall_change_line(
+                "source vs winners",
+                _recall_bundle_source_vs_winners_text(before_bundle),
+                _recall_bundle_source_vs_winners_text(after_bundle),
+            ),
+        ]
+    )
+    return [
+        ("Before", before_text),
+        ("After", after_text),
+        ("Change", change_text),
+    ]
+
+
+def _recall_eval_compare_default_fields() -> list[tuple[str, str]]:
+    return [
+        ("Previous", "Run evaluation once to capture the previous hit-quality snapshot."),
+        ("Current", "Run evaluation to score source-hit recovery across the prepared requests."),
+        ("Change", "Hit, miss, hit-rate, variant, and miss-reason changes appear here."),
+    ]
+
+
+def _recall_eval_variant_summary_text(summary: Mapping[str, Any], *, limit: int = 2) -> str:
+    variants = dict(summary.get("variants") or {})
+    if not variants:
+        return "n/a"
+    labels: list[str] = []
+    for variant, payload in list(sorted(variants.items()))[:limit]:
+        if not isinstance(payload, Mapping):
+            continue
+        labels.append(
+            f"{variant} {int(payload.get('source_hits') or 0)}/{int(payload.get('request_count') or 0)} "
+            f"({float(payload.get('hit_rate') or 0.0):.3f})"
+        )
+    if not labels:
+        return "n/a"
+    more = len(variants) - len(labels)
+    if more > 0:
+        labels.append(f"+{more} more")
+    return "; ".join(labels)
+
+
+def _recall_eval_miss_reason_summary_text(summary: Mapping[str, Any], *, limit: int = 2) -> str:
+    miss_reason_counts = dict(summary.get("miss_reason_counts") or {})
+    if not miss_reason_counts:
+        return "none"
+    labels = [f"{miss_reason} {count}" for miss_reason, count in list(sorted(miss_reason_counts.items()))[:limit]]
+    more = len(miss_reason_counts) - len(labels)
+    if more > 0:
+        labels.append(f"+{more} more")
+    return "; ".join(labels)
+
+
+def _recall_eval_summary_text(
+    summary: Mapping[str, Any] | None,
+    *,
+    empty: str,
+) -> str:
+    if not isinstance(summary, Mapping):
+        return empty
+    return "\n".join(
+        [
+            f"requests={int(summary.get('request_count') or 0)}",
+            f"source hits={int(summary.get('source_hits') or 0)}",
+            f"source misses={int(summary.get('source_misses') or 0)}",
+            f"hit rate={float(summary.get('hit_rate') or 0.0):.3f}",
+            f"variants={_recall_eval_variant_summary_text(summary)}",
+            f"miss reasons={_recall_eval_miss_reason_summary_text(summary)}",
+        ]
+    )
+
+
+def _recall_eval_change_line(label: str, before_value: int | float, after_value: int | float, *, digits: int = 0) -> str:
+    if digits:
+        before_text = f"{float(before_value):.{digits}f}"
+        after_text = f"{float(after_value):.{digits}f}"
+        delta = float(after_value) - float(before_value)
+        delta_text = f"{delta:+.{digits}f}"
+    else:
+        before_text = str(int(before_value))
+        after_text = str(int(after_value))
+        delta_text = f"{int(after_value) - int(before_value):+d}"
+    if before_text == after_text:
+        return f"{label}: unchanged ({before_text})"
+    return f"{label}: {before_text} -> {after_text} ({delta_text})"
+
+
+def _recall_eval_variant_change_text(
+    before_summary: Mapping[str, Any],
+    after_summary: Mapping[str, Any],
+) -> str:
+    delta = dict(compare_evaluation_summaries(before_summary, after_summary).get("variants") or {})
+    if not delta:
+        return f"variants: unchanged ({_recall_eval_variant_summary_text(after_summary)})"
+    parts: list[str] = []
+    for variant, payload in list(sorted(delta.items()))[:2]:
+        if not isinstance(payload, Mapping):
+            continue
+        parts.append(
+            f"{variant} hits {int(payload.get('source_hits_delta') or 0):+d}, "
+            f"rate {float(payload.get('hit_rate_delta') or 0.0):+.3f}"
+        )
+    return "variants: " + "; ".join(parts) if parts else "variants: unchanged"
+
+
+def _recall_eval_miss_reason_change_text(
+    before_summary: Mapping[str, Any],
+    after_summary: Mapping[str, Any],
+) -> str:
+    delta = dict(compare_evaluation_summaries(before_summary, after_summary).get("miss_reason_counts") or {})
+    if not delta:
+        return f"miss reasons: unchanged ({_recall_eval_miss_reason_summary_text(after_summary)})"
+    labels = [f"{miss_reason} {count:+d}" for miss_reason, count in list(sorted(delta.items()))[:3]]
+    return "miss reasons: " + "; ".join(labels)
+
+
+def build_recall_eval_compare_fields(
+    comparison: Mapping[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if not isinstance(comparison, Mapping):
+        return _recall_eval_compare_default_fields()
+    before_summary = comparison.get("before_summary")
+    after_summary = comparison.get("after_summary")
+    if not isinstance(after_summary, Mapping):
+        return _recall_eval_compare_default_fields()
+
+    previous_text = _recall_eval_summary_text(
+        before_summary if isinstance(before_summary, Mapping) else None,
+        empty="No earlier evaluation snapshot is available yet.",
+    )
+    current_text = _recall_eval_summary_text(
+        after_summary,
+        empty="Evaluation summary unavailable.",
+    )
+    if not isinstance(before_summary, Mapping):
+        return [
+            ("Previous", previous_text),
+            ("Current", current_text),
+            ("Change", "Run evaluation again after a ranking tweak to see the delta here."),
+        ]
+
+    change_text = "\n".join(
+        [
+            _recall_eval_change_line(
+                "source hits",
+                int(before_summary.get("source_hits") or 0),
+                int(after_summary.get("source_hits") or 0),
+            ),
+            _recall_eval_change_line(
+                "source misses",
+                int(before_summary.get("source_misses") or 0),
+                int(after_summary.get("source_misses") or 0),
+            ),
+            _recall_eval_change_line(
+                "hit rate",
+                float(before_summary.get("hit_rate") or 0.0),
+                float(after_summary.get("hit_rate") or 0.0),
+                digits=3,
+            ),
+            _recall_eval_variant_change_text(before_summary, after_summary),
+            _recall_eval_miss_reason_change_text(before_summary, after_summary),
+        ]
+    )
+    return [
+        ("Previous", previous_text),
+        ("Current", current_text),
+        ("Change", change_text),
+    ]
+
+
+def build_recall_eval_state(
+    summary: Mapping[str, Any] | None,
+    *,
+    dataset_path: str | None,
+    root: Path,
+    empty: str = "Run evaluation to score source-hit recovery across the prepared requests.",
+) -> str:
+    if not isinstance(summary, Mapping):
+        return empty
+    dataset_display = summarize_workspace_path(dataset_path, root=root) if dataset_path else "n/a"
+    evaluated_at_utc = str(summary.get("evaluated_at_utc") or "").strip()
+    state = (
+        f"{int(summary.get('request_count') or 0)} requests from {dataset_display}. "
+        f"hit rate {float(summary.get('hit_rate') or 0.0):.3f}, "
+        f"misses {int(summary.get('source_misses') or 0)}."
+    )
+    if evaluated_at_utc:
+        state += f" Evaluated {evaluated_at_utc}."
+    return state
+
+
+def build_recall_eval_miss_summary(
+    row: Mapping[str, Any] | None,
+    *,
+    empty: str = "Select an evaluation miss to sync it with the prepared request list.",
+) -> str:
+    if row is None:
+        return empty
+    header = (
+        f"request {row.get('index') or 'n/a'}: {row.get('task_kind') or 'n/a'}  "
+        f"reason={row.get('miss_reason') or 'unknown'}  "
+        f"rank={row.get('source_rank') if row.get('source_rank') is not None else 'n/a'}"
+    )
+    request_variant = str(row.get("request_variant") or "").strip()
+    if request_variant and request_variant != BASELINE_REQUEST_VARIANT:
+        header += f"  variant={request_variant}"
+    lines = [
+        header,
+        f"query={summarize_text_preview(str(row.get('query_text') or ''), limit=132)}",
+    ]
+    source_prompt_excerpt = str(row.get("source_prompt_excerpt") or "").strip()
+    if source_prompt_excerpt:
+        lines.append(f"source={summarize_text_preview(source_prompt_excerpt, limit=132)}")
+    winner_labels = _recall_eval_winner_labels(row)
+    if winner_labels != "n/a":
+        lines.append(f"winners={winner_labels}")
+    return "\n".join(lines)
+
+
+def _recall_first_file_hint(row: Mapping[str, Any] | None) -> str:
+    if not isinstance(row, Mapping):
+        return ""
+    file_hints = [str(item).strip() for item in (row.get("file_hints") or []) if str(item).strip()]
+    return file_hints[0] if file_hints else ""
+
+
+def _recall_eval_winner_labels(row: Mapping[str, Any], *, limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT) -> str:
+    winners = [
+        item
+        for item in (row.get("top_selected") or [])
+        if isinstance(item, Mapping)
+    ]
+    if not winners:
+        return "n/a"
+    labels = [
+        f"#{index} "
+        + summarize_text_preview(
+            str(item.get("prompt_excerpt") or item.get("event_id") or "n/a"),
+            limit=52,
+        )
+        for index, item in enumerate(winners[:limit], start=1)
+    ]
+    more = len(winners) - len(labels)
+    if more > 0:
+        labels.append(f"+{more} more")
+    return "; ".join(labels)
+
+
+def _recall_reason_display(reason: str) -> str:
+    return str(reason or "").strip().replace("_", " ").replace("-", " ")
+
+
+def _recall_reason_list(value: Any, *, limit: int = 4) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in value or []:
+        label = _recall_reason_display(str(item))
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+@dataclass(frozen=True)
+class RecallReasonCompare:
+    primary_reasons: tuple[str, ...] = ()
+    secondary_reasons: tuple[str, ...] = ()
+    primary_only: tuple[str, ...] = ()
+    shared: tuple[str, ...] = ()
+    secondary_only: tuple[str, ...] = ()
+
+
+def _recall_reason_compare(
+    primary_reasons: tuple[str, ...],
+    secondary_reasons: tuple[str, ...],
+) -> RecallReasonCompare:
+    primary_lookup = set(primary_reasons)
+    secondary_lookup = set(secondary_reasons)
+    return RecallReasonCompare(
+        primary_reasons=primary_reasons,
+        secondary_reasons=secondary_reasons,
+        primary_only=tuple(reason for reason in primary_reasons if reason not in secondary_lookup),
+        shared=tuple(reason for reason in primary_reasons if reason in secondary_lookup),
+        secondary_only=tuple(reason for reason in secondary_reasons if reason not in primary_lookup),
+    )
+
+
+@dataclass(frozen=True)
+class RecallWinnerReasonDelta:
+    winner_reasons: tuple[str, ...] = ()
+    source_reasons: tuple[str, ...] = ()
+    winner_only: tuple[str, ...] = ()
+    shared: tuple[str, ...] = ()
+    source_only: tuple[str, ...] = ()
+
+
+def _recall_winner_reason_delta(
+    miss_row: Mapping[str, Any] | None,
+    winner_row: Mapping[str, Any] | None,
+) -> RecallWinnerReasonDelta:
+    if not isinstance(winner_row, Mapping):
+        return RecallWinnerReasonDelta()
+
+    winner_reasons = tuple(_recall_reason_list(winner_row.get("reasons"), limit=6))
+    source_reasons = tuple(_recall_reason_list((miss_row or {}).get("source_reasons"), limit=6))
+    compare = _recall_reason_compare(winner_reasons, source_reasons)
+    return RecallWinnerReasonDelta(
+        winner_reasons=compare.primary_reasons,
+        source_reasons=compare.secondary_reasons,
+        winner_only=compare.primary_only,
+        shared=compare.shared,
+        source_only=compare.secondary_only,
+    )
+
+
+def _recall_top_selected_reason_list(
+    row: Mapping[str, Any] | None,
+    *,
+    winner_limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT,
+    reason_limit: int = 6,
+) -> tuple[str, ...]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for winner_row in _recall_top_selected_rows(row)[:winner_limit]:
+        for label in _recall_reason_list(winner_row.get("reasons"), limit=reason_limit):
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+            if len(labels) >= reason_limit:
+                return tuple(labels)
+    return tuple(labels)
+
+
+def _recall_source_reason_compare(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT,
+) -> RecallReasonCompare:
+    source_reasons = tuple(_recall_reason_list((miss_row or {}).get("source_reasons"), limit=6))
+    winner_reasons = _recall_top_selected_reason_list(miss_row, winner_limit=limit, reason_limit=6)
+    return _recall_reason_compare(source_reasons, winner_reasons)
+
+
+def _format_recall_reason_chip(prefix: str, reasons: tuple[str, ...], *, limit: int = 2) -> str:
+    if not reasons:
+        return ""
+    return f"{prefix} {summarize_text_preview(', '.join(reasons[:limit]), limit=36)}"
+
+
+def build_recall_eval_winner_chip_texts(
+    miss_row: Mapping[str, Any] | None,
+    winner_row: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    chip_texts = {key: "" for key in RECALL_WINNER_CHIP_ORDER}
+    delta = _recall_winner_reason_delta(miss_row, winner_row)
+    if not delta.winner_reasons:
+        if isinstance(winner_row, Mapping):
+            chip_texts["pending"] = "Reasons pending"
+        return chip_texts
+
+    chip_texts["winner_only"] = _format_recall_reason_chip("+", delta.winner_only)
+    chip_texts["shared"] = _format_recall_reason_chip("=", delta.shared)
+    chip_texts["source_only"] = _format_recall_reason_chip("-", delta.source_only)
+    return chip_texts
+
+
+def build_recall_eval_source_chip_texts(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT,
+) -> dict[str, str]:
+    chip_texts = {key: "" for key in RECALL_WINNER_CHIP_ORDER}
+    if not isinstance(miss_row, Mapping):
+        return chip_texts
+
+    compare = _recall_source_reason_compare(miss_row, limit=limit)
+    if not compare.primary_reasons:
+        chip_texts["pending"] = "Reasons pending"
+        return chip_texts
+
+    chip_texts["winner_only"] = _format_recall_reason_chip("+", compare.primary_only)
+    chip_texts["shared"] = _format_recall_reason_chip("=", compare.shared)
+    chip_texts["source_only"] = _format_recall_reason_chip("-", compare.secondary_only)
+    return chip_texts
+
+
+def build_recall_eval_winner_why_text(
+    miss_row: Mapping[str, Any] | None,
+    winner_row: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(winner_row, Mapping):
+        return "Why it won appears after winner details are recorded."
+
+    delta = _recall_winner_reason_delta(miss_row, winner_row)
+    if not delta.winner_reasons:
+        return "Winner reasons pending in this snapshot."
+
+    if delta.winner_only:
+        return f"beat source on {summarize_text_preview(', '.join(delta.winner_only[:2]), limit=86)}"
+    if delta.shared:
+        return f"matched source on {summarize_text_preview(', '.join(delta.shared[:2]), limit=86)}"
+
+    block_title = str(winner_row.get("block_title") or "").strip()
+    if block_title:
+        return f"winner landed in {block_title.lower()}."
+    return "Winner reasons pending in this snapshot."
+
+
+def build_recall_eval_source_why_text(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT,
+) -> str:
+    if not isinstance(miss_row, Mapping):
+        return "Source compare appears after you select a miss."
+
+    compare = _recall_source_reason_compare(miss_row, limit=limit)
+    if not compare.primary_reasons:
+        return "Source reasons pending in this snapshot."
+
+    winners = _recall_top_selected_rows(miss_row)[:limit]
+    if winners and not compare.secondary_reasons:
+        return "Source signals are ready while winner reasons are pending."
+    if not winners:
+        return "Source signals are ready before winners are recorded."
+    if compare.secondary_only:
+        return f"lost to winners on {summarize_text_preview(', '.join(compare.secondary_only[:2]), limit=86)}"
+    if compare.primary_only:
+        return f"kept source-only signals on {summarize_text_preview(', '.join(compare.primary_only[:2]), limit=86)}"
+    if compare.shared:
+        return f"matched winners on {summarize_text_preview(', '.join(compare.shared[:2]), limit=86)}"
+    return "Source reasons pending in this snapshot."
+
+
+def build_recall_eval_source_card_text(
+    row: Mapping[str, Any] | None,
+    *,
+    empty: str = "Source compare appears here when you select an evaluation miss.",
+) -> str:
+    if not isinstance(row, Mapping):
+        return empty
+    return "\n".join(
+        [
+            build_recall_eval_source_summary_text(row, empty=empty),
+            build_recall_eval_source_why_text(row),
+        ]
+    )
+
+
+def build_recall_eval_source_summary_text(
+    row: Mapping[str, Any] | None,
+    *,
+    empty: str = "Source compare appears here when you select an evaluation miss.",
+) -> str:
+    if not isinstance(row, Mapping):
+        return empty
+
+    prompt_excerpt = summarize_text_preview(
+        str(row.get("source_prompt_excerpt") or row.get("query_text") or row.get("source_event_id") or "source"),
+        limit=88,
+    )
+    metadata: list[str] = []
+    source_block_title = str(row.get("source_block_title") or "").strip()
+    if source_block_title:
+        metadata.append(f"block={source_block_title}")
+    source_rank = row.get("source_rank")
+    if source_rank is not None:
+        metadata.append(f"rank={source_rank}")
+    miss_reason = str(row.get("miss_reason") or "").strip()
+    if miss_reason:
+        metadata.append(f"reason={_recall_reason_display(miss_reason)}")
+
+    lines = [prompt_excerpt]
+    if metadata:
+        lines.append("  ".join(metadata[:3]))
+    return "\n".join(lines)
+
+
+def build_recall_eval_source_rerun_text(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    request_row: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(miss_row, Mapping) or not isinstance(request_row, Mapping):
+        return ""
+
+    suggestion = build_recall_miss_suggested_manual_config(
+        miss_row,
+        request_row=request_row,
+    )
+    if not suggestion.get("apply_ready"):
+        return "Rerun waits until the source is back in the index."
+
+    change_labels: list[str] = []
+    base_basis = str(request_row.get("request_basis") or "").strip() or "n/a"
+    suggested_basis = str(suggestion.get("request_basis") or "").strip() or "n/a"
+    if suggested_basis != base_basis:
+        change_labels.append(f"basis {base_basis} -> {suggested_basis}")
+
+    base_limit = coerce_ui_int(
+        request_row.get("limit"),
+        default=DEFAULT_LIMIT,
+        minimum=RECALL_MANUAL_LIMIT_MIN,
+        maximum=RECALL_MANUAL_LIMIT_MAX,
+    )
+    suggested_limit = coerce_ui_int(
+        suggestion.get("limit"),
+        default=DEFAULT_LIMIT,
+        minimum=RECALL_MANUAL_LIMIT_MIN,
+        maximum=RECALL_MANUAL_LIMIT_MAX,
+    )
+    if suggested_limit != base_limit:
+        change_labels.append(f"limit {base_limit} -> {suggested_limit}")
+
+    base_context_budget_chars = coerce_ui_int(
+        request_row.get("context_budget_chars"),
+        default=DEFAULT_CONTEXT_BUDGET_CHARS,
+        minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+        maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+    )
+    suggested_context_budget_chars = coerce_ui_int(
+        suggestion.get("context_budget_chars"),
+        default=DEFAULT_CONTEXT_BUDGET_CHARS,
+        minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+        maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+    )
+    if suggested_context_budget_chars != base_context_budget_chars:
+        change_labels.append(f"budget {base_context_budget_chars} -> {suggested_context_budget_chars}")
+
+    if not change_labels:
+        return "Rerun is ready with the suggested manual settings."
+    return "Rerun suggested tweak: " + "; ".join(change_labels[:2]) + "."
+
+
+def build_recall_eval_source_rerun_result_text(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    bundle: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(miss_row, Mapping) or not isinstance(bundle, Mapping):
+        return ""
+
+    source_evaluation = _recall_bundle_source_evaluation(bundle)
+    if not source_evaluation:
+        return ""
+
+    before_reason = _recall_reason_display(str(miss_row.get("miss_reason") or "").strip())
+    before_rank_raw = miss_row.get("source_rank")
+    try:
+        before_rank_text = str(int(before_rank_raw)) if before_rank_raw is not None else ""
+    except (TypeError, ValueError):
+        before_rank_text = ""
+
+    if before_rank_text and before_reason:
+        before_text = f"source was rank {before_rank_text} and {before_reason}"
+    elif before_rank_text:
+        before_text = f"source was rank {before_rank_text}"
+    elif before_reason:
+        before_text = f"source was {before_reason}"
+    else:
+        before_text = "source was still under review"
+
+    after_rank_text = _recall_bundle_source_rank_text(bundle)
+    after_reason_raw = _recall_bundle_miss_reason_text(bundle)
+    after_reason = _recall_reason_display(after_reason_raw)
+    after_selected = bool(source_evaluation.get("source_selected"))
+
+    if after_selected:
+        if after_rank_text != "n/a":
+            after_text = f"source made the bundle at rank {after_rank_text}"
+        else:
+            after_text = "source made the bundle"
+    elif after_reason == "source missing from index":
+        after_text = "source is still missing from the index"
+    else:
+        same_rank = bool(before_rank_text and after_rank_text == before_rank_text)
+        same_reason = bool(before_reason and after_reason == before_reason)
+        if after_rank_text != "n/a" and after_reason and after_reason not in {"none", "selected"}:
+            rank_phrase = f"{'still ' if same_rank else ''}rank {after_rank_text}"
+            reason_phrase = f"{'still ' if same_reason and not same_rank else ''}{after_reason}"
+            after_text = f"source is {rank_phrase} and {reason_phrase}"
+        elif after_rank_text != "n/a":
+            after_text = f"source is {'still ' if same_rank else 'now '}rank {after_rank_text}"
+        elif after_reason and after_reason not in {"none", "selected"}:
+            after_text = f"source is {'still ' if same_reason else ''}{after_reason}"
+        else:
+            after_text = "source state is not recorded in this rerun"
+
+    return f"Before: {before_text}. After rerun: {after_text}."
+
+
+def build_recall_eval_source_action_hint(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    request_row: Mapping[str, Any] | None,
+    source_row: Mapping[str, Any] | None,
+    empty: str = "Select a miss to open the source, copy it into manual recall, or rerun the suggested tweak.",
+) -> str:
+    if not isinstance(miss_row, Mapping):
+        return empty
+
+    messages: list[str] = []
+    if source_row is None:
+        messages.append("Open needs a fresh source snapshot.")
+    if not isinstance(request_row, Mapping):
+        messages.append("Copy and rerun need the matching prepared request. Refresh real data first.")
+        return " ".join(messages) if messages else empty
+
+    rerun_text = build_recall_eval_source_rerun_text(
+        miss_row,
+        request_row=request_row,
+    )
+    if rerun_text:
+        messages.append(rerun_text)
+    return " ".join(messages) if messages else empty
+
+
+def build_recall_eval_winner_compare_state(
+    row: Mapping[str, Any] | None,
+    *,
+    limit: int = RECALL_TOP_SELECTED_COMPARE_LIMIT,
+) -> str:
+    winners = _recall_top_selected_rows(row)
+    if not winners:
+        return "Top winners appear here when the selected miss records winning candidates."
+    shown = min(len(winners), limit)
+    message = f"Showing {shown} winner slot(s) for side-by-side compare."
+    if len(winners) > shown:
+        message += f" {len(winners) - shown} more recorded."
+    message += " Open any card in History / Forensics."
+    return message
+
+
+def build_recall_eval_winner_card_text(
+    miss_row: Mapping[str, Any] | None,
+    row: Mapping[str, Any] | None,
+    *,
+    rank: int,
+    root: Path,
+    empty: str | None = None,
+) -> str:
+    if row is None:
+        return empty or f"No winner recorded at #{rank}."
+
+    prompt_excerpt = summarize_text_preview(
+        str(row.get("prompt_excerpt") or row.get("event_id") or "n/a"),
+        limit=88,
+    )
+    metadata: list[str] = []
+    block_title = str(row.get("block_title") or "").strip()
+    if block_title:
+        metadata.append(f"block={block_title}")
+    session_surface = str(row.get("session_surface") or "").strip()
+    if session_surface:
+        metadata.append(f"surface={session_surface}")
+    score = row.get("score")
+    if score is not None:
+        metadata.append(f"score={score}")
+    group_member_count = coerce_ui_int(
+        row.get("group_member_count"),
+        default=0,
+        minimum=0,
+    )
+    if group_member_count > 1:
+        metadata.append(f"group={group_member_count}")
+
+    lines = [prompt_excerpt]
+    if metadata:
+        lines.append("  ".join(metadata[:3]))
+    lines.append(build_recall_eval_winner_why_text(miss_row, row))
+    artifact_path = str(row.get("artifact_path") or "").strip()
+    if artifact_path:
+        lines.append(f"artifact={summarize_workspace_path(artifact_path, root=root)}")
+    return "\n".join(lines)
+
+
+def build_recall_miss_suggested_manual_config(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    request_row: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected_row = request_row if isinstance(request_row, Mapping) else {}
+    miss_payload = miss_row if isinstance(miss_row, Mapping) else {}
+
+    task_kind = str(selected_row.get("task_kind") or miss_payload.get("task_kind") or "proposal").strip() or "proposal"
+    query_text = str(selected_row.get("query_text") or miss_payload.get("query_text") or "").strip()
+    request_basis = str(selected_row.get("request_basis") or "").strip()
+    file_hint = _recall_first_file_hint(selected_row)
+    base_limit = coerce_ui_int(
+        selected_row.get("limit"),
+        default=DEFAULT_LIMIT,
+        minimum=RECALL_MANUAL_LIMIT_MIN,
+        maximum=RECALL_MANUAL_LIMIT_MAX,
+    )
+    base_context_budget_chars = coerce_ui_int(
+        selected_row.get("context_budget_chars"),
+        default=DEFAULT_CONTEXT_BUDGET_CHARS,
+        minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+        maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+    )
+    source_rank_raw = miss_payload.get("source_rank")
+    try:
+        source_rank = int(source_rank_raw) if source_rank_raw is not None else None
+    except (TypeError, ValueError):
+        source_rank = None
+    miss_reason = str(miss_payload.get("miss_reason") or "").strip() or "unknown"
+    request_variant = str(selected_row.get("request_variant") or miss_payload.get("request_variant") or "").strip()
+    source_reasons = [
+        str(item).strip()
+        for item in (miss_payload.get("source_reasons") or selected_row.get("source_reasons") or [])
+        if str(item).strip()
+    ]
+    winner_labels = _recall_eval_winner_labels(miss_payload)
+
+    limit = base_limit
+    context_budget_chars = base_context_budget_chars
+    apply_ready = True
+    diagnosis_title = "Ranking miss"
+    diagnosis = "The source came back, but stronger-looking candidates still pushed it out."
+    actions: list[str] = [
+        "Add or tighten the file hint if this request points at one file.",
+        "Raise the limit a little and compare the new winners.",
+        "Pin the source once to confirm whether the current winners really deserve the slot.",
+    ]
+
+    if miss_reason == "ranked_out_by_limit":
+        diagnosis_title = "Top-N cutoff"
+        diagnosis = "The source was retrieved, but it sat below the current selection limit."
+        limit = min(RECALL_MANUAL_LIMIT_MAX, max(base_limit + 4, (source_rank or base_limit) + 1))
+        actions = [
+            f"Raise limit to {limit} so rank {source_rank or 'n/a'} can enter the bundle.",
+            "Keep the query stable and check whether the new candidates are genuinely useful.",
+            "Add a file hint if one path should dominate this recall.",
+        ]
+    elif miss_reason == "dropped_by_context_budget":
+        diagnosis_title = "Context budget squeeze"
+        diagnosis = "The source ranked well enough, but the assembled context ran out of room before it fit."
+        context_budget_chars = min(
+            RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+            max(base_context_budget_chars + 2000, int(base_context_budget_chars * 1.5)),
+        )
+        actions = [
+            f"Raise context budget to {context_budget_chars} chars.",
+            "Tighten the query or add a file hint to reduce competing context.",
+            "Use pin compare once to see whether the source deserves the extra room.",
+        ]
+    elif miss_reason == "dropped_by_block_budget":
+        diagnosis_title = "Block budget squeeze"
+        diagnosis = "The source landed in a crowded block, and that block spent its local budget first."
+        context_budget_chars = min(
+            RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+            max(base_context_budget_chars + 1500, int(base_context_budget_chars * 1.35)),
+        )
+        limit = min(RECALL_MANUAL_LIMIT_MAX, max(base_limit, 10))
+        actions = [
+            f"Raise context budget to {context_budget_chars} chars.",
+            "Make the query or file hint more exact so the source moves into a stronger block.",
+            "Pin the source candidate once to compare it against the block winners.",
+        ]
+    elif miss_reason == "not_retrieved":
+        diagnosis_title = "Retrieval miss"
+        diagnosis = "The source never surfaced from retrieval, so this is a search-language or index-coverage problem first."
+        limit = min(RECALL_MANUAL_LIMIT_MAX, max(base_limit + 4, 12))
+        if not request_basis:
+            request_basis = "prompt-or-artifact"
+        actions = [
+            "Refresh real data if this source is recent.",
+            "Use the most literal query phrase you can, close to the source prompt or pass definition.",
+            "Add the exact file hint or artifact path when one file should dominate.",
+        ]
+    elif miss_reason == "source_missing_from_index":
+        diagnosis_title = "Index gap"
+        diagnosis = "The source is missing from the current memory index, so ranking tweaks alone will not help yet."
+        apply_ready = False
+        actions = [
+            "Refresh real data or rebuild the memory index first.",
+            "Check that the source artifact still exists on disk.",
+            "Rerun evaluation after the source reappears in the index.",
+        ]
+    elif miss_reason == "not_selected":
+        diagnosis_title = "Selection loss"
+        diagnosis = "The source was retrieved, but other candidates still looked stronger during selection."
+        limit = min(RECALL_MANUAL_LIMIT_MAX, max(base_limit + 2, 10))
+
+    diagnosis_lines = [diagnosis_title, diagnosis]
+    if source_reasons:
+        diagnosis_lines.append(f"source signals={', '.join(source_reasons[:4])}")
+    if winner_labels != "n/a":
+        diagnosis_lines.append(f"current winners={winner_labels}")
+
+    suggested_manual_lines = [
+        f"task={task_kind}",
+        f"basis={request_basis or 'n/a'}",
+        f"file_hint={file_hint or 'n/a'}",
+        f"limit={limit}",
+        f"budget={context_budget_chars}",
+    ]
+    if not apply_ready:
+        suggested_manual_lines.append("manual tweak=wait until the source is back in the index")
+
+    return {
+        "task_kind": task_kind,
+        "query_text": query_text,
+        "request_basis": request_basis,
+        "file_hint": file_hint,
+        "limit": limit,
+        "context_budget_chars": context_budget_chars,
+        "apply_ready": apply_ready,
+        "diagnosis_text": "\n".join(diagnosis_lines),
+        "actions_text": "\n".join(f"{index}. {action}" for index, action in enumerate(actions[:3], start=1)),
+        "suggested_manual_text": "\n".join(suggested_manual_lines),
+    }
+
+
+def apply_recall_miss_suggested_manual_config(
+    suggestion: Mapping[str, Any],
+    *,
+    task_kind_var: tk.StringVar | Any,
+    query_var: tk.StringVar | Any,
+    request_basis_var: tk.StringVar | Any,
+    file_hint_var: tk.StringVar | Any,
+    limit_var: tk.Variable | Any,
+    context_budget_var: tk.Variable | Any,
+) -> None:
+    task_kind_var.set(str(suggestion.get("task_kind") or "proposal"))
+    query_var.set(str(suggestion.get("query_text") or ""))
+    request_basis_var.set(str(suggestion.get("request_basis") or ""))
+    file_hint_var.set(str(suggestion.get("file_hint") or ""))
+    limit_var.set(
+        coerce_ui_int(
+            suggestion.get("limit"),
+            default=DEFAULT_LIMIT,
+            minimum=RECALL_MANUAL_LIMIT_MIN,
+            maximum=RECALL_MANUAL_LIMIT_MAX,
+        )
+    )
+    context_budget_var.set(
+        coerce_ui_int(
+            suggestion.get("context_budget_chars"),
+            default=DEFAULT_CONTEXT_BUDGET_CHARS,
+            minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+            maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+        )
+    )
+
+
+def apply_recall_diagnostic_guide_fields(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    request_row: Mapping[str, Any] | None,
+    diagnosis_var: tk.StringVar | Any,
+    action_var: tk.StringVar | Any,
+    manual_var: tk.StringVar | Any,
+) -> None:
+    fields = dict(build_recall_diagnostic_guide_fields(miss_row, request_row=request_row))
+    diagnosis_var.set(fields.get("Diagnosis", "n/a"))
+    action_var.set(fields.get("Next", "n/a"))
+    manual_var.set(fields.get("Suggested Manual", "n/a"))
+
+
+def build_recall_diagnostic_guide_fields(
+    miss_row: Mapping[str, Any] | None,
+    *,
+    request_row: Mapping[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if not isinstance(miss_row, Mapping):
+        return [
+            ("Diagnosis", "Select an evaluation miss to see why it likely fell out of recall."),
+            ("Next", "The next actions for retrieval, ranking, or budget tuning appear here."),
+            ("Suggested Manual", "A suggested manual recall setup appears here."),
+        ]
+
+    suggestion = build_recall_miss_suggested_manual_config(miss_row, request_row=request_row)
+    return [
+        ("Diagnosis", str(suggestion.get("diagnosis_text") or "n/a")),
+        ("Next", str(suggestion.get("actions_text") or "n/a")),
+        ("Suggested Manual", str(suggestion.get("suggested_manual_text") or "n/a")),
+    ]
+
+
+def build_recall_request_summary(
+    row: Mapping[str, Any] | None,
+    *,
+    empty: str = "Choose a prepared request or write a manual query.",
+) -> str:
+    if row is None:
+        return empty
+
+    query_text = summarize_text_preview(str(row.get("query_text") or ""), limit=132)
+    file_hints = list(row.get("file_hints") or [])
+    file_hint = file_hints[0] if file_hints else "n/a"
+    header = (
+        f"request {row.get('index')}: {row.get('task_kind') or 'n/a'}  "
+        f"hit={'yes' if row.get('source_hit') else 'no'}  "
+        f"status={row.get('source_status') or '-'}\n"
+        f"query={query_text}\n"
+        f"file_hint={file_hint}"
+    )
+    details: list[str] = []
+    request_variant = str(row.get("request_variant") or "").strip()
+    if request_variant and request_variant != BASELINE_REQUEST_VARIANT:
+        details.append(f"variant={request_variant}")
+    request_basis = str(row.get("request_basis") or "").strip()
+    if request_basis:
+        details.append(f"basis={request_basis}")
+    if row.get("limit") is not None or row.get("context_budget_chars") is not None:
+        details.append(
+            f"limit={coerce_ui_int(row.get('limit'), default=DEFAULT_LIMIT, minimum=RECALL_MANUAL_LIMIT_MIN, maximum=RECALL_MANUAL_LIMIT_MAX)} "
+            f"budget={coerce_ui_int(row.get('context_budget_chars'), default=DEFAULT_CONTEXT_BUDGET_CHARS, minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN, maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX)}"
+        )
+    miss_reason = str(row.get("miss_reason") or "").strip()
+    if miss_reason:
+        detail_line = [f"miss_reason={miss_reason}"]
+        if row.get("source_rank") is not None:
+            detail_line.append(f"source_rank={row.get('source_rank')}")
+        source_block_title = str(row.get("source_block_title") or "").strip()
+        if source_block_title:
+            detail_line.append(f"source_block={source_block_title}")
+        details.append(" ".join(detail_line))
+    source_reasons = [
+        str(item).strip()
+        for item in (row.get("source_reasons") or [])
+        if str(item).strip()
+    ]
+    if source_reasons:
+        details.append(f"source_reasons={', '.join(source_reasons[:4])}")
+    winner_labels = _recall_eval_winner_labels(row)
+    if winner_labels != "n/a":
+        details.append(f"won_by={winner_labels}")
+    if not details:
+        return header
+    return header + "\n" + "\n".join(details)
+
+
+def build_recall_candidate_summary(
+    row: Mapping[str, Any] | None,
+    *,
+    root: Path,
+    empty: str = "Select a recall candidate to open it in History / Forensics.",
+) -> str:
+    if row is None:
+        return empty
+
+    prompt_excerpt = summarize_text_preview(str(row.get("prompt_excerpt") or ""), limit=132)
+    artifact_display = summarize_workspace_path(
+        str(row.get("artifact_path") or ""),
+        root=root,
+    )
+    reasons = [
+        str(item).strip()
+        for item in (row.get("reasons") or [])
+        if str(item).strip()
+    ]
+    header = (
+        f"candidate {row.get('event_id') or 'n/a'}: {row.get('block_title') or 'n/a'}  "
+        f"surface={row.get('session_surface') or 'n/a'}  "
+        f"status={row.get('status') or '-'}  "
+        f"pinned={'yes' if row.get('pinned') else 'no'}"
+    )
+    group_member_count = coerce_ui_int(
+        row.get("group_member_count"),
+        default=0,
+        minimum=0,
+    )
+    if group_member_count > 1:
+        header += f"  group={group_member_count}"
+    lines = [
+        header,
+        f"prompt={prompt_excerpt}\n"
+        f"artifact={artifact_display}",
+    ]
+    group_members = _recall_group_members_text(row)
+    if group_members:
+        lines.append(f"group_members={group_members}")
+    if reasons:
+        lines.append(f"reasons={', '.join(reasons[:4])}")
+    return "\n".join(lines)
+
+
+def build_recall_pins_summary(
+    rows: Mapping[str, Mapping[str, Any]] | list[Mapping[str, Any]] | None,
+    *,
+    empty: str = "Pinned candidates: none. Pin a candidate to carry it into the next recall run.",
+) -> str:
+    if isinstance(rows, Mapping):
+        items = [dict(item) for item in rows.values() if isinstance(item, Mapping)]
+    else:
+        items = [dict(item) for item in (rows or []) if isinstance(item, Mapping)]
+    if not items:
+        return empty
+
+    labels = [
+        summarize_text_preview(
+            str(item.get("prompt_excerpt") or item.get("event_id") or "n/a"),
+            limit=56,
+        )
+        for item in items[:3]
+    ]
+    more = len(items) - len(labels)
+    suffix = f"; +{more} more" if more > 0 else ""
+    return f"Pinned for the next recall run ({len(items)}): {'; '.join(labels)}{suffix}"
+
+
+def recall_bundle_has_candidate_navigation(bundle: Mapping[str, Any]) -> bool:
+    selected = [item for item in (bundle.get("selected_candidates") or []) if isinstance(item, Mapping)]
+    if not selected:
+        return True
+    for item in selected:
+        artifact_path = str(item.get("artifact_path") or "").strip()
+        session_surface = str(item.get("session_surface") or "").strip().lower()
+        if artifact_path or session_surface in SESSION_SURFACES:
+            continue
+        return False
+    return True
 
 
 class LocalUiController:
@@ -1528,6 +3024,251 @@ class LocalUiController:
     def capability_badges_text(self) -> str:
         return build_capability_badges_text(self.selected_model_id)
 
+    def collect_recall_requests(
+        self,
+        *,
+        refresh_dataset: bool = False,
+        max_requests: int = RECALL_MAX_REQUESTS,
+    ) -> dict[str, Any]:
+        dataset, dataset_path = ensure_recall_dataset(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            refresh=refresh_dataset,
+            max_requests=max_requests,
+        )
+        requests = request_catalog(dataset)
+        request_entries = [
+            dict(item)
+            for item in (dataset.get("requests") or [])
+            if isinstance(item, Mapping)
+        ]
+        return {
+            "selected_model_id": self.selected_model_id,
+            "dataset_path": str(dataset_path),
+            "generated_at_utc": dataset.get("generated_at_utc"),
+            "request_count": len(requests),
+            "requests": requests,
+            "request_entries": request_entries,
+            "index_summary": dict(dataset.get("index_summary") or {}),
+        }
+
+    def evaluate_recall_dataset(
+        self,
+        *,
+        refresh_dataset: bool = False,
+        max_requests: int = RECALL_MAX_REQUESTS,
+    ) -> dict[str, Any]:
+        dataset, dataset_path = ensure_recall_dataset(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            refresh=refresh_dataset,
+            max_requests=max_requests,
+        )
+        previous_summary, _latest_evaluation_path = load_latest_evaluation_summary(
+            workspace_id=self.workspace_store.workspace_id,
+            root=self.workspace_store.root,
+        )
+        summary = evaluate_dataset(
+            dataset,
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+        )
+        synced_dataset = sync_dataset_with_evaluation(dataset, summary)
+        write_json(dataset_path, synced_dataset)
+        recorded_summary, latest_path, run_path = record_evaluation_summary(
+            summary,
+            workspace_id=self.workspace_store.workspace_id,
+            root=self.workspace_store.root,
+            dataset_path=dataset_path,
+            previous_summary=previous_summary,
+        )
+        requests = request_catalog(synced_dataset)
+        request_entries = [
+            dict(item)
+            for item in (synced_dataset.get("requests") or [])
+            if isinstance(item, Mapping)
+        ]
+        report_blocks = [
+            format_evaluation_report(recorded_summary, dataset_path=dataset_path),
+            format_miss_report(recorded_summary, dataset_path=dataset_path),
+        ]
+        return {
+            "selected_model_id": self.selected_model_id,
+            "dataset_path": str(dataset_path),
+            "evaluation_latest_path": str(latest_path),
+            "evaluation_run_path": str(run_path),
+            "request_count": len(requests),
+            "requests": requests,
+            "request_entries": request_entries,
+            "summary": recorded_summary,
+            "previous_summary": previous_summary,
+            "comparison": {
+                "before_summary": previous_summary,
+                "after_summary": recorded_summary,
+            },
+            "misses": [
+                dict(item)
+                for item in (recorded_summary.get("misses") or [])
+                if isinstance(item, Mapping)
+            ],
+            "report": "\n\n".join(block for block in report_blocks if block),
+        }
+
+    def _ui_recall_bundle_path(self, *, task_kind: str) -> Path:
+        return (
+            self.workspace_store.root
+            / "artifacts"
+            / "recall_data"
+            / self.workspace_store.workspace_id
+            / "ui"
+            / f"{timestamp_slug()}-{task_kind}.json"
+        )
+
+    def build_recall_bundle(
+        self,
+        *,
+        request_index: int | None = None,
+        task_kind: str | None = None,
+        query_text: str = "",
+        request_basis: str | None = None,
+        file_hint: str | None = None,
+        pinned_event_ids: list[str] | tuple[str, ...] | None = None,
+        limit: int = DEFAULT_LIMIT,
+        context_budget_chars: int = DEFAULT_CONTEXT_BUDGET_CHARS,
+        refresh_dataset: bool = False,
+        max_requests: int = RECALL_MAX_REQUESTS,
+    ) -> dict[str, Any]:
+        bundle_path: Path | None = None
+        dataset_path: Path | None = None
+        request_label: str | None = None
+        pin_compare: dict[str, Any] | None = None
+        request_payload: dict[str, Any]
+        normalized_pinned_event_ids: list[str] = []
+        seen_pins: set[str] = set()
+        for event_id in pinned_event_ids or []:
+            normalized = str(event_id or "").strip()
+            if not normalized or normalized in seen_pins:
+                continue
+            seen_pins.add(normalized)
+            normalized_pinned_event_ids.append(normalized)
+
+        if request_index is not None:
+            dataset, dataset_path = ensure_recall_dataset(
+                root=self.workspace_store.root,
+                workspace_id=self.workspace_store.workspace_id,
+                refresh=refresh_dataset,
+                max_requests=max_requests,
+            )
+            request_payload, entry = select_dataset_request(dataset, request_index=request_index)
+            request_label = (
+                f"dataset[{request_index}] "
+                f"{str(entry.get('task_kind') or '').strip()} "
+                f"hit={'yes' if entry.get('source_hit') else 'no'}"
+            )
+            if normalized_pinned_event_ids:
+                before_bundle_path = dataset_bundle_path(entry)
+                before_bundle: dict[str, Any]
+                if before_bundle_path is not None and before_bundle_path.exists():
+                    before_bundle = read_bundle(before_bundle_path)
+                    if not recall_bundle_has_candidate_navigation(before_bundle):
+                        before_bundle = build_context_bundle(
+                            request_payload,
+                            root=self.workspace_store.root,
+                            workspace_id=self.workspace_store.workspace_id,
+                        )
+                        write_json(before_bundle_path, dict(before_bundle))
+                else:
+                    before_bundle = build_context_bundle(
+                        request_payload,
+                        root=self.workspace_store.root,
+                        workspace_id=self.workspace_store.workspace_id,
+                    )
+                    if before_bundle_path is not None:
+                        write_json(before_bundle_path, dict(before_bundle))
+                request_payload["pinned_event_ids"] = list(normalized_pinned_event_ids)
+                request_label += f" pins={len(normalized_pinned_event_ids)}"
+                bundle = build_context_bundle(
+                    request_payload,
+                    root=self.workspace_store.root,
+                    workspace_id=self.workspace_store.workspace_id,
+                )
+                bundle_path = self._ui_recall_bundle_path(task_kind=str(request_payload.get("task_kind") or "proposal"))
+                write_json(bundle_path, dict(bundle))
+                pin_compare = {
+                    "before_bundle": before_bundle,
+                    "after_bundle": bundle,
+                }
+            else:
+                bundle_path = dataset_bundle_path(entry)
+                if bundle_path is not None and bundle_path.exists():
+                    bundle = read_bundle(bundle_path)
+                    if not recall_bundle_has_candidate_navigation(bundle):
+                        bundle = build_context_bundle(
+                            request_payload,
+                            root=self.workspace_store.root,
+                            workspace_id=self.workspace_store.workspace_id,
+                        )
+                        write_json(bundle_path, dict(bundle))
+                else:
+                    bundle = build_context_bundle(
+                        request_payload,
+                        root=self.workspace_store.root,
+                        workspace_id=self.workspace_store.workspace_id,
+                    )
+                    if bundle_path is not None:
+                        write_json(bundle_path, dict(bundle))
+        else:
+            normalized_task_kind = (task_kind or "").strip().lower()
+            normalized_query = query_text.strip()
+            normalized_request_basis = (request_basis or "").strip() or None
+            normalized_file_hint = (file_hint or "").strip()
+            if normalized_task_kind not in TASK_KINDS:
+                raise ValueError("Choose a valid recall task kind before running a manual query.")
+            if not normalized_query:
+                raise ValueError("Manual recall needs a non-empty query.")
+            request_payload = {
+                "task_kind": normalized_task_kind,
+                "query_text": normalized_query,
+                "file_hints": [normalized_file_hint] if normalized_file_hint else [],
+                "limit": limit,
+                "context_budget_chars": context_budget_chars,
+            }
+            if normalized_request_basis:
+                request_payload["request_basis"] = normalized_request_basis
+            if normalized_pinned_event_ids:
+                before_bundle = build_context_bundle(
+                    request_payload,
+                    root=self.workspace_store.root,
+                    workspace_id=self.workspace_store.workspace_id,
+                )
+                request_payload["pinned_event_ids"] = list(normalized_pinned_event_ids)
+            bundle = build_context_bundle(
+                request_payload,
+                root=self.workspace_store.root,
+                workspace_id=self.workspace_store.workspace_id,
+            )
+            bundle_path = self._ui_recall_bundle_path(task_kind=normalized_task_kind)
+            write_json(bundle_path, dict(bundle))
+            request_label = "manual"
+            if normalized_pinned_event_ids:
+                pin_compare = {
+                    "before_bundle": before_bundle,
+                    "after_bundle": bundle,
+                }
+
+        report = build_bundle_report(bundle, request_label=request_label)
+        return {
+            "selected_model_id": self.selected_model_id,
+            "request_label": request_label,
+            "request_payload": request_payload,
+            "bundle": bundle,
+            "pin_compare": pin_compare,
+            "report": report,
+            "pinned_event_ids": list(normalized_pinned_event_ids),
+            "bundle_path": str(bundle_path) if bundle_path is not None else None,
+            "dataset_path": str(dataset_path) if dataset_path is not None else None,
+        }
+
     def latest_artifact_path(self, *, surface: str) -> str | None:
         session = self.workspace_store.active_session(surface)
         artifact_ref = latest_artifact_ref(session)
@@ -1936,6 +3677,106 @@ class LocalUiApp:
         self.thinking_system = tk.StringVar(value="")
         self.debug_enabled = tk.BooleanVar(value=False)
 
+        self.recall_task_kind = tk.StringVar(value="proposal")
+        self.recall_query = tk.StringVar(value="")
+        self.recall_request_basis = tk.StringVar(value="")
+        self.recall_file_hint = tk.StringVar(value="")
+        self.recall_limit = tk.IntVar(value=DEFAULT_LIMIT)
+        self.recall_context_budget_chars = tk.IntVar(value=DEFAULT_CONTEXT_BUDGET_CHARS)
+        self.recall_requests_state = tk.StringVar(
+            value="Prepared recall requests are not loaded yet. Refresh real data when you want a current set."
+        )
+        self.recall_eval_state = tk.StringVar(
+            value="Run evaluation to score source-hit recovery across the prepared requests."
+        )
+        self.recall_eval_misses_state = tk.StringVar(
+            value="Evaluation misses appear here after the first evaluation run."
+        )
+        self.recall_eval_miss_selection_state = tk.StringVar(
+            value="Select an evaluation miss to sync it with the prepared request list."
+        )
+        self.recall_eval_previous_var = tk.StringVar(
+            value="Run evaluation once to capture the previous hit-quality snapshot."
+        )
+        self.recall_eval_current_var = tk.StringVar(
+            value="Run evaluation to score source-hit recovery across the prepared requests."
+        )
+        self.recall_eval_change_var = tk.StringVar(
+            value="Hit, miss, hit-rate, variant, and miss-reason changes appear here."
+        )
+        self.recall_diagnostic_diagnosis_var = tk.StringVar(
+            value="Select an evaluation miss to see why it likely fell out of recall."
+        )
+        self.recall_diagnostic_action_var = tk.StringVar(
+            value="The next actions for retrieval, ranking, or budget tuning appear here."
+        )
+        self.recall_diagnostic_manual_var = tk.StringVar(
+            value="A suggested manual recall setup appears here."
+        )
+        self.recall_eval_winner_compare_state = tk.StringVar(
+            value="Top winners appear here when the selected miss records winning candidates."
+        )
+        self.recall_eval_source_var = tk.StringVar(
+            value="Source compare appears here when you select an evaluation miss."
+        )
+        self.recall_eval_source_why_var = tk.StringVar(
+            value="Why appears here after you select an evaluation miss."
+        )
+        self.recall_eval_source_action_hint_var = tk.StringVar(
+            value="Select a miss to open the source, copy it into manual recall, or rerun the suggested tweak."
+        )
+        self.recall_eval_winner_vars = [
+            tk.StringVar(value=f"No winner recorded at #{index}.")
+            for index in range(1, RECALL_TOP_SELECTED_COMPARE_LIMIT + 1)
+        ]
+        self.recall_eval_source_chip_vars = {
+            key: tk.StringVar(value="")
+            for key in RECALL_WINNER_CHIP_ORDER
+        }
+        self.recall_eval_winner_chip_vars = [
+            {key: tk.StringVar(value="") for key in RECALL_WINNER_CHIP_ORDER}
+            for _ in range(RECALL_TOP_SELECTED_COMPARE_LIMIT)
+        ]
+        self.recall_selection_state = tk.StringVar(
+            value="Choose a prepared request or copy one into the manual form."
+        )
+        self.recall_candidates_state = tk.StringVar(
+            value="Run recall to load selected candidates for jump-to-history."
+        )
+        self.recall_candidate_selection_state = tk.StringVar(
+            value="Select a recall candidate to open it in History / Forensics."
+        )
+        self.recall_pins_state = tk.StringVar(
+            value="Pinned candidates: none. Pin a candidate to carry it into the next recall run."
+        )
+        self.recall_compare_before_var = tk.StringVar(
+            value="Pin a candidate to keep the unpinned bundle here as the baseline."
+        )
+        self.recall_compare_after_var = tk.StringVar(
+            value="Run recall with one or more pins to capture the pinned bundle here."
+        )
+        self.recall_compare_change_var = tk.StringVar(
+            value=(
+                "Source rank, miss reason, selected candidates, budget, and source vs winners "
+                "differences appear here."
+            )
+        )
+        self._recall_request_rows: dict[str, dict[str, Any]] = {}
+        self._recall_selected_request_index: int | None = None
+        self._recall_eval_miss_rows: dict[str, dict[str, Any]] = {}
+        self._recall_selected_eval_miss_index: int | None = None
+        self._recall_eval_source_row: dict[str, Any] | None = None
+        self._recall_eval_winner_rows: list[dict[str, Any] | None] = [None] * RECALL_TOP_SELECTED_COMPARE_LIMIT
+        self.recall_eval_source_chip_labels: dict[str, Any] = {}
+        self.recall_eval_source_button: Any | None = None
+        self.recall_eval_source_copy_button: Any | None = None
+        self.recall_eval_source_rerun_button: Any | None = None
+        self.recall_eval_winner_chip_labels: list[dict[str, Any]] = [{} for _ in range(RECALL_TOP_SELECTED_COMPARE_LIMIT)]
+        self.recall_eval_winner_buttons: list[Any] = []
+        self._recall_candidate_rows: dict[str, dict[str, Any]] = {}
+        self._recall_selected_candidate_event_id: str | None = None
+        self._recall_pinned_candidate_rows: dict[str, dict[str, Any]] = {}
+
         self.forensics_surface = tk.StringVar(value="chat")
         self.forensics_artifact_path = tk.StringVar(value="")
         self.forensics_show_raw = tk.BooleanVar(value=False)
@@ -1973,6 +3814,11 @@ class LocalUiApp:
         self._update_audio_attachment_summary()
         self.refresh_diagnostics()
         self.refresh_forensics()
+        if default_dataset_path(
+            workspace_id=self.controller.workspace_store.workspace_id,
+            root=self.controller.workspace_store.root,
+        ).exists():
+            self.refresh_recall_requests(announce=False)
         self.root.after(JOB_POLL_INTERVAL_MS, self._poll_job_events)
         self.root.after(STATUS_ANIMATION_INTERVAL_MS, self._tick_status_animation)
         self._schedule_startup_prewarm(reason="launch")
@@ -2041,16 +3887,17 @@ class LocalUiApp:
         self.cancel_button.grid(row=1, column=2, sticky="ew", padx=(8, 0))
         ttk.Label(controls, textvariable=self.audio_model_var, style="Subtitle.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        notebook = ttk.Notebook(outer, style="Lab.TNotebook")
-        notebook.grid(row=1, column=0, sticky="nsew")
+        self.notebook = ttk.Notebook(outer, style="Lab.TNotebook")
+        self.notebook.grid(row=1, column=0, sticky="nsew")
         outer.grid_rowconfigure(1, weight=1)
 
-        self.chat_tab = self._build_chat_tab(notebook)
-        self.vision_tab = self._build_vision_tab(notebook)
-        self.audio_tab = self._build_audio_tab(notebook)
-        self.thinking_tab = self._build_thinking_tab(notebook)
-        self.forensics_tab = self._build_forensics_tab(notebook)
-        self.diagnostics_tab = self._build_diagnostics_tab(notebook)
+        self.chat_tab = self._build_chat_tab(self.notebook)
+        self.vision_tab = self._build_vision_tab(self.notebook)
+        self.audio_tab = self._build_audio_tab(self.notebook)
+        self.thinking_tab = self._build_thinking_tab(self.notebook)
+        self.recall_tab = self._build_recall_tab(self.notebook)
+        self.forensics_tab = self._build_forensics_tab(self.notebook)
+        self.diagnostics_tab = self._build_diagnostics_tab(self.notebook)
 
         footer = ttk.Frame(outer, style="Lab.TFrame", padding=(0, 12, 0, 0))
         footer.grid(row=2, column=0, sticky="ew")
@@ -2221,6 +4068,349 @@ class LocalUiApp:
         self.debug_output = self._readonly_text(frame, row=9, columnspan=2, height=10)
         self._on_thinking_mode_change()
         self._toggle_debug_panel()
+        return frame
+
+    def _build_recall_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
+        frame = ttk.Frame(notebook, style="Card.TFrame", padding=18)
+        frame.grid_columnconfigure(1, weight=1)
+        frame.grid_rowconfigure(25, weight=1)
+        notebook.add(frame, text="Recall")
+
+        ttk.Label(frame, text="Prepared Requests", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            frame,
+            text=(
+                "Prepared requests come from local workspace history plus capability artifacts. "
+                "Refresh when you want the latest real-data set."
+            ),
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(
+            frame,
+            textvariable=self.recall_requests_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        controls = ttk.Frame(frame, style="Card.TFrame")
+        controls.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.refresh_recall_button = ttk.Button(
+            controls,
+            text="Refresh Real Data",
+            style="Lab.TButton",
+            command=lambda: self.refresh_recall_requests(refresh_dataset=True),
+        )
+        self.refresh_recall_button.grid(row=0, column=0, sticky="w")
+        self.run_selected_recall_button = ttk.Button(
+            controls,
+            text="Run Selected Request",
+            style="Lab.TButton",
+            command=self.run_selected_recall_request,
+        )
+        self.run_selected_recall_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.copy_recall_request_button = ttk.Button(
+            controls,
+            text="Copy Into Manual",
+            style="Lab.TButton",
+            command=self.copy_selected_recall_request,
+        )
+        self.copy_recall_request_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        self.recall_requests_tree = self._build_treeview(
+            frame,
+            row=4,
+            columns=("index", "task", "hit", "status", "reason", "query"),
+            headings=("Index", "Task", "Hit", "Status", "Reason", "Query"),
+            columnspan=3,
+            height=7,
+        )
+        self.recall_requests_tree.column("index", width=60, stretch=False)
+        self.recall_requests_tree.column("task", width=120, stretch=False)
+        self.recall_requests_tree.column("hit", width=70, stretch=False)
+        self.recall_requests_tree.column("status", width=100, stretch=False)
+        self.recall_requests_tree.column("reason", width=160, stretch=False)
+        self.recall_requests_tree.column("query", width=480, stretch=True)
+        self.recall_requests_tree.bind("<<TreeviewSelect>>", self._on_recall_request_selected)
+
+        ttk.Label(frame, text="Evaluation Loop", style="Section.TLabel").grid(row=5, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(
+            frame,
+            textvariable=self.recall_eval_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        eval_controls = ttk.Frame(frame, style="Card.TFrame")
+        eval_controls.grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.evaluate_recall_button = ttk.Button(
+            eval_controls,
+            text="Evaluate Hits",
+            style="Lab.TButton",
+            command=self.run_recall_evaluation,
+        )
+        self.evaluate_recall_button.grid(row=0, column=0, sticky="w")
+        self.refresh_and_evaluate_recall_button = ttk.Button(
+            eval_controls,
+            text="Refresh + Evaluate",
+            style="Lab.TButton",
+            command=lambda: self.run_recall_evaluation(refresh_dataset=True),
+        )
+        self.refresh_and_evaluate_recall_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        eval_compare = ttk.Frame(frame, style="Card.TFrame")
+        eval_compare.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        for column in range(3):
+            eval_compare.grid_columnconfigure(column, weight=1)
+        self._build_compare_card(eval_compare, column=0, title="Previous", variable=self.recall_eval_previous_var)
+        self._build_compare_card(eval_compare, column=1, title="Current", variable=self.recall_eval_current_var)
+        self._build_compare_card(eval_compare, column=2, title="Diff", variable=self.recall_eval_change_var)
+
+        ttk.Label(frame, text="Evaluation Misses", style="Section.TLabel").grid(row=9, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(
+            frame,
+            textvariable=self.recall_eval_misses_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.recall_eval_misses_tree = self._build_treeview(
+            frame,
+            row=11,
+            columns=("index", "task", "reason", "rank", "variant", "query"),
+            headings=("Index", "Task", "Reason", "Rank", "Variant", "Query"),
+            columnspan=3,
+            height=5,
+        )
+        self.recall_eval_misses_tree.column("index", width=60, stretch=False)
+        self.recall_eval_misses_tree.column("task", width=120, stretch=False)
+        self.recall_eval_misses_tree.column("reason", width=180, stretch=False)
+        self.recall_eval_misses_tree.column("rank", width=70, stretch=False)
+        self.recall_eval_misses_tree.column("variant", width=170, stretch=False)
+        self.recall_eval_misses_tree.column("query", width=360, stretch=True)
+        self.recall_eval_misses_tree.bind("<<TreeviewSelect>>", self._on_recall_eval_miss_selected)
+
+        eval_miss_controls = ttk.Frame(frame, style="Card.TFrame")
+        eval_miss_controls.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        eval_miss_controls.grid_columnconfigure(3, weight=1)
+        self.copy_recall_miss_button = ttk.Button(
+            eval_miss_controls,
+            text="Copy Miss Into Manual",
+            style="Lab.TButton",
+            command=self.copy_selected_recall_eval_miss,
+        )
+        self.copy_recall_miss_button.grid(row=0, column=0, sticky="w")
+        self.apply_recall_miss_tweak_button = ttk.Button(
+            eval_miss_controls,
+            text="Apply Suggested Tweak",
+            style="Lab.TButton",
+            command=self.apply_selected_recall_eval_miss_tweak,
+        )
+        self.apply_recall_miss_tweak_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.open_recall_miss_winner_button = ttk.Button(
+            eval_miss_controls,
+            text="Open Top Winner",
+            style="Lab.TButton",
+            command=self.open_selected_recall_eval_miss_winner,
+        )
+        self.open_recall_miss_winner_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            eval_miss_controls,
+            textvariable=self.recall_eval_miss_selection_state,
+            style="Subtitle.TLabel",
+            wraplength=660,
+            justify="left",
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+        ttk.Label(frame, text="Diagnostic Guide", style="Section.TLabel").grid(row=13, column=0, sticky="w", pady=(12, 0))
+        diagnostic_frame = ttk.Frame(frame, style="Card.TFrame")
+        diagnostic_frame.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        for column in range(3):
+            diagnostic_frame.grid_columnconfigure(column, weight=1)
+        self._build_compare_card(
+            diagnostic_frame,
+            column=0,
+            title="Diagnosis",
+            variable=self.recall_diagnostic_diagnosis_var,
+        )
+        self._build_compare_card(
+            diagnostic_frame,
+            column=1,
+            title="Next",
+            variable=self.recall_diagnostic_action_var,
+        )
+        self._build_compare_card(
+            diagnostic_frame,
+            column=2,
+            title="Suggested Manual",
+            variable=self.recall_diagnostic_manual_var,
+        )
+        ttk.Label(
+            diagnostic_frame,
+            textvariable=self.recall_eval_winner_compare_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        source_frame = ttk.Frame(diagnostic_frame, style="Card.TFrame")
+        source_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        source_frame.grid_columnconfigure(0, weight=1)
+        (
+            self.recall_eval_source_button,
+            self.recall_eval_source_copy_button,
+            self.recall_eval_source_rerun_button,
+        ) = self._build_recall_source_card(
+            source_frame,
+            variable=self.recall_eval_source_var,
+            why_variable=self.recall_eval_source_why_var,
+            action_hint_variable=self.recall_eval_source_action_hint_var,
+            open_command=self.open_selected_recall_eval_source,
+            copy_command=self.copy_selected_recall_eval_source_to_manual,
+            rerun_command=self.rerun_selected_recall_eval_source,
+        )
+        winner_frame = ttk.Frame(diagnostic_frame, style="Card.TFrame")
+        winner_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.recall_eval_winner_buttons = []
+        for column in range(RECALL_TOP_SELECTED_COMPARE_LIMIT):
+            winner_frame.grid_columnconfigure(column, weight=1)
+            button = self._build_recall_winner_card(
+                winner_frame,
+                column=column,
+                title=f"Winner {column + 1}",
+                variable=self.recall_eval_winner_vars[column],
+                open_command=lambda index=column: self.open_recall_eval_winner_at(index),
+            )
+            self.recall_eval_winner_buttons.append(button)
+
+        ttk.Label(frame, text="Manual Recall", style="Section.TLabel").grid(row=15, column=0, sticky="w", pady=(12, 0))
+        manual = ttk.Frame(frame, style="Card.TFrame")
+        manual.grid(row=16, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        manual.grid_columnconfigure(1, weight=1)
+        ttk.Label(manual, text="Task Kind", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            manual,
+            textvariable=self.recall_task_kind,
+            values=list(TASK_KINDS),
+            width=18,
+            state="readonly",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Label(manual, text="Query", style="Section.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        ttk.Entry(manual, textvariable=self.recall_query).grid(row=1, column=1, sticky="ew", pady=(12, 0))
+        ttk.Label(manual, text="Request Basis", style="Section.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ttk.Combobox(
+            manual,
+            textvariable=self.recall_request_basis,
+            values=("", "prompt-or-artifact", "pass_definition"),
+            width=22,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="w", pady=(12, 0))
+        ttk.Label(manual, text="File Hint", style="Section.TLabel").grid(row=3, column=0, sticky="w", pady=(12, 0))
+        ttk.Entry(manual, textvariable=self.recall_file_hint).grid(row=3, column=1, sticky="ew", pady=(12, 0))
+        tuning = ttk.Frame(manual, style="Card.TFrame")
+        tuning.grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(tuning, text="Limit", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Spinbox(
+            tuning,
+            from_=RECALL_MANUAL_LIMIT_MIN,
+            to=RECALL_MANUAL_LIMIT_MAX,
+            textvariable=self.recall_limit,
+            width=6,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(tuning, text="Context Budget", style="Section.TLabel").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        ttk.Spinbox(
+            tuning,
+            from_=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+            to=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+            increment=500,
+            textvariable=self.recall_context_budget_chars,
+            width=8,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.run_manual_recall_button = ttk.Button(
+            manual,
+            text="Run Manual Recall",
+            style="Lab.TButton",
+            command=self.run_manual_recall,
+        )
+        self.run_manual_recall_button.grid(row=5, column=0, sticky="w", pady=(14, 0))
+        ttk.Label(
+            manual,
+            textvariable=self.recall_selection_state,
+            style="Subtitle.TLabel",
+            wraplength=760,
+            justify="left",
+        ).grid(row=5, column=1, sticky="w", pady=(14, 0), padx=(12, 0))
+
+        ttk.Label(frame, text="Selected Candidates", style="Section.TLabel").grid(row=17, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(
+            frame,
+            textvariable=self.recall_candidates_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=18, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.recall_candidates_tree = self._build_treeview(
+            frame,
+            row=19,
+            columns=("block", "status", "surface", "recorded", "prompt"),
+            headings=("Block", "Status", "Surface", "Recorded", "Prompt"),
+            columnspan=3,
+            height=5,
+        )
+        self.recall_candidates_tree.column("block", width=180, stretch=False)
+        self.recall_candidates_tree.column("status", width=90, stretch=False)
+        self.recall_candidates_tree.column("surface", width=90, stretch=False)
+        self.recall_candidates_tree.column("recorded", width=170, stretch=False)
+        self.recall_candidates_tree.column("prompt", width=520, stretch=True)
+        self.recall_candidates_tree.bind("<<TreeviewSelect>>", self._on_recall_candidate_selected)
+
+        candidate_controls = ttk.Frame(frame, style="Card.TFrame")
+        candidate_controls.grid(row=20, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        candidate_controls.grid_columnconfigure(3, weight=1)
+        self.open_recall_candidate_button = ttk.Button(
+            candidate_controls,
+            text="Open in History / Forensics",
+            style="Lab.TButton",
+            command=self.open_selected_recall_candidate,
+        )
+        self.open_recall_candidate_button.grid(row=0, column=0, sticky="w")
+        self.pin_recall_candidate_button = ttk.Button(
+            candidate_controls,
+            text="Pin Candidate",
+            style="Lab.TButton",
+            command=self.pin_selected_recall_candidate,
+        )
+        self.pin_recall_candidate_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.clear_recall_pins_button = ttk.Button(
+            candidate_controls,
+            text="Clear Pins",
+            style="Lab.TButton",
+            command=self.clear_recall_pins,
+        )
+        self.clear_recall_pins_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            candidate_controls,
+            textvariable=self.recall_candidate_selection_state,
+            style="Subtitle.TLabel",
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+
+        ttk.Label(
+            frame,
+            textvariable=self.recall_pins_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+            justify="left",
+        ).grid(row=21, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        ttk.Label(frame, text="Pin Compare", style="Section.TLabel").grid(row=22, column=0, sticky="w", pady=(12, 0))
+        compare_frame = ttk.Frame(frame, style="Card.TFrame")
+        compare_frame.grid(row=23, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        for column in range(3):
+            compare_frame.grid_columnconfigure(column, weight=1)
+        self._build_compare_card(compare_frame, column=0, title="No Pin", variable=self.recall_compare_before_var)
+        self._build_compare_card(compare_frame, column=1, title="Pinned", variable=self.recall_compare_after_var)
+        self._build_compare_card(compare_frame, column=2, title="Diff", variable=self.recall_compare_change_var)
+
+        ttk.Label(frame, text="Recall Output", style="Section.TLabel").grid(row=24, column=0, sticky="w", pady=(12, 0))
+        self.recall_output = self._readonly_text(frame, row=25, columnspan=3, height=12)
         return frame
 
     def _build_forensics_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -2464,6 +4654,8 @@ class LocalUiApp:
             width = 120
             if column in {"artifact", "validation"}:
                 width = 220
+            elif column == "query":
+                width = 420
             elif column in {"detail", "resolved"}:
                 width = 280
             elif column == "source":
@@ -2520,6 +4712,176 @@ class LocalUiApp:
             justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         return card
+
+    def _build_recall_reason_chip_labels(
+        self,
+        parent: tk.Widget | Any,
+        *,
+        chip_vars: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        chip_labels: dict[str, Any] = {}
+        for key in RECALL_WINNER_CHIP_ORDER:
+            colors = RECALL_WINNER_CHIP_COLORS[key]
+            label = tk.Label(
+                parent,
+                textvariable=chip_vars[key],
+                background=colors["background"],
+                foreground=colors["foreground"],
+                font=("SF Pro Text", 10),
+                padx=7,
+                pady=3,
+                bd=0,
+                justify="left",
+                wraplength=220,
+            )
+            chip_labels[key] = label
+        return chip_labels
+
+    def _apply_recall_reason_chip_texts(
+        self,
+        *,
+        chip_vars: Mapping[str, Any],
+        chip_labels: Mapping[str, Any],
+        chip_texts: Mapping[str, str],
+    ) -> None:
+        for key in RECALL_WINNER_CHIP_ORDER:
+            text = str(chip_texts.get(key) or "")
+            chip_vars[key].set(text)
+
+        for label in chip_labels.values():
+            if hasattr(label, "pack_forget"):
+                label.pack_forget()
+
+        for key in RECALL_WINNER_CHIP_ORDER:
+            text = str(chip_texts.get(key) or "")
+            label = chip_labels.get(key)
+            if not text or label is None or not hasattr(label, "pack"):
+                continue
+            label.pack(side="top", anchor="w", pady=(0, 4))
+
+    def _build_recall_source_card(
+        self,
+        parent: ttk.Frame,
+        *,
+        variable: tk.StringVar,
+        why_variable: tk.StringVar,
+        action_hint_variable: tk.StringVar,
+        open_command: Any,
+        copy_command: Any,
+        rerun_command: Any,
+    ) -> tuple[ttk.Button, ttk.Button, ttk.Button]:
+        card = ttk.Frame(parent, style="MetricCard.TFrame", padding=(12, 10))
+        card.grid(row=0, column=0, sticky="ew")
+        ttk.Label(card, text="Source", style="MetricTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            card,
+            textvariable=variable,
+            style="MetricBody.TLabel",
+            wraplength=860,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        why_frame = tk.Frame(card, background="#FFFFFF", highlightthickness=0, borderwidth=0)
+        why_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        why_frame.grid_columnconfigure(1, weight=1)
+        ttk.Label(why_frame, text="Why", style="MetricTitle.TLabel").grid(row=0, column=0, sticky="nw", padx=(0, 8))
+        ttk.Label(
+            why_frame,
+            textvariable=why_variable,
+            style="MetricBody.TLabel",
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=1, sticky="w")
+        chip_frame = tk.Frame(card, background="#FFFFFF", highlightthickness=0, borderwidth=0)
+        chip_frame.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self.recall_eval_source_chip_labels = self._build_recall_reason_chip_labels(
+            chip_frame,
+            chip_vars=self.recall_eval_source_chip_vars,
+        )
+        action_frame = tk.Frame(card, background="#FFFFFF", highlightthickness=0, borderwidth=0)
+        action_frame.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        open_button = ttk.Button(action_frame, text="Open", style="Lab.TButton", command=open_command)
+        open_button.grid(row=0, column=0, sticky="w")
+        copy_button = ttk.Button(
+            action_frame,
+            text="Copy to Manual",
+            style="Lab.TButton",
+            command=copy_command,
+        )
+        copy_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        rerun_button = ttk.Button(
+            action_frame,
+            text="Rerun",
+            style="Lab.TButton",
+            command=rerun_command,
+        )
+        rerun_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            action_frame,
+            textvariable=action_hint_variable,
+            style="MetricBody.TLabel",
+            wraplength=780,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        return open_button, copy_button, rerun_button
+
+    def _build_recall_winner_card(
+        self,
+        parent: ttk.Frame,
+        *,
+        column: int,
+        title: str,
+        variable: tk.StringVar,
+        open_command: Any,
+    ) -> ttk.Button:
+        card = ttk.Frame(parent, style="MetricCard.TFrame", padding=(12, 10))
+        card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+        ttk.Label(card, text=title, style="MetricTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            card,
+            textvariable=variable,
+            style="MetricBody.TLabel",
+            wraplength=250,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        chip_frame = tk.Frame(card, background="#FFFFFF", highlightthickness=0, borderwidth=0)
+        chip_frame.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.recall_eval_winner_chip_labels[column] = self._build_recall_reason_chip_labels(
+            chip_frame,
+            chip_vars=self.recall_eval_winner_chip_vars[column],
+        )
+        button = ttk.Button(card, text="Open", style="Lab.TButton", command=open_command)
+        button.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        return button
+
+    def _apply_recall_eval_source_chip_texts(
+        self,
+        chip_texts: Mapping[str, str],
+    ) -> None:
+        self._apply_recall_reason_chip_texts(
+            chip_vars=self.recall_eval_source_chip_vars,
+            chip_labels=self.recall_eval_source_chip_labels,
+            chip_texts=chip_texts,
+        )
+
+    def _apply_recall_eval_winner_chip_texts(
+        self,
+        winner_index: int,
+        chip_texts: Mapping[str, str],
+    ) -> None:
+        if winner_index < 0 or winner_index >= len(self.recall_eval_winner_chip_vars):
+            return
+
+        chip_vars = self.recall_eval_winner_chip_vars[winner_index]
+        chip_labels = (
+            self.recall_eval_winner_chip_labels[winner_index]
+            if winner_index < len(self.recall_eval_winner_chip_labels)
+            else {}
+        )
+        self._apply_recall_reason_chip_texts(
+            chip_vars=chip_vars,
+            chip_labels=chip_labels,
+            chip_texts=chip_texts,
+        )
 
     def _path_row(
         self,
@@ -2622,6 +4984,874 @@ class LocalUiApp:
         self._forensics_selected_entry_id = str(selection[0])
         self.forensics_artifact_path.set("")
         self.refresh_forensics()
+
+    def _on_recall_request_selected(self, _event: object | None = None) -> None:
+        selection = self.recall_requests_tree.selection()
+        if not selection:
+            return
+        row = self._recall_request_rows.get(str(selection[0]))
+        if row is None:
+            return
+        try:
+            self._recall_selected_request_index = int(row.get("index"))
+        except (TypeError, ValueError):
+            self._recall_selected_request_index = None
+        self.recall_selection_state.set(build_recall_request_summary(row))
+
+    def _populate_recall_requests(self, snapshot: dict[str, Any]) -> None:
+        requests = list(snapshot.get("requests") or [])
+        request_entries = list(snapshot.get("request_entries") or [])
+        dataset_path = snapshot.get("dataset_path")
+        request_count = int(snapshot.get("request_count") or 0)
+        generated_at = snapshot.get("generated_at_utc") or "n/a"
+
+        children = self.recall_requests_tree.get_children()
+        if children:
+            self.recall_requests_tree.delete(*children)
+
+        self._recall_request_rows = {}
+        if not requests:
+            self._recall_selected_request_index = None
+            self.recall_requests_state.set("No prepared recall requests are available yet.")
+            self.recall_selection_state.set("Refresh real data to generate the first request set.")
+            return
+
+        dataset_display = (
+            summarize_workspace_path(str(dataset_path), root=self.controller.workspace_store.root)
+            if dataset_path
+            else "n/a"
+        )
+        self.recall_requests_state.set(
+            f"{request_count} prepared requests from {dataset_display}. Generated {generated_at}."
+        )
+        selected_index = self._recall_selected_request_index
+        for position, row in enumerate(requests):
+            raw_row = request_entries[position] if position < len(request_entries) else {}
+            merged_row = {
+                **(dict(raw_row) if isinstance(raw_row, Mapping) else {}),
+                **(dict(row) if isinstance(row, Mapping) else {}),
+            }
+            index = str(merged_row.get("index") or position + 1)
+            self._recall_request_rows[index] = merged_row
+            self.recall_requests_tree.insert(
+                "",
+                "end",
+                iid=index,
+                values=(
+                    index,
+                    merged_row.get("task_kind") or "n/a",
+                    "yes" if merged_row.get("source_hit") else "no",
+                    merged_row.get("source_status") or "-",
+                    (
+                        merged_row.get("miss_reason")
+                        or (
+                            merged_row.get("request_variant")
+                            if merged_row.get("request_variant") not in {"", BASELINE_REQUEST_VARIANT, None}
+                            else "-"
+                        )
+                    ),
+                    summarize_text_preview(str(merged_row.get("query_text") or ""), limit=110),
+                ),
+            )
+
+        if selected_index is None:
+            selected_index = int(requests[0].get("index") or 1)
+        selected_iid = str(selected_index)
+        if self.recall_requests_tree.exists(selected_iid):
+            self.recall_requests_tree.selection_set(selected_iid)
+            self.recall_requests_tree.focus(selected_iid)
+            self._on_recall_request_selected()
+
+    def _reset_recall_evaluation_view(self) -> None:
+        self.recall_eval_state.set(
+            "Run evaluation to score source-hit recovery across the prepared requests."
+        )
+        self.recall_eval_misses_state.set(
+            "Evaluation misses appear here after the first evaluation run."
+        )
+        self.recall_eval_miss_selection_state.set(
+            "Select an evaluation miss to sync it with the prepared request list."
+        )
+        apply_recall_eval_compare_fields(
+            None,
+            previous_var=self.recall_eval_previous_var,
+            current_var=self.recall_eval_current_var,
+            change_var=self.recall_eval_change_var,
+        )
+        apply_recall_diagnostic_guide_fields(
+            None,
+            request_row=None,
+            diagnosis_var=self.recall_diagnostic_diagnosis_var,
+            action_var=self.recall_diagnostic_action_var,
+            manual_var=self.recall_diagnostic_manual_var,
+        )
+        self._apply_recall_eval_winner_compare(None)
+        self._recall_eval_miss_rows = {}
+        self._recall_selected_eval_miss_index = None
+        children = self.recall_eval_misses_tree.get_children()
+        if children:
+            self.recall_eval_misses_tree.delete(*children)
+
+    def _populate_recall_evaluation(self, snapshot: Mapping[str, Any]) -> None:
+        summary = snapshot.get("summary")
+        dataset_path = snapshot.get("dataset_path")
+        self.recall_eval_state.set(
+            build_recall_eval_state(
+                summary if isinstance(summary, Mapping) else None,
+                dataset_path=str(dataset_path) if dataset_path else None,
+                root=self.controller.workspace_store.root,
+            )
+        )
+        apply_recall_eval_compare_fields(
+            snapshot.get("comparison"),
+            previous_var=self.recall_eval_previous_var,
+            current_var=self.recall_eval_current_var,
+            change_var=self.recall_eval_change_var,
+        )
+
+        misses = [
+            dict(item)
+            for item in snapshot.get("misses") or []
+            if isinstance(item, Mapping)
+        ]
+        children = self.recall_eval_misses_tree.get_children()
+        if children:
+            self.recall_eval_misses_tree.delete(*children)
+        self._recall_eval_miss_rows = {}
+        if not misses:
+            self._recall_selected_eval_miss_index = None
+            self.recall_eval_misses_state.set("No source misses in the latest evaluation.")
+            self.recall_eval_miss_selection_state.set(
+                "Select an evaluation miss to sync it with the prepared request list."
+            )
+            apply_recall_diagnostic_guide_fields(
+                None,
+                request_row=None,
+                diagnosis_var=self.recall_diagnostic_diagnosis_var,
+                action_var=self.recall_diagnostic_action_var,
+                manual_var=self.recall_diagnostic_manual_var,
+            )
+            self._apply_recall_eval_winner_compare(None)
+            return
+
+        self.recall_eval_misses_state.set(
+            f"{len(misses)} source miss(es). Select one to sync it with the prepared request list, compare its winners, or copy it into manual recall."
+        )
+        selected_index = self._recall_selected_eval_miss_index
+        for position, row in enumerate(misses):
+            index = str(row.get("index") or position + 1)
+            self._recall_eval_miss_rows[index] = row
+            request_variant = str(row.get("request_variant") or "").strip() or BASELINE_REQUEST_VARIANT
+            self.recall_eval_misses_tree.insert(
+                "",
+                "end",
+                iid=index,
+                values=(
+                    index,
+                    row.get("task_kind") or "n/a",
+                    row.get("miss_reason") or "unknown",
+                    row.get("source_rank") if row.get("source_rank") is not None else "-",
+                    request_variant,
+                    summarize_text_preview(str(row.get("query_text") or ""), limit=96),
+                ),
+            )
+
+        if selected_index is None:
+            selected_index = int(misses[0].get("index") or 1)
+        selected_iid = str(selected_index)
+        if self.recall_eval_misses_tree.exists(selected_iid):
+            self.recall_eval_misses_tree.selection_set(selected_iid)
+            self.recall_eval_misses_tree.focus(selected_iid)
+            self._on_recall_eval_miss_selected()
+
+    def _on_recall_eval_miss_selected(self, _event: object | None = None) -> None:
+        selection = self.recall_eval_misses_tree.selection()
+        if not selection:
+            return
+        selected_index = str(selection[0])
+        row = self._recall_eval_miss_rows.get(selected_index)
+        if row is None:
+            return
+        try:
+            self._recall_selected_eval_miss_index = int(row.get("index"))
+        except (TypeError, ValueError):
+            self._recall_selected_eval_miss_index = None
+        self.recall_eval_miss_selection_state.set(build_recall_eval_miss_summary(row))
+        request_index = str(row.get("index") or "").strip()
+        request_row = self._recall_request_rows.get(request_index)
+        if request_index and self.recall_requests_tree.exists(request_index):
+            self.recall_requests_tree.selection_set(request_index)
+            self.recall_requests_tree.focus(request_index)
+            self._on_recall_request_selected()
+        apply_recall_diagnostic_guide_fields(
+            row,
+            request_row=request_row,
+            diagnosis_var=self.recall_diagnostic_diagnosis_var,
+            action_var=self.recall_diagnostic_action_var,
+            manual_var=self.recall_diagnostic_manual_var,
+        )
+        self._apply_recall_eval_winner_compare(row)
+
+    def _on_recall_candidate_selected(self, _event: object | None = None) -> None:
+        selection = self.recall_candidates_tree.selection()
+        if not selection:
+            return
+        event_id = str(selection[0])
+        row = self._recall_candidate_rows.get(event_id)
+        if row is None:
+            return
+        self._recall_selected_candidate_event_id = event_id
+        self.recall_candidate_selection_state.set(
+            build_recall_candidate_summary(
+                row,
+                root=self.controller.workspace_store.root,
+            )
+        )
+
+    def _current_recall_pinned_event_ids(self) -> list[str]:
+        return list(self._recall_pinned_candidate_rows.keys())
+
+    def _refresh_recall_pin_state(self) -> None:
+        pinned_event_ids = set(self._current_recall_pinned_event_ids())
+        for event_id, row in self._recall_candidate_rows.items():
+            row["pinned"] = event_id in pinned_event_ids
+        self.recall_pins_state.set(
+            build_recall_pins_summary(self._recall_pinned_candidate_rows)
+        )
+        if self._recall_candidate_rows:
+            message = (
+                f"{len(self._recall_candidate_rows)} selected candidates are ready for History / Forensics jump."
+            )
+            if pinned_event_ids:
+                message += f" {len(pinned_event_ids)} pinned for the next recall run."
+            self.recall_candidates_state.set(message)
+        if (
+            self._recall_selected_candidate_event_id is not None
+            and self._recall_selected_candidate_event_id in self._recall_candidate_rows
+        ):
+            self.recall_candidate_selection_state.set(
+                build_recall_candidate_summary(
+                    self._recall_candidate_rows[self._recall_selected_candidate_event_id],
+                    root=self.controller.workspace_store.root,
+                )
+            )
+
+    def _populate_recall_candidates(self, bundle: Mapping[str, Any] | None) -> None:
+        selected = [
+            dict(item)
+            for item in (bundle or {}).get("selected_candidates") or []
+            if isinstance(item, Mapping)
+        ]
+        children = self.recall_candidates_tree.get_children()
+        if children:
+            self.recall_candidates_tree.delete(*children)
+
+        self._recall_candidate_rows = {}
+        if not selected:
+            self._recall_selected_candidate_event_id = None
+            self.recall_candidates_state.set("This recall run did not select any candidates.")
+            self.recall_candidate_selection_state.set(
+                "Select a recall candidate to open it in History / Forensics."
+            )
+            self._refresh_recall_pin_state()
+            return
+
+        pinned_event_ids = set(self._current_recall_pinned_event_ids())
+        selected_event_id = self._recall_selected_candidate_event_id
+        for index, row in enumerate(selected, start=1):
+            event_id = str(row.get("event_id") or f"candidate-{index}")
+            row["pinned"] = event_id in pinned_event_ids
+            self._recall_candidate_rows[event_id] = row
+            self.recall_candidates_tree.insert(
+                "",
+                "end",
+                iid=event_id,
+                values=(
+                    row.get("block_title") or "n/a",
+                    row.get("status") or "-",
+                    row.get("session_surface") or "n/a",
+                    row.get("recorded_at_utc") or "n/a",
+                    summarize_text_preview(str(row.get("prompt_excerpt") or ""), limit=110),
+                ),
+            )
+
+        if selected_event_id is None:
+            selected_event_id = str(selected[0].get("event_id") or "candidate-1")
+        if self.recall_candidates_tree.exists(selected_event_id):
+            self.recall_candidates_tree.selection_set(selected_event_id)
+            self.recall_candidates_tree.focus(selected_event_id)
+            self._on_recall_candidate_selected()
+        self._refresh_recall_pin_state()
+
+    def pin_selected_recall_candidate(self) -> None:
+        if self._recall_selected_candidate_event_id is None:
+            self.status_var.set("Select a recall candidate first.")
+            return
+
+        row = self._recall_candidate_rows.get(self._recall_selected_candidate_event_id)
+        if row is None:
+            self.status_var.set("The selected recall candidate is no longer available.")
+            return
+
+        event_id = str(row.get("event_id") or "").strip()
+        if not event_id:
+            self.status_var.set("The selected recall candidate does not expose an event id.")
+            return
+        if event_id in self._recall_pinned_candidate_rows:
+            self.status_var.set("This recall candidate is already pinned.")
+            return
+
+        self._recall_pinned_candidate_rows[event_id] = dict(row)
+        self._refresh_recall_pin_state()
+        self.status_var.set(f"Pinned recall candidate {event_id}.")
+        self.hint_var.set("Pinned candidates are injected into the next recall run until you clear them.")
+
+    def clear_recall_pins(self) -> None:
+        if not self._recall_pinned_candidate_rows:
+            self.status_var.set("There are no pinned recall candidates to clear.")
+            return
+        cleared_count = len(self._recall_pinned_candidate_rows)
+        self._recall_pinned_candidate_rows = {}
+        self._refresh_recall_pin_state()
+        self.status_var.set(f"Cleared {cleared_count} pinned recall candidate(s).")
+        self.hint_var.set("The next recall run will use normal ranking unless you pin another candidate.")
+
+    def refresh_recall_requests(
+        self,
+        *,
+        refresh_dataset: bool = False,
+        announce: bool = True,
+    ) -> None:
+        if announce and self.job_runner.has_pending_work():
+            self.status_var.set("Recall refresh is disabled while a worker job is running.")
+            return
+
+        if announce:
+            self._cancel_pending_startup_prewarm()
+            self._set_busy("Loading recall requests...")
+        try:
+            snapshot = self.controller.collect_recall_requests(refresh_dataset=refresh_dataset)
+            self._populate_recall_requests(snapshot)
+            self._reset_recall_evaluation_view()
+            if announce:
+                self.status_var.set("Recall requests refreshed." if refresh_dataset else "Recall requests loaded.")
+                self.backend_var.set("Backend: local-memory-recall")
+                self.device_var.set("Device: local files / SQLite")
+                self.artifact_var.set(f"Recall dataset: {snapshot.get('dataset_path') or 'n/a'}")
+                self.hint_var.set(
+                    "Run a prepared request directly, or copy one into the manual form and tighten it."
+                )
+        except Exception as exc:
+            self._recall_selected_request_index = None
+            self._recall_request_rows = {}
+            children = self.recall_requests_tree.get_children()
+            if children:
+                self.recall_requests_tree.delete(*children)
+            self.recall_requests_state.set(f"Recall requests failed to load: {type(exc).__name__}: {exc}")
+            self.recall_selection_state.set("Refresh real data after the dataset path is healthy again.")
+            self._reset_recall_evaluation_view()
+            if announce:
+                self.status_var.set(f"Recall refresh failed: {type(exc).__name__}: {exc}")
+        finally:
+            if announce:
+                self._clear_busy()
+                self._resume_startup_prewarm_if_needed()
+
+    def copy_selected_recall_request(self) -> None:
+        if self._recall_selected_request_index is None:
+            self.status_var.set("Select a prepared recall request first.")
+            return
+        row = self._recall_request_rows.get(str(self._recall_selected_request_index))
+        if row is None:
+            self.status_var.set("The selected recall request is no longer available.")
+            return
+        self.recall_task_kind.set(str(row.get("task_kind") or "proposal"))
+        self.recall_query.set(str(row.get("query_text") or ""))
+        self.recall_request_basis.set(str(row.get("request_basis") or ""))
+        file_hints = list(row.get("file_hints") or [])
+        self.recall_file_hint.set(str(file_hints[0]) if file_hints else "")
+        self.recall_limit.set(
+            coerce_ui_int(
+                row.get("limit"),
+                default=DEFAULT_LIMIT,
+                minimum=RECALL_MANUAL_LIMIT_MIN,
+                maximum=RECALL_MANUAL_LIMIT_MAX,
+            )
+        )
+        self.recall_context_budget_chars.set(
+            coerce_ui_int(
+                row.get("context_budget_chars"),
+                default=DEFAULT_CONTEXT_BUDGET_CHARS,
+                minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+                maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+            )
+        )
+        self.recall_selection_state.set(
+            f"Copied prepared request {self._recall_selected_request_index} into the manual form."
+        )
+        self.status_var.set(
+            f"Prepared recall request {self._recall_selected_request_index} copied into manual recall."
+        )
+
+    def _select_recall_request_for_selected_eval_miss(self) -> bool:
+        if self._recall_selected_eval_miss_index is None:
+            self.status_var.set("Select an evaluation miss first.")
+            return False
+        request_index = str(self._recall_selected_eval_miss_index)
+        request_row = self._recall_request_rows.get(request_index)
+        if request_row is None:
+            self.status_var.set("The matching prepared recall request is no longer available.")
+            self.hint_var.set("Refresh real data to restore the request before copying it into manual recall.")
+            return False
+        try:
+            self._recall_selected_request_index = int(request_row.get("index") or request_index)
+        except (TypeError, ValueError):
+            self._recall_selected_request_index = None
+        if request_index and self.recall_requests_tree.exists(request_index):
+            self.recall_requests_tree.selection_set(request_index)
+            self.recall_requests_tree.focus(request_index)
+            self._on_recall_request_selected()
+        return self._recall_selected_request_index is not None
+
+    def copy_selected_recall_eval_miss(self) -> None:
+        if not self._select_recall_request_for_selected_eval_miss():
+            return
+        self.copy_selected_recall_request()
+        if self._recall_selected_eval_miss_index is not None:
+            self.hint_var.set(
+                f"Evaluation miss {self._recall_selected_eval_miss_index} copied into manual recall for the next tweak."
+            )
+
+    def copy_selected_recall_eval_source_to_manual(self) -> None:
+        if not self._select_recall_request_for_selected_eval_miss():
+            return
+        self.copy_selected_recall_request()
+        if self._recall_selected_eval_miss_index is not None:
+            self.recall_selection_state.set(
+                f"Source candidate for evaluation miss {self._recall_selected_eval_miss_index} copied into the manual form."
+            )
+            self.status_var.set(
+                f"Source candidate for evaluation miss {self._recall_selected_eval_miss_index} copied into manual recall."
+            )
+            self.hint_var.set(
+                "Run manual recall now, or tweak basis / limit / budget while the source context is still in view."
+            )
+
+    def _selected_recall_eval_source_suggestion(
+        self,
+    ) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None, dict[str, Any] | None]:
+        if self._recall_selected_eval_miss_index is None:
+            return None, None, None
+        request_index = str(self._recall_selected_eval_miss_index)
+        miss_row = self._recall_eval_miss_rows.get(request_index)
+        request_row = self._recall_request_rows.get(request_index)
+        if not isinstance(miss_row, Mapping) or not isinstance(request_row, Mapping):
+            return miss_row if isinstance(miss_row, Mapping) else None, request_row, None
+        return (
+            miss_row,
+            request_row,
+            build_recall_miss_suggested_manual_config(
+                miss_row,
+                request_row=request_row,
+            ),
+        )
+
+    def _can_rerun_selected_recall_eval_source(self) -> bool:
+        _miss_row, _request_row, suggestion = self._selected_recall_eval_source_suggestion()
+        return bool(isinstance(suggestion, Mapping) and suggestion.get("apply_ready"))
+
+    def rerun_selected_recall_eval_source(self) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Manual recall is disabled while a worker job is running.")
+            return
+        if not self._select_recall_request_for_selected_eval_miss():
+            return
+
+        miss_row, request_row, suggestion = self._selected_recall_eval_source_suggestion()
+        if not isinstance(miss_row, Mapping):
+            self.status_var.set("The selected evaluation miss is no longer available.")
+            return
+        if not isinstance(request_row, Mapping) or not isinstance(suggestion, Mapping):
+            self.status_var.set("The matching prepared recall request is no longer available.")
+            self.hint_var.set("Refresh real data to restore the request before rerunning it.")
+            return
+
+        apply_recall_miss_suggested_manual_config(
+            suggestion,
+            task_kind_var=self.recall_task_kind,
+            query_var=self.recall_query,
+            request_basis_var=self.recall_request_basis,
+            file_hint_var=self.recall_file_hint,
+            limit_var=self.recall_limit,
+            context_budget_var=self.recall_context_budget_chars,
+        )
+        if not suggestion.get("apply_ready"):
+            self.status_var.set(
+                f"Evaluation miss {self._recall_selected_eval_miss_index} still needs the source back in the index."
+            )
+            self.hint_var.set("Refresh real data or rebuild the memory index, then rerun evaluation.")
+            return
+
+        self.recall_selection_state.set(
+            f"Suggested rerun for evaluation miss {self._recall_selected_eval_miss_index} loaded into the manual form."
+        )
+        result = self.run_manual_recall()
+        if result is None:
+            return
+
+        rerun_feedback = build_recall_eval_source_rerun_result_text(
+            miss_row,
+            bundle=result.get("bundle"),
+        )
+        if rerun_feedback and self._recall_selected_eval_miss_index is not None:
+            self.status_var.set(f"Suggested rerun for evaluation miss {self._recall_selected_eval_miss_index} is ready.")
+            self.hint_var.set(rerun_feedback)
+            self.recall_eval_source_action_hint_var.set(rerun_feedback)
+
+    def apply_selected_recall_eval_miss_tweak(self) -> None:
+        if self._recall_selected_eval_miss_index is None:
+            self.status_var.set("Select an evaluation miss first.")
+            return
+        miss_row = self._recall_eval_miss_rows.get(str(self._recall_selected_eval_miss_index))
+        if miss_row is None:
+            self.status_var.set("The selected evaluation miss is no longer available.")
+            return
+        request_row = self._recall_request_rows.get(str(self._recall_selected_eval_miss_index))
+        suggestion = build_recall_miss_suggested_manual_config(
+            miss_row,
+            request_row=request_row,
+        )
+        apply_recall_miss_suggested_manual_config(
+            suggestion,
+            task_kind_var=self.recall_task_kind,
+            query_var=self.recall_query,
+            request_basis_var=self.recall_request_basis,
+            file_hint_var=self.recall_file_hint,
+            limit_var=self.recall_limit,
+            context_budget_var=self.recall_context_budget_chars,
+        )
+        if suggestion.get("apply_ready"):
+            self.status_var.set(
+                f"Applied the suggested tweak for evaluation miss {self._recall_selected_eval_miss_index}."
+            )
+            self.hint_var.set("Run manual recall now to see whether the suggested tweak closes the miss.")
+        else:
+            self.status_var.set(
+                f"Loaded evaluation miss {self._recall_selected_eval_miss_index}, but this one wants reindexing first."
+            )
+            self.hint_var.set("Refresh real data or rebuild the memory index, then rerun evaluation.")
+
+    def _apply_recall_eval_winner_compare(self, miss_row: Mapping[str, Any] | None) -> None:
+        self.recall_eval_winner_compare_state.set(build_recall_eval_winner_compare_state(miss_row))
+        resolved_miss_row: Mapping[str, Any] | None = miss_row
+        request_row: Mapping[str, Any] | None = None
+        if isinstance(miss_row, Mapping):
+            request_index = str(miss_row.get("index") or "").strip()
+            request_row = self._recall_request_rows.get(request_index)
+            if isinstance(request_row, Mapping):
+                resolved_miss_row = {
+                    **dict(request_row),
+                    **dict(miss_row),
+                }
+        winners = _recall_top_selected_rows(miss_row)[:RECALL_TOP_SELECTED_COMPARE_LIMIT]
+        rows: list[dict[str, Any] | None] = list(winners)
+        while len(rows) < RECALL_TOP_SELECTED_COMPARE_LIMIT:
+            rows.append(None)
+        self._recall_eval_winner_rows = rows
+        self._recall_eval_source_row = resolve_recall_forensics_row(
+            build_recall_eval_source_navigation_row(resolved_miss_row),
+            root=self.controller.workspace_store.root,
+            current_workspace_id=self.controller.workspace_store.workspace_id,
+        )
+        self.recall_eval_source_var.set(build_recall_eval_source_summary_text(resolved_miss_row))
+        self.recall_eval_source_why_var.set(build_recall_eval_source_why_text(resolved_miss_row))
+        self.recall_eval_source_action_hint_var.set(
+            build_recall_eval_source_action_hint(
+                resolved_miss_row,
+                request_row=request_row,
+                source_row=self._recall_eval_source_row,
+            )
+        )
+        self._apply_recall_eval_source_chip_texts(
+            build_recall_eval_source_chip_texts(resolved_miss_row),
+        )
+        if self.recall_eval_source_button is not None:
+            self.recall_eval_source_button.configure(
+                state="normal" if self._recall_eval_source_row is not None else "disabled"
+            )
+        if self.recall_eval_source_copy_button is not None:
+            can_copy_source = (
+                isinstance(resolved_miss_row, Mapping)
+                and str(resolved_miss_row.get("index") or "").strip() in self._recall_request_rows
+            )
+            self.recall_eval_source_copy_button.configure(
+                state="normal" if can_copy_source else "disabled"
+            )
+        if self.recall_eval_source_rerun_button is not None:
+            suggestion_ready = bool(
+                isinstance(resolved_miss_row, Mapping)
+                and isinstance(request_row, Mapping)
+                and build_recall_miss_suggested_manual_config(
+                    resolved_miss_row,
+                    request_row=request_row,
+                ).get("apply_ready")
+            )
+            self.recall_eval_source_rerun_button.configure(
+                state="normal" if suggestion_ready else "disabled"
+            )
+
+        for index, row in enumerate(rows, start=1):
+            self.recall_eval_winner_vars[index - 1].set(
+                build_recall_eval_winner_card_text(
+                    resolved_miss_row,
+                    row,
+                    rank=index,
+                    root=self.controller.workspace_store.root,
+                )
+            )
+            self._apply_recall_eval_winner_chip_texts(
+                index - 1,
+                build_recall_eval_winner_chip_texts(resolved_miss_row, row),
+            )
+            if index - 1 < len(self.recall_eval_winner_buttons):
+                self.recall_eval_winner_buttons[index - 1].configure(
+                    state="normal" if recall_row_has_forensics_navigation(row) else "disabled"
+                )
+
+    def _open_recall_row_in_forensics(
+        self,
+        row: Mapping[str, Any],
+        *,
+        status_message: str,
+        hint_label: str,
+    ) -> bool:
+        resolved_row = resolve_recall_forensics_row(
+            row,
+            root=self.controller.workspace_store.root,
+            current_workspace_id=self.controller.workspace_store.workspace_id,
+        )
+        if resolved_row is None:
+            self.status_var.set(
+                "This recall item is missing History / Forensics navigation data. Rerun recall or evaluation to refresh it."
+            )
+            self.hint_var.set("Older snapshots may need a fresh request sync before direct jump works.")
+            return False
+
+        artifact_path = str(resolved_row.get("artifact_path") or "").strip()
+        session_id = str(resolved_row.get("session_id") or "").strip() or None
+        event_id = str(resolved_row.get("event_id") or "").strip() or None
+        candidate_surface = str(resolved_row.get("session_surface") or "").strip().lower()
+        target_surface = candidate_surface if candidate_surface in SESSION_SURFACES else self.forensics_surface.get()
+        if target_surface not in SESSION_SURFACES:
+            target_surface = "chat"
+
+        self.forensics_surface.set(target_surface)
+        self._forensics_selected_session_id = session_id
+        self._forensics_selected_entry_id = event_id if session_id and event_id else None
+        self.forensics_artifact_path.set(artifact_path)
+        self.refresh_forensics()
+        if hasattr(self, "notebook") and hasattr(self, "forensics_tab"):
+            self.notebook.select(self.forensics_tab)
+
+        label = summarize_text_preview(
+            str(resolved_row.get("prompt_excerpt") or resolved_row.get("event_id") or "n/a"),
+            limit=96,
+        )
+        self.status_var.set(status_message)
+        self.hint_var.set(f"{hint_label}: {label}")
+        return True
+
+    def open_selected_recall_eval_source(self) -> None:
+        if self._recall_selected_eval_miss_index is None:
+            self.status_var.set("Select an evaluation miss first.")
+            return
+        if self._recall_eval_source_row is None:
+            self.status_var.set("The selected miss does not have source navigation data yet.")
+            self.hint_var.set("Older snapshots may need a fresh request sync before direct source jump works.")
+            return
+
+        self._open_recall_row_in_forensics(
+            self._recall_eval_source_row,
+            status_message=(
+                f"Opened the source candidate for evaluation miss {self._recall_selected_eval_miss_index} "
+                "in History / Forensics."
+            ),
+            hint_label="Source",
+        )
+
+    def open_recall_eval_winner_at(self, winner_index: int) -> None:
+        if self._recall_selected_eval_miss_index is None:
+            self.status_var.set("Select an evaluation miss first.")
+            return
+        if winner_index < 0 or winner_index >= len(self._recall_eval_winner_rows):
+            self.status_var.set("That winner slot is out of range.")
+            return
+
+        winner_row = self._recall_eval_winner_rows[winner_index]
+        if winner_row is None:
+            self.status_var.set(f"No winner is recorded at slot #{winner_index + 1}.")
+            return
+
+        self._open_recall_row_in_forensics(
+            winner_row,
+            status_message=f"Opened winner #{winner_index + 1} in History / Forensics.",
+            hint_label=f"Winner #{winner_index + 1}",
+        )
+
+    def open_selected_recall_eval_miss_winner(self) -> None:
+        self.open_recall_eval_winner_at(0)
+
+    def _apply_recall_evaluation(self, snapshot: dict[str, Any], *, status_message: str) -> None:
+        self._populate_recall_requests(snapshot)
+        self._populate_recall_evaluation(snapshot)
+        self._set_output(self.recall_output, str(snapshot.get("report") or ""))
+        self.status_var.set(status_message)
+        self.backend_var.set("Backend: local-memory-recall")
+        self.device_var.set("Device: local files / SQLite")
+        self.artifact_var.set(f"Recall evaluation: {snapshot.get('evaluation_run_path') or 'n/a'}")
+        self.hint_var.set(
+            "Select a miss, compare its winners, then open one or apply the suggested tweak before rerunning manual recall."
+        )
+
+    def _apply_recall_result(self, result: dict[str, Any], *, status_message: str) -> None:
+        self._set_output(self.recall_output, str(result.get("report") or ""))
+        self._populate_recall_candidates(result.get("bundle"))
+        apply_recall_compare_fields(
+            result.get("pin_compare"),
+            before_var=self.recall_compare_before_var,
+            after_var=self.recall_compare_after_var,
+            change_var=self.recall_compare_change_var,
+        )
+        self.status_var.set(status_message)
+        self.backend_var.set("Backend: local-memory-recall")
+        self.device_var.set("Device: local files / SQLite")
+        self.artifact_var.set(f"Recall bundle: {result.get('bundle_path') or 'n/a'}")
+        if result.get("request_label"):
+            pin_count = len(result.get("pinned_event_ids") or [])
+            hint = f"Recall source: {result['request_label']}"
+            if pin_count:
+                hint += f" with {pin_count} pin(s)"
+            self.hint_var.set(hint)
+
+    def open_selected_recall_candidate(self) -> None:
+        if self._recall_selected_candidate_event_id is None:
+            self.status_var.set("Select a recall candidate first.")
+            return
+
+        row = self._recall_candidate_rows.get(self._recall_selected_candidate_event_id)
+        if row is None:
+            self.status_var.set("The selected recall candidate is no longer available.")
+            return
+
+        summary = build_recall_candidate_summary(
+            row,
+            root=self.controller.workspace_store.root,
+        )
+        self.recall_candidate_selection_state.set(summary)
+        self._open_recall_row_in_forensics(
+            row,
+            status_message="Opened recall candidate in History / Forensics.",
+            hint_label="Recall candidate",
+        )
+
+    def run_recall_evaluation(self, *, refresh_dataset: bool = False) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Recall evaluation is disabled while a worker job is running.")
+            return
+
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Evaluating recall hit quality...")
+        try:
+            snapshot = self.controller.evaluate_recall_dataset(refresh_dataset=refresh_dataset)
+            self._apply_recall_evaluation(
+                snapshot,
+                status_message=(
+                    "Recall hit evaluation refreshed."
+                    if refresh_dataset
+                    else "Recall hit evaluation is ready."
+                ),
+            )
+        except Exception as exc:
+            self.status_var.set(f"Recall evaluation failed: {type(exc).__name__}: {exc}")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
+    def run_selected_recall_request(self) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Recall is disabled while a worker job is running.")
+            return
+        if self._recall_selected_request_index is None:
+            self.status_var.set("Select a prepared recall request first.")
+            return
+
+        pinned_event_ids = self._current_recall_pinned_event_ids()
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Building recall bundle...")
+        try:
+            result = self.controller.build_recall_bundle(
+                request_index=self._recall_selected_request_index,
+                pinned_event_ids=pinned_event_ids,
+            )
+            self._apply_recall_result(
+                result,
+                status_message=(
+                    f"Recall request {self._recall_selected_request_index} is ready."
+                    + (f" {len(pinned_event_ids)} pin(s) applied." if pinned_event_ids else "")
+                ),
+            )
+        except Exception as exc:
+            self.status_var.set(f"Recall failed: {type(exc).__name__}: {exc}")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
+    def run_manual_recall(self) -> dict[str, Any] | None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Manual recall is disabled while a worker job is running.")
+            return None
+
+        pinned_event_ids = self._current_recall_pinned_event_ids()
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Running manual recall...")
+        try:
+            limit = coerce_ui_int(
+                self.recall_limit.get(),
+                default=DEFAULT_LIMIT,
+                minimum=RECALL_MANUAL_LIMIT_MIN,
+                maximum=RECALL_MANUAL_LIMIT_MAX,
+            )
+            context_budget_chars = coerce_ui_int(
+                self.recall_context_budget_chars.get(),
+                default=DEFAULT_CONTEXT_BUDGET_CHARS,
+                minimum=RECALL_MANUAL_CONTEXT_BUDGET_MIN,
+                maximum=RECALL_MANUAL_CONTEXT_BUDGET_MAX,
+            )
+            self.recall_limit.set(limit)
+            self.recall_context_budget_chars.set(context_budget_chars)
+            result = self.controller.build_recall_bundle(
+                task_kind=self.recall_task_kind.get(),
+                query_text=self.recall_query.get(),
+                request_basis=self.recall_request_basis.get(),
+                file_hint=self.recall_file_hint.get(),
+                pinned_event_ids=pinned_event_ids,
+                limit=limit,
+                context_budget_chars=context_budget_chars,
+            )
+            self._apply_recall_result(
+                result,
+                status_message=(
+                    f"Manual recall for {self.recall_task_kind.get()} is ready."
+                    + (f" {len(pinned_event_ids)} pin(s) applied." if pinned_event_ids else "")
+                ),
+            )
+            return result
+        except Exception as exc:
+            self.status_var.set(f"Manual recall failed: {type(exc).__name__}: {exc}")
+            return None
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
 
     def _populate_forensics_navigation(self, snapshot: dict[str, Any]) -> None:
         recent_sessions = list(snapshot.get("recent_sessions") or [])
@@ -2856,6 +6086,60 @@ class LocalUiApp:
         self.run_vision_button.configure(state=run_state)
         self.run_audio_button.configure(state=run_state)
         self.run_thinking_button.configure(state=run_state)
+        self.refresh_recall_button.configure(state=run_state)
+        self.evaluate_recall_button.configure(state=run_state)
+        self.refresh_and_evaluate_recall_button.configure(state=run_state)
+        self.run_selected_recall_button.configure(state=run_state)
+        self.copy_recall_request_button.configure(state=run_state)
+        self.copy_recall_miss_button.configure(state=run_state)
+        self.apply_recall_miss_tweak_button.configure(state=run_state)
+        self.open_recall_miss_winner_button.configure(state=run_state)
+        if self.recall_eval_source_button is not None:
+            self.recall_eval_source_button.configure(
+                state=(
+                    run_state
+                    if busy
+                    else ("normal" if self._recall_eval_source_row is not None else "disabled")
+                )
+            )
+        if self.recall_eval_source_copy_button is not None:
+            self.recall_eval_source_copy_button.configure(
+                state=(
+                    run_state
+                    if busy
+                    else (
+                        "normal"
+                        if self._recall_selected_eval_miss_index is not None
+                        and str(self._recall_selected_eval_miss_index) in self._recall_request_rows
+                        else "disabled"
+                    )
+                )
+            )
+        if self.recall_eval_source_rerun_button is not None:
+            self.recall_eval_source_rerun_button.configure(
+                state=(
+                    run_state
+                    if busy
+                    else ("normal" if self._can_rerun_selected_recall_eval_source() else "disabled")
+                )
+            )
+        for index, button in enumerate(self.recall_eval_winner_buttons):
+            button.configure(
+                state=(
+                    run_state
+                    if busy
+                    else (
+                        "normal"
+                        if index < len(self._recall_eval_winner_rows)
+                        and recall_row_has_forensics_navigation(self._recall_eval_winner_rows[index])
+                        else "disabled"
+                    )
+                )
+            )
+        self.run_manual_recall_button.configure(state=run_state)
+        self.open_recall_candidate_button.configure(state=run_state)
+        self.pin_recall_candidate_button.configure(state=run_state)
+        self.clear_recall_pins_button.configure(state=run_state)
         self.refresh_diagnostics_button.configure(state=run_state)
 
     def _begin_status_animation(self, *, job_id: int, base_message: str) -> None:

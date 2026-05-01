@@ -2,127 +2,308 @@
 
 ## 目的
 
-この設計は、`software-satellite-lab` が最初に本格実装へ進むべき `M3: Recall / Context Builder` を定義する。
+この設計は、`gemma-lab` における `M3: Recall / Context Builder` の現行仕様と、ここから先の拡張余地を整理するための文書です。
 
-狙いは単純です。
+狙いは明快です。
 
-- 記憶をただ保存するだけで終わらせない
-- その場の仕事に効く形で思い出せるようにする
-- レビュー、設計、提案、失敗分析に使える文脈を安定して組み立てる
+- 記録した作業ログを、ただの保存庫で終わらせない
+- その場のタスクに効く形で、素早く、説明可能に思い出せるようにする
+- review / design / proposal / failure_analysis ごとに、使い道の異なる文脈束を安定して返す
 
-いまの repo にはすでに次の土台がある。
+この文書は構想メモではなく、いまの実装に追随した設計書として扱う。
+理想像だけでなく、すでに入っている判断も明示する。
+
+## この設計が先に立つ理由
+
+いまの repo には、すでに Recall の土台がある。
 
 - `scripts/software_work_events.py`
 - `scripts/memory_index.py`
 - `scripts/rebuild_memory_index.py`
+- `scripts/recall_context.py`
+- `scripts/prepare_recall_real_data.py`
+- `scripts/run_recall_demo.py`
 
-なので、次の一手は「保存方法」ではなく「取り出し方」を設計するのが自然。
+なので次の一手は、保存方式を増やすことではありません。
+実務で使える取り出し方を整え、評価し、調整し続けられる回路を固めることです。
 
-## なぜ最初にこれをやるのか
+これが弱いままだと:
 
-今のロードマップ順でいえば、M1 と M2 は土台が入り始めている。
-その次に必要なのは、実務で効く検索と文脈化の筋道です。
+- 記憶は増えても使われない
+- 毎回ゼロから考え直す
+- 良い提案も悪い失敗も次の判断に効かない
+- 後段の評価ループや学習候補抽出が弱くなる
 
-これがないと:
+Recall / Context Builder は、記録を判断力に変える最初のレイヤーです。
 
-- 記憶があっても使われない
-- エージェントが毎回ゼロから考える
-- 評価データが蓄積されても再利用されない
-- 後段の LoRA / SFT 候補抽出も弱くなる
+## 設計原則
 
-つまり、Recall / Context Builder は「使い物になるサテライトシステム」の最初の関門です。
+この機能では、次の性質を優先する。
+
+- local first
+- lexical first
+- explainable first
+- small sharp surface
+- stable output shape
+
+言い換えると、最初から派手な賢さを狙うのではなく、速く、見通しがよく、触るほど馴染む設計を優先する。
+
+特に大事なのは次の 3 点です。
+
+1. 返ってきた候補に理由が付いていること
+2. 長さが暴れず、同じ request でだいたい同じ形に落ちること
+3. 失敗時に、なぜ拾えなかったかを後から診断できること
 
 ## 非目的
 
-この設計では次をやらない。
+この段階では次を必須にしない。
 
-- vector search を最初から必須にする
-- 複雑な re-ranker モデルを先に入れる
-- 自動学習や自動プロンプト最適化まで踏み込む
-- 巨大な graph DB や外部検索基盤を入れる
-- UI を先に広げる
+- vector search の常用
+- learned re-ranker の導入
+- judge model での回答品質自動採点
+- 外部検索基盤や graph DB の導入
+- UI 側の大規模な先行投資
+- token 単位の厳密制御
 
-まずはローカルで速く、見通しがよく、直せる設計を優先する。
+まずはローカルで回り、壊れても直しやすく、改善の打ち手が見えることを優先する。
 
 ## 対象ユースケース
 
-最初の対象は4つに絞る。
+最初の task kind は 4 つに絞る。
 
-1. Review Recall
+1. `review`
    - 類似レビュー
    - 過去の修正パターン
-   - 失敗しやすい論点
+   - 見落としやすいリスク
 
-2. Design Recall
+2. `design`
    - 過去の設計判断
-   - 似たモジュール構成
-   - 採用された方針と却下された方針
+   - tradeoff の残り方
+   - 採用理由と却下理由
 
-3. Proposal Recall
-   - 似た実装提案
+3. `proposal`
+   - 類似提案
    - 受け入れられた提案文
-   - テストや検証付きの提案
+   - outcome や test pass に繋がった流れ
 
-4. Failure Analysis Recall
-   - quality_fail
-   - blocked
-   - failed
-   - repair needed
+4. `failure_analysis`
+   - `quality_fail`
+   - `failed`
+   - `blocked`
+   - repair / follow-up の履歴
 
-## 入出力
+## システムの責務
 
-### Input
+Recall / Context Builder の責務は 4 つです。
 
-Recall 層は次の情報を受け取る。
+1. request を正規化する
+2. index から候補を広めに回収する
+3. タスクに応じて候補を並べ替える
+4. 予算内で grouped context bundle に組み立てる
 
-- task kind
+逆に、この層の責務ではないものも明確にしておく。
+
+- source event の生成
+- index schema の定義そのもの
+- 最終回答の生成
+- 評価 UI の描画
+
+## アーキテクチャ概要
+
+```mermaid
+flowchart TD
+    A["RecallRequest"] --> B["normalize_recall_request"]
+    B --> C["retrieve_candidates"]
+    C --> D["rank_candidates"]
+    D --> E["block title assignment"]
+    E --> F["selection units / grouping"]
+    F --> G["budget trimming"]
+    G --> H["ContextBundle"]
+    H --> I["source_evaluation"]
+```
+
+補助的な評価ループは次のモジュールで支える。
+
+- `prepare_recall_real_data.py`
+  - 実データから prepared request を生成する
+- `run_recall_demo.py`
+  - dataset evaluation
+  - miss report
+  - previous/current diff
+
+## 入力契約
+
+### RecallRequest
+
+`RecallRequest` は最低限次を持つ。
+
+```python
+{
+  "task_kind": "review",
+  "query_text": "review the memory index patch",
+  "request_basis": "prompt-or-artifact",
+  "file_hints": ["scripts/memory_index.py"],
+  "surface_filters": ["chat", "thinking"],
+  "status_filters": ["ok", "quality_fail"],
+  "pinned_event_ids": ["event-123"],
+  "limit": 12,
+  "context_budget_chars": 6000,
+  "source_event_id": "event-456",
+}
+```
+
+#### 主要フィールド
+
+- `task_kind`
   - `review`
   - `design`
   - `proposal`
   - `failure_analysis`
-- user prompt
-- optional file paths
-- optional surface
-- optional model/backend hint
-- optional status filters
+- `query_text`
+  - 検索とランキングの中心になる文字列
+- `request_basis`
+  - いまは主に `prompt-or-artifact` と `pass_definition`
+- `file_hints`
+  - path match を強く見るための補助ヒント
+- `surface_filters`
+  - `chat`, `thinking`, `evaluation` など
+- `status_filters`
+  - 明示指定があれば retrieval 側で適用
+- `pinned_event_ids`
+  - query に乗らなくても候補として必ず参照したい event
+- `source_event_id`
+  - recall quality を計測するための正解 source
 
-### Output
+#### 正規化ポリシー
 
-出力は検索結果の羅列ではなく、文脈束にする。
+- `task_kind` は lower-case へ正規化
+- 空文字や重複は落とす
+- `limit` と `context_budget_chars` は正の整数に矯正
+- 不正な `task_kind` は例外にする
 
-最低限ほしい出力:
+## 出力契約
 
-- selected candidates
-- why each candidate was chosen
-- grouped context blocks
-- omitted-but-relevant count
-- token/character budget metadata
+### ContextBundle
 
-## 論理構成
+出力は検索結果の配列ではなく、用途別に束ねた context bundle とする。
+
+```python
+{
+  "bundle_version": 5,
+  "task_kind": "review",
+  "query_text": "review the memory index patch",
+  "request_basis": "prompt-or-artifact",
+  "file_hints": ["scripts/memory_index.py"],
+  "surface_filters": [],
+  "status_filters": [],
+  "pinned_event_ids": [],
+  "selected_count": 3,
+  "omitted_count": 7,
+  "budget": {
+    "context_budget_chars": 6000,
+    "effective_context_budget_chars": 6000,
+    "used_chars": 4210,
+  },
+  "selected_candidates": [...],
+  "blocks": [...],
+  "source_evaluation": {...},
+}
+```
+
+### Selected Candidate
+
+`selected_candidates` は最上位候補の参照情報を持つ。
+
+```python
+{
+  "event_id": "event-123",
+  "score": 23.4,
+  "reasons": ["fts-hit", "file-match", "accepted-signal"],
+  "block_title": "Related files and artifact paths",
+  "status": "ok",
+  "recorded_at_utc": "2026-04-13T10:00:00+00:00",
+  "session_id": "chat-main",
+  "session_surface": "chat",
+  "event_kind": "chat_turn",
+  "artifact_path": "artifacts/review/leader.json",
+  "prompt_excerpt": "Review scripts/memory_index.py patch for regressions.",
+}
+```
+
+pass definition ベースの request では、複数 event を 1 つの selection unit に束ねることがある。
+そのときは次の情報が追加される。
+
+- `grouped_by`
+- `group_member_count`
+- `group_member_event_ids`
+- `group_member_labels`
+
+### Source Evaluation
+
+`source_event_id` がある場合、bundle は recall quality 計測のための補助情報を返す。
+
+```python
+{
+  "source_event_id": "event-456",
+  "source_selected": True,
+  "source_rank": 2,
+  "source_score": 18.1,
+  "source_block_title": "Accepted outcomes",
+  "source_prompt_excerpt": "Review the memory index patch.",
+  "source_reasons": ["fts-hit", "accepted-signal"],
+  "source_selected_via_group": False,
+  "source_group_member_count": None,
+  "source_grouped_by": None,
+  "source_group_event_id": None,
+  "source_group_prompt_excerpt": None,
+  "source_group_member_event_ids": [],
+  "source_group_member_labels": [],
+  "miss_reason": None,
+  "source_exists_in_index": True,
+  "selected_count": 3,
+  "top_selected": [...],
+}
+```
+
+`source_selected_via_group` は、source 自身が selected candidate の代表ではなく、選ばれた group の member として拾われた場合に `True` になる。
+source が group の代表 candidate になった場合は `False` のまま、`source_grouped_by` と `source_group_member_count` で group 情報を確認する。
+
+主な `miss_reason` は次です。
+
+- `not_retrieved`
+- `ranked_out_by_limit`
+- `dropped_by_context_budget`
+- `dropped_by_block_budget`
+- `source_missing_from_index`
+
+## 処理フロー
 
 ### 1. Query Intake
 
-入力を `RecallRequest` に正規化する。
+`normalize_recall_request(...)` で request を `RecallRequest` に揃える。
 
-最低限のフィールド:
-
-- `task_kind`
-- `query_text`
-- `file_hints`
-- `surface_filters`
-- `status_filters`
-- `limit`
-- `context_budget_chars`
+ここで大事なのは、query の美しさではなく、後段が迷わず動ける形にすることです。
 
 ### 2. Candidate Retrieval
 
-第一段は `SQLite FTS5` から候補を引く。
+`retrieve_candidates(...)` は `MemoryIndex.search(...)` を使って候補を回収する。
 
-検索対象:
+検索の考え方は次の通り。
+
+- `SQLite FTS5` を第一段にする
+- surface ごとに回す
+- status ごとに回す
+- query を複数形に展開して oversample する
+- broad search も混ぜて取りこぼしを減らす
+
+#### 検索対象
+
+index 側で参照される主な列は次。
 
 - `prompt`
 - `output_text`
 - `notes_text`
+- `pass_definition`
 - `artifact_path`
 - `event_kind`
 - `session_surface`
@@ -130,31 +311,65 @@ Recall 層は次の情報を受け取る。
 - `model_id`
 - `status`
 
-初期方針:
+#### Query の組み立て
 
-- lexical first
-- status と surface で先に絞る
-- ファイルヒントがあるときは path hit を強く見る
+通常 request:
 
-### 3. Heuristic Ranking
+- `query_text` から token query を作る
+- `file_hints` からも補助 query を作る
+- 最後に broad search を 1 回混ぜる
 
-最初は learned ranking ではなく、明示的ヒューリスティクスでよい。
+`request_basis == "pass_definition"` の request:
 
-候補スコアの要素:
+- phrase query を最初に投げる
+- token query を併用する
+- broad search は混ぜない
+- context budget は通常より広げる
 
-- FTS score
-- file path exact / partial match
-- task kind と event kind の相性
-- accepted / ok の優先
-- quality_fail / failed を failure analysis では優先
-- recency
-- notes に `accepted`, `repair`, `review` などがあるか
+#### Oversample の意図
 
-### 4. Context Assembly
+選択前に十分な母集団を持つため、retrieval 時の `limit` は最終 `limit` より広く取る。
+これは ranking と budget trim の仕事を成立させるための前提です。
 
-検索結果をそのまま並べるのではなく、用途別に束ねる。
+### 3. Ranking
 
-初期の context block:
+`rank_candidates(...)` は learned ranker ではなく、明示的な加点減点で候補を並べる。
+
+主な要素は次。
+
+- `fts-hit`
+- `multi-query-hit`
+- `file-match`
+- `exact-query-match`
+- `query-phrase-match`
+- `query-coverage`
+- `query-head-match`
+- `query-head-mismatch`
+- `validation-command-match`
+- `validation-command-mismatch`
+- `task-affinity`
+- `accepted-signal`
+- `failure-signal`
+- `repair-signal`
+- `risk-signal`
+- `recent`
+- `pinned`
+
+#### ranking の思想
+
+- review では file hit と accepted outcome を強めに見る
+- failure_analysis では failure / repair を前に出す
+- pass definition request では exact phrase hit を強く見る
+- capability matrix 由来の pipe-delimited query では head anchor と `--only ...` の一致を見る
+
+この設計の良いところは、外したときに理由を追えることです。
+逆に弱点もはっきりしていて、言い換えや意味類似にはまだ強くない。
+
+### 4. Block Assignment
+
+ranking 後、各 candidate は block に振り分けられる。
+
+block title は現在次の 5 種です。
 
 - `Relevant prior prompts`
 - `Accepted outcomes`
@@ -162,186 +377,251 @@ Recall 層は次の情報を受け取る。
 - `Related files and artifact paths`
 - `Open risks`
 
-### 5. Budget Control
+task kind ごとに block の優先順は変わる。
 
-長くしすぎると逆効果なので、文脈サイズを制御する。
+- `review`
+  - files -> accepted -> failure -> relevant -> risks
+- `design`
+  - accepted -> relevant -> failure -> files -> risks
+- `proposal`
+  - relevant -> accepted -> failure -> files -> risks
+- `failure_analysis`
+  - failure -> accepted -> files -> relevant -> risks
 
-初期方針:
+### 5. Selection Unit Grouping
 
-- token ではなく char budget から始める
-- 各 block に上限を持つ
-- 上限超過時は:
-  - 重複候補を落とす
-  - 同趣旨の note を圧縮する
-  - status の弱い候補から落とす
+通常は 1 candidate = 1 selection unit です。
+ただし `request_basis == "pass_definition"` で `event_kind == "capability_result"` のときは、同じ `pass_definition` を共有する candidate 群を 1 つに束ねる。
 
-## データ契約
+この grouping の意図は 2 つあります。
 
-### RecallRequest
+- capability matrix 系の重複をそのまま並べない
+- source hit を「個別 event」ではなく「同じ合格条件の束」としても把握できるようにする
 
-```python
-{
-  "task_kind": "review",
-  "query_text": "review the memory index patch",
-  "file_hints": ["scripts/memory_index.py"],
-  "surface_filters": ["chat", "thinking"],
-  "status_filters": ["ok", "quality_fail"],
-  "limit": 12,
-  "context_budget_chars": 6000,
-}
-```
+### 6. Budget Control
 
-### RecallCandidate
+`build_context_bundle(...)` は char budget ベースで bundle を切り詰める。
 
-```python
-{
-  "event_id": "...",
-  "score": -3.42,
-  "reasons": ["fts-hit", "path-match", "accepted-note"],
-  "session_surface": "chat",
-  "event_kind": "chat_turn",
-  "status": "ok",
-  "prompt": "...",
-  "output_text": "...",
-  "artifact_path": "...",
-}
-```
+現在の制御は二段です。
 
-### ContextBundle
+1. bundle 全体の `effective_context_budget_chars`
+2. block ごとの budget ratio
 
-```python
-{
-  "task_kind": "review",
-  "query_text": "...",
-  "selected_count": 6,
-  "omitted_count": 11,
-  "budget": {
-    "context_budget_chars": 6000,
-    "used_chars": 4820,
-  },
-  "blocks": [
-    {"title": "Accepted outcomes", "items": [...]},
-    {"title": "Failure and repair patterns", "items": [...]},
-  ],
-}
-```
+block budget は task kind ごとに固定比率を持つ。
+これにより、1 ブロックだけで context を食い潰しにくくしている。
 
-## 予定モジュール
+候補が落ちる理由は明示する。
 
-最初の実装は次の分割が扱いやすい。
+- `ranked_out_by_limit`
+- `dropped_by_context_budget`
+- `dropped_by_block_budget`
 
-- `scripts/recall_context.py`
-  - request normalization
-  - retrieval orchestration
-  - context assembly
-- `tests/test_recall_context.py`
-  - recall request normalization
-  - ranking
-  - budget trimming
-  - grouped output
+ここはかなり大事です。
+Recall が弱いのか、Ranking が悪いのか、Budget がきついのかを分けて見られないと、改善が鈍るからです。
 
-既存モジュールとの関係:
+## 実装モジュール
 
-- `software_work_events.py`
-  - source event contract
-- `memory_index.py`
-  - candidate retrieval source
+### `scripts/recall_context.py`
 
-## ルール
+責務:
 
-### Task Kind ごとの優先度
+- request normalization
+- query construction
+- candidate retrieval
+- heuristic ranking
+- block assignment
+- pass-definition grouping
+- context budget trimming
+- source evaluation
 
-#### Review
+### `scripts/prepare_recall_real_data.py`
 
-- accepted review-like items を優先
-- file path hit を強く優先
-- 過去の quality_fail も残す
+責務:
 
-#### Design
+- 実 event から prepared request を作る
+- baseline request を作る
+- adversarial pass-definition request を作る
+- bundle snapshot を保存する
+- dataset に source hit 情報を埋める
 
-- accepted design-like proposals を優先
-- notes に decision や tradeoff があるものを優先
+### `scripts/run_recall_demo.py`
 
-#### Proposal
+責務:
 
-- 実装提案と最終 outcome の両方を見せる
-- test pass に繋がったものを優先
+- prepared request 一覧
+- dataset evaluation
+- miss report
+- previous/current diff
+- bundle の text/json 出力
 
-#### Failure Analysis
+## 評価ループとの接続
 
-- `quality_fail`, `failed`, `blocked` を優先
-- repair note や follow-up があるものを優先
+Recall は「作ったら終わり」ではなく、「source hit を計測しながら絞る」前提で設計する。
 
-## 実装フェーズ
+評価ループの詳細は `docs/recall_hit_quality_loop.md` に譲るが、この設計と接続する要点は次です。
 
-### Phase A
+- prepared request ごとに `source_event_id` を持つ
+- bundle に `source_evaluation` を埋める
+- evaluation summary で hit rate を集計する
+- variant ごとの差分を比較する
+- miss reason ごとに次の打ち手を考えられる
 
-- `RecallRequest`
-- `RecallCandidate`
-- `ContextBundle`
-- `MemoryIndex.search(...)` を使った最小 retrieval
-- 単純 ranking
+variant は現時点で次を持つ。
 
-### Phase B
+- `baseline`
+- `adversarial-pass-definition`
 
+## 完了済みの仕様
+
+現時点で、少なくとも次はすでに設計から実装へ落ちている。
+
+- 4 task kind の分岐
+- request normalization
+- lexical retrieval
 - file hint matching
-- status-aware grouping
-- budget trim
 - explainable reason tags
+- task-aware block ordering
+- char budget trimming
+- source hit / miss の計測
+- pass-definition request の phrase-first retrieval
+- same pass-definition grouping
+- pinned event の注入
+- evaluation summary の記録
+- source が pass-definition group 経由で選ばれたときの group metadata 記録
 
-### Phase C
+ここは素直に強いです。
+発想だけでなく、すでに検証可能な形になっている。
 
-- task-kind specific block assembly
-- related file clustering
-- future vector fallback hook
+## 未解決課題
 
-## 検証
+ただし、まだ甘いところもある。
 
-最初の検証は派手でなくてよい。
+1. semantic recall は弱い
+   - FTS と rule base が中心なので、言い換えにまだ弱い
 
-必要なもの:
+2. schema 依存が高い
+   - `notes_text`, `status`, `pass_definition` の品質に引っ張られる
 
-- hand-labeled query set を 20-30 件
-- 各 query ごとに「欲しい候補」数件を人手で定義
-- `Hit@5`
-- `Hit@10`
-- noise rate
-- context usefulness の手動評価
+3. char budget は token budget より粗い
+   - LLM 実消費とのズレが残る
 
-最低ライン:
+4. task labeling はまだ heuristic
+   - prepared request 生成時の `task_kind` 推定は完全ではない
 
-- review/design/proposal/failure_analysis の各 task kind で、少なくとも 1 件は「これは明らかに使える」と言える recall が返る
+5. grouped output の説明はまだ軽量
+   - source group metadata と CLI / UI の member label 表示は入った
+   - ただし member ごとの詳細比較や rich diagnostics はまだ次段でよい
 
-## リスク
+## 今後の拡張方針
 
-1. Event schema がまだ薄い
-   - notes の意味づけが弱い
-2. FTS only だと似た概念の言い換えに弱い
-3. 現在の session entries は review/design/proposal のラベルがまだ粗い
-4. char budget は token budget より雑
+次の拡張は、いまの説明可能性を壊さない順で入れる。
 
-ただし、これは止まる理由ではない。
-最初は雑でも、使われる回路を先に通す方が価値が高い。
+### Phase 1
 
-## 完了条件
+- query rewrite の小改善
+- file hint の自動補完
+- status / surface の既定値の見直し
+- summary 文字列の整形改善
+
+### Phase 2
+
+- optional vector fallback
+- lexical + semantic の hybrid retrieval
+- miss reason ごとの suggested tweak 強化
+
+### Phase 3
+
+- learned re-ranker の検討
+- token-aware budget への移行
+- user-facing diagnostics の洗練
+
+## Done の定義
 
 この設計の Done は次。
 
-- Recall request から context bundle まで一通り通る
-- review/design/proposal/failure_analysis の4種類で挙動が分かれる
-- 結果に理由タグが付き、なぜ拾ったかが分かる
-- 長すぎる context を落とせる
-- テストで ranking と budget 制御が確認できる
+- `RecallRequest` から `ContextBundle` まで一通り通る
+- 4 task kind で block ordering と ranking が変わる
+- なぜ拾ったかを `reasons` で説明できる
+- 落ちた理由を `miss_reason` で追える
+- prepared request と evaluation summary が同期する
+- pass-definition request を通常 request と分けて扱える
+- テストで ranking / budget / grouping / source evaluation を確認できる
+
+## 今回の締め範囲
+
+この M3 checkpoint では、次を完成ラインとして扱う。
+
+- local SQLite / FTS5 を使った lexical recall
+- reason tag で説明できる rule-based ranking
+- task kind ごとの block assembly
+- prepared request dataset による source-hit 評価
+- CLI と Local UI で同じ dataset / bundle / evaluation summary を読む流れ
+- manual recall と pinned event compare で miss を診断できる導線
+- pass-definition group の代表候補と member labels を CLI / UI で追える表示
+
+逆に、次は M3 の完了条件に含めない。
+
+- semantic / vector recall
+- learned re-ranker
+- token-aware budget
+- answer usefulness の自動 judge
+- 外部検索基盤や大規模 dashboard
+
+ここを分けるのが重要です。
+いま必要なのは Recall を賢く見せることではなく、外したときに人間が直せる状態で締めることです。
 
 ## 結論
 
-最初に取り掛かる設計としては、Recall / Context Builder が最適です。
+Recall / Context Builder は、この repo を単なる作業ログ置き場から、過去判断をちゃんと再利用できる開発基盤へ進める中心レイヤーです。
 
-理由は明快で:
+いまの設計は、背伸びした賢さより、実務での手触りを優先している。
+その判断は正しいです。
 
-- 今ある M1/M2 の土台をそのまま活かせる
-- 実務で「使える感」が最初に出る
-- 後続の評価ループと agent lane を強くできる
-- 将来の学習基盤にも直結する
+次に磨くべきは方向性ではなく、診断しやすさと取りこぼしの減らし方です。
+そこまで見えているので、かなり良い地点に来ています。
 
-ここが通ると、この repo は単なる保存庫から、思い出して役に立つ開発エンジンに一段進みます。
+## 10分レビュー用チェックリスト
+
+この文書と実装を 10 分で見直すなら、次だけ回せば十分です。
+
+### 1. 入力契約
+
+- `task_kind` の 4 種が文書と実装で一致しているか
+- `request_basis`, `pinned_event_ids`, `source_event_id` が設計書に明記されているか
+- default 値の説明が、実装の `DEFAULT_LIMIT` / `DEFAULT_CONTEXT_BUDGET_CHARS` とズレていないか
+
+### 2. Retrieval
+
+- `pass_definition` request だけ phrase-first になっている説明があるか
+- broad search を使う条件が文書で曖昧になっていないか
+- 検索対象列に `pass_definition` が漏れていないか
+
+### 3. Ranking
+
+- `file-match`, `accepted-signal`, `failure-signal`, `pinned` など主要 reason tag が文書にあるか
+- review と failure_analysis の優先度差が説明されているか
+- query head / validation command の一致判定が必要十分に書かれているか
+
+### 4. Assembly
+
+- 5 つの block title が実装と一致しているか
+- task kind ごとの block 順序が合っているか
+- pass-definition grouping の条件と意図が書けているか
+
+### 5. Budget / Miss
+
+- `ranked_out_by_limit`, `dropped_by_context_budget`, `dropped_by_block_budget`, `source_missing_from_index` が明記されているか
+- `effective_context_budget_chars` の存在が説明されているか
+- char budget の粗さを既知の制約として認めているか
+
+### 6. 評価ループ
+
+- `source_evaluation` の役割が説明されているか
+- prepared request -> evaluation -> diff の流れが途切れず読めるか
+- `baseline` と `adversarial-pass-definition` の 2 variant が文書に残っているか
+
+### 7. 最後のひと押し
+
+- この文書を読んだ人が「次にどこを触ればよいか」を 30 秒で言えるか
+- 実装済みのことと、未実装の理想が混ざっていないか
+- 読後に「賢そう」ではなく「直せそう」と感じるか

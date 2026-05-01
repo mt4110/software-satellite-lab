@@ -10,7 +10,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
 from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
+from software_work_events import read_event_log  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
@@ -87,6 +89,56 @@ class MemoryIndexTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["session_surface"], "vision")
         self.assertEqual(matches[0]["status"], "quality_fail")
+
+    def test_search_indexes_pass_definition_for_capability_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            matrix_path = root / "artifacts" / "capability_matrix" / "matrix.json"
+            payload = build_artifact_payload(
+                artifact_kind="capability_matrix",
+                status="ok",
+                runtime=build_runtime_record(backend="capability-matrix", model_id="backend-a"),
+                prompts=build_prompt_record(),
+                extra={
+                    "results": [
+                        {
+                            "capability": "thinking",
+                            "phase": "phase5",
+                            "status": "ok",
+                            "artifact_kind": "thinking",
+                            "artifact_path": str(root / "artifacts" / "thinking" / "thinking.json"),
+                            "validation_command": "python scripts/run_capability_matrix.py --only thinking",
+                            "claim_scope": "live model generation on a small local prompt",
+                            "output_preview": "Use breadth-first search when you need the shortest path.",
+                            "blocker": None,
+                            "quality_status": "pass",
+                            "quality_checks": [],
+                            "quality_notes": [],
+                            "notes": [],
+                            "runtime_backend": "gemma-live-thinking",
+                            "execution_status": "ok",
+                            "validation_mode": "live",
+                            "pass_definition": "Opaque scratchpad seal uncompromised verdict retention.",
+                            "preprocessing_lineage": [],
+                        }
+                    ]
+                },
+            )
+            write_artifact(matrix_path, payload)
+
+            summary = rebuild_memory_index(root=root)
+            index = MemoryIndex(Path(summary["index_path"]))
+            matches = index.search("Opaque OR scratchpad OR retention")
+            event_log = read_event_log(Path(summary["event_log_path"]))
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(event_log["event_count"], 1)
+        self.assertEqual(event_log["events"][0]["event_kind"], "capability_result")
+        self.assertEqual(matches[0]["event_kind"], "capability_result")
+        self.assertEqual(
+            matches[0]["pass_definition"],
+            "Opaque scratchpad seal uncompromised verdict retention.",
+        )
 
 
 if __name__ == "__main__":

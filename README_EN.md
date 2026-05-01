@@ -68,6 +68,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `README_EN.md`: English overview
 - `PLAN.md`: redesign blueprint and milestones
 - `docs/recall_context_builder_design.md`: first implementation design for Recall / Context Builder
+- `docs/recall_hit_quality_loop.md`: hit-quality visualization and lightweight evaluation loop for Recall
 
 ## Git Rules
 
@@ -99,6 +100,9 @@ python -m venv .venv
 PYTHONPATH=scripts .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/rebuild_memory_index.py
+.venv/bin/python scripts/run_recall_demo.py --list-requests
+.venv/bin/python scripts/run_recall_demo.py --eval --miss-report
+.venv/bin/python scripts/run_recall_demo.py --request-index 1
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

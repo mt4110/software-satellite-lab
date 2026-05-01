@@ -235,6 +235,7 @@ Validation:
 Current baseline:
 
 - `scripts/software_work_events.py` now provides the first event normalization layer over existing workspace/session entries
+- capability matrix results can be backfilled into the same software-work event shape for recall and evaluation
 
 ### M2. Local Memory Index
 
@@ -257,12 +258,13 @@ Validation:
 Current baseline:
 
 - `scripts/memory_index.py` and `scripts/rebuild_memory_index.py` now provide the first rebuildable local `SQLite FTS5` index over software-work events
+- the index includes capability matrix events and `pass_definition`, which makes contract-based recall evaluable without a separate store
 
 ### M3. Recall and Context Builder
 
 Goal:
 
-- assemble useful context for review, design, and proposal tasks
+- assemble useful context for review, design, proposal, and failure-analysis tasks
 
 Deliverables:
 
@@ -271,17 +273,47 @@ Deliverables:
 - context assembly rules for:
   - review
   - design
-  - implementation proposal
+  - proposal
   - failure analysis
 
 Validation:
 
 - shadow runs on existing repo artifacts
-- retrieval quality measured with a small hand-labeled query set
+- source-hit coverage measured on a prepared real-data request set
+- CLI and Local UI can inspect the same recall snapshots
 
-Current design note:
+Current baseline:
 
-- `docs/recall_context_builder_design.md` defines the first implementation shape for M3
+- `scripts/recall_context.py` implements the current `RecallRequest` to `ContextBundle` path
+- supported task kinds are `review`, `design`, `proposal`, and `failure_analysis`
+- ranking is lexical and rule-based, with explainable reason tags rather than a learned re-ranker
+- context assembly groups selected candidates into stable blocks and trims them against a character budget
+- `source_event_id` support records whether the expected source was selected and why it missed when it was not selected
+- pass-definition requests use phrase-first retrieval and same-pass-definition grouping
+- pinned event ids can be injected for manual compare and source-hit diagnosis
+- `docs/recall_context_builder_design.md` is the implementation-following design note for this milestone
+- `docs/recall_hit_quality_loop.md` defines the lightweight source-hit evaluation loop used to tune M3
+
+Current validation:
+
+- `scripts/prepare_recall_real_data.py` builds prepared real-data requests from workspace and capability-matrix events
+- `scripts/run_recall_demo.py` lists requests, evaluates source-hit coverage, reports misses, and writes reusable snapshots
+- Local UI reads the same recall dataset and evaluation summary for request selection, miss diagnosis, manual recall, and pin compare
+- unit tests cover request normalization, ranking, budget trimming, source evaluation, pass-definition grouping, dataset generation, runner behavior, and Local UI recall helpers
+
+M3 checkpoint scope:
+
+- keep M3 focused on local, explainable, lexical recall
+- treat source-hit measurement as the M3 quality loop, not as the full M4 evaluation system
+- finish by keeping docs, tests, CLI reports, and Local UI recall flows consistent with the current implementation
+
+Deferred from M3:
+
+- semantic/vector fallback
+- learned re-ranking
+- token-aware budgeting
+- answer-usefulness judging
+- large dashboard or external search infrastructure
 
 ### M4. Evaluation Loop
 
@@ -303,6 +335,11 @@ Validation:
   - what failed
   - what was repaired
   - which patterns recur
+
+Current baseline:
+
+- M3 already includes a narrow source-hit evaluation loop for Recall quality
+- broader M4 work remains open: acceptance/rejection signals, repair linkage, model-output comparison, and evidence curation across the whole system
 
 ### M5. Agent Lane for Software Tasks
 

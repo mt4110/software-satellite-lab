@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from gemma_runtime import repo_root
 from software_work_events import (
-    rebuild_workspace_event_log,
+    iter_capability_matrix_events,
     iter_workspace_events,
+    write_event_log,
     workspace_event_log_path,
 )
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
+
+
+def _clean_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -37,6 +46,7 @@ def default_memory_index_path(
 def _event_row(event: dict[str, Any]) -> dict[str, Any]:
     session = dict(event.get("session") or {})
     content = dict(event.get("content") or {})
+    options = dict(content.get("options") or {})
     outcome = dict(event.get("outcome") or {})
     source_refs = dict(event.get("source_refs") or {})
     artifact_ref = dict(source_refs.get("artifact_ref") or {})
@@ -54,6 +64,7 @@ def _event_row(event: dict[str, Any]) -> dict[str, Any]:
         "prompt": content.get("prompt"),
         "output_text": content.get("output_text"),
         "notes_text": "\n".join(item for item in notes if isinstance(item, str)),
+        "pass_definition": _clean_text(options.get("pass_definition")),
         "artifact_path": artifact_ref.get("artifact_path"),
         "payload_json": json.dumps(event, ensure_ascii=False),
     }
@@ -69,15 +80,49 @@ class MemoryIndex:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self.connect()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _schema_version(self, connection: sqlite3.Connection) -> int | None:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
+
     def ensure_schema(self) -> None:
-        with self.connect() as connection:
-            connection.executescript(
+        with self.connection() as connection:
+            connection.execute("PRAGMA journal_mode=WAL;")
+            connection.execute(
                 """
-                PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
+                )
+                """
+            )
+            if self._schema_version(connection) != INDEX_SCHEMA_VERSION:
+                connection.executescript(
+                    """
+                    DROP TABLE IF EXISTS events_fts;
+                    DROP TABLE IF EXISTS events;
+                    """
+                )
+            connection.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS events (
                     event_id TEXT PRIMARY KEY,
                     recorded_at_utc TEXT,
@@ -91,6 +136,7 @@ class MemoryIndex:
                     prompt TEXT,
                     output_text TEXT,
                     notes_text TEXT,
+                    pass_definition TEXT,
                     artifact_path TEXT,
                     payload_json TEXT NOT NULL
                 );
@@ -99,6 +145,7 @@ class MemoryIndex:
                     prompt,
                     output_text,
                     notes_text,
+                    pass_definition,
                     artifact_path,
                     event_kind,
                     session_surface,
@@ -116,13 +163,13 @@ class MemoryIndex:
 
     def clear(self) -> None:
         self.ensure_schema()
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute("DELETE FROM events")
             connection.execute("DELETE FROM events_fts")
 
     def index_events(self, events: list[dict[str, Any]]) -> int:
         self.ensure_schema()
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute("DELETE FROM events")
             connection.execute("DELETE FROM events_fts")
             for event in events:
@@ -142,9 +189,10 @@ class MemoryIndex:
                         prompt,
                         output_text,
                         notes_text,
+                        pass_definition,
                         artifact_path,
                         payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["event_id"],
@@ -159,6 +207,7 @@ class MemoryIndex:
                         row["prompt"],
                         row["output_text"],
                         row["notes_text"],
+                        row["pass_definition"],
                         row["artifact_path"],
                         row["payload_json"],
                     ),
@@ -170,19 +219,21 @@ class MemoryIndex:
                         prompt,
                         output_text,
                         notes_text,
+                        pass_definition,
                         artifact_path,
                         event_kind,
                         session_surface,
                         session_mode,
                         model_id,
                         status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["event_id"],
                         row["prompt"],
                         row["output_text"],
                         row["notes_text"],
+                        row["pass_definition"],
                         row["artifact_path"],
                         row["event_kind"],
                         row["session_surface"],
@@ -217,7 +268,7 @@ class MemoryIndex:
         if filters:
             filter_sql = " AND " + " AND ".join(filters)
 
-        with self.connect() as connection:
+        with self.connection() as connection:
             if query and query.strip():
                 sql = f"""
                     SELECT
@@ -233,6 +284,7 @@ class MemoryIndex:
                         e.prompt,
                         e.output_text,
                         e.notes_text,
+                        e.pass_definition,
                         e.artifact_path,
                         bm25(events_fts) AS score
                     FROM events_fts
@@ -257,6 +309,7 @@ class MemoryIndex:
                         e.prompt,
                         e.output_text,
                         e.notes_text,
+                        e.pass_definition,
                         e.artifact_path,
                         NULL AS score
                     FROM events e
@@ -267,6 +320,36 @@ class MemoryIndex:
                 rows = connection.execute(sql, [*parameters, limit]).fetchall()
         return [dict(row) for row in rows]
 
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    event_id,
+                    recorded_at_utc,
+                    workspace_id,
+                    session_id,
+                    session_surface,
+                    session_mode,
+                    model_id,
+                    event_kind,
+                    status,
+                    prompt,
+                    output_text,
+                    notes_text,
+                    pass_definition,
+                    artifact_path,
+                    payload_json
+                FROM events
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
 
 def rebuild_memory_index(
     *,
@@ -276,17 +359,28 @@ def rebuild_memory_index(
     event_log_path: Path | None = None,
 ) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
-    events = iter_workspace_events(root=resolved_root, workspace_id=workspace_id)
-    log_payload = rebuild_workspace_event_log(
-        root=resolved_root,
-        workspace_id=workspace_id,
-        output_path=event_log_path or workspace_event_log_path(workspace_id=workspace_id, root=resolved_root),
+    workspace_events = iter_workspace_events(root=resolved_root, workspace_id=workspace_id)
+    matrix_events = iter_capability_matrix_events(root=resolved_root, workspace_id=workspace_id)
+    events = sorted(
+        [*workspace_events, *matrix_events],
+        key=lambda item: (
+            str(item.get("recorded_at_utc") or ""),
+            str(item.get("event_id") or ""),
+        ),
     )
+    target_event_log_path = event_log_path or workspace_event_log_path(
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+    log_payload = write_event_log(target_event_log_path, events, workspace_id=workspace_id)
+    log_payload["path"] = str(target_event_log_path)
     target_index_path = index_path or default_memory_index_path(workspace_id=workspace_id, root=resolved_root)
     index = MemoryIndex(target_index_path)
     indexed_count = index.index_events(events)
     return {
         "workspace_id": workspace_id,
+        "workspace_event_count": len(workspace_events),
+        "capability_event_count": len(matrix_events),
         "event_count": len(events),
         "indexed_count": indexed_count,
         "event_log_path": log_payload["path"],
