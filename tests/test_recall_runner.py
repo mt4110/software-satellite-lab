@@ -487,6 +487,51 @@ class RecallRunnerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("reason=ranked_out_by_limit", stdout.getvalue())
 
+    def test_main_prepare_eval_does_not_rebuild_index_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = WorkspaceSessionStore(root=root)
+            messages = store.chat_messages_for_next_turn(
+                model_id="backend-a",
+                system_prompt="You are concise.",
+            )
+            store.record_chat_turn(
+                model_id="backend-a",
+                status="ok",
+                artifact_path=root / "artifacts" / "text" / "review.json",
+                prompt="Review the memory index patch.",
+                system_prompt="You are concise.",
+                resolved_user_prompt="Review the memory index patch.",
+                output_text="Looks good with one regression note.",
+                base_messages=messages,
+                notes=["review accepted"],
+            )
+
+            stdout = io.StringIO()
+            with patch("run_recall_demo.rebuild_memory_index") as rebuild_mock:
+                rebuild_mock.side_effect = AssertionError("unexpected duplicate rebuild")
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run_recall_demo.py",
+                        "--root",
+                        str(root),
+                        "--prepare-real-data",
+                        "--eval",
+                        "--max-requests",
+                        "1",
+                        "--max-adversarial-requests",
+                        "0",
+                    ],
+                ):
+                    with redirect_stdout(stdout):
+                        exit_code = main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Source hits:", stdout.getvalue())
+        rebuild_mock.assert_not_called()
+
     def test_main_refreshes_stale_not_retrieved_bundle_against_current_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

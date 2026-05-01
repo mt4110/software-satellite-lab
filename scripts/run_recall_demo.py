@@ -852,7 +852,11 @@ def main() -> int:
     args = parser.parse_args()
     resolved_root = _resolve_root(args.root)
     effective_index_path = args.index_path
-    if effective_index_path is None and (args.request_index is not None or args.eval or args.miss_report):
+    if (
+        effective_index_path is None
+        and not args.prepare_real_data
+        and (args.request_index is not None or args.eval or args.miss_report)
+    ):
         index_summary = rebuild_memory_index(
             root=resolved_root,
             workspace_id=args.workspace_id,

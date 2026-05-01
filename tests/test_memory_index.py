@@ -207,6 +207,19 @@ class MemoryIndexTests(unittest.TestCase):
         self.assertEqual(len(matches), 2)
         self.assertEqual(len({match["event_id"] for match in matches}), 2)
 
+    def test_rebuild_reports_invalid_capability_matrix_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            broken_path = root / "artifacts" / "capability_matrix" / "broken.json"
+            broken_path.parent.mkdir(parents=True, exist_ok=True)
+            broken_path.write_text("{not-json", encoding="utf-8")
+
+            summary = rebuild_memory_index(root=root)
+
+        self.assertEqual(summary["capability_matrix_error_count"], 1)
+        self.assertEqual(summary["capability_matrix_errors"][0]["path"], str(broken_path.resolve()))
+        self.assertIn("JSONDecodeError", summary["capability_matrix_errors"][0]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

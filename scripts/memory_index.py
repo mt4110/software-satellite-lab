@@ -360,7 +360,12 @@ def rebuild_memory_index(
 ) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
     workspace_events = iter_workspace_events(root=resolved_root, workspace_id=workspace_id)
-    matrix_events = iter_capability_matrix_events(root=resolved_root, workspace_id=workspace_id)
+    capability_matrix_errors: list[dict[str, str]] = []
+    matrix_events = iter_capability_matrix_events(
+        root=resolved_root,
+        workspace_id=workspace_id,
+        errors=capability_matrix_errors,
+    )
     events = sorted(
         [*workspace_events, *matrix_events],
         key=lambda item: (
@@ -381,6 +386,8 @@ def rebuild_memory_index(
         "workspace_id": workspace_id,
         "workspace_event_count": len(workspace_events),
         "capability_event_count": len(matrix_events),
+        "capability_matrix_error_count": len(capability_matrix_errors),
+        "capability_matrix_errors": capability_matrix_errors,
         "event_count": len(events),
         "indexed_count": indexed_count,
         "event_log_path": log_payload["path"],

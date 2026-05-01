@@ -469,6 +469,7 @@ def iter_capability_matrix_events(
     *,
     root: Path | None = None,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
+    errors: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     resolved_root = _resolve_root(root)
     matrix_root = capability_matrix_root(resolved_root)
@@ -479,7 +480,14 @@ def iter_capability_matrix_events(
     for path in sorted(matrix_root.glob("*.json")):
         try:
             payload = read_artifact(path)
-        except Exception:
+        except Exception as exc:
+            if errors is not None:
+                errors.append(
+                    {
+                        "path": str(path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
             continue
         if payload.get("artifact_kind") != "capability_matrix":
             continue

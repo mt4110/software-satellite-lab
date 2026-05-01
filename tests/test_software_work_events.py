@@ -175,6 +175,21 @@ class SoftwareWorkEventTests(unittest.TestCase):
         self.assertIn("hardware-limited run", events[0]["content"]["notes"])
         self.assertEqual(events[1]["outcome"]["status"], "ok")
 
+    def test_capability_matrix_read_errors_can_be_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            broken_path = root / "artifacts" / "capability_matrix" / "broken.json"
+            broken_path.parent.mkdir(parents=True, exist_ok=True)
+            broken_path.write_text("{not-json", encoding="utf-8")
+            errors: list[dict[str, str]] = []
+
+            events = iter_capability_matrix_events(root=root, errors=errors)
+
+        self.assertEqual(events, [])
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["path"], str(broken_path.resolve()))
+        self.assertIn("JSONDecodeError", errors[0]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
