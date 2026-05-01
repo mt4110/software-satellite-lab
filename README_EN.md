@@ -83,6 +83,10 @@ These are treated as baseline assets for the redesign, not as throwaway work.
   - local `SQLite FTS5` memory index foundation
 - `scripts/rebuild_memory_index.py`
   - rebuild command for the event log and memory index
+- `scripts/evaluation_loop.py`
+  - foundation for acceptance, rejection, review-resolution, test-pass, test-fail signals, comparisons, curation filters, adoption checklists, preview-only export, and evaluation snapshots
+- `scripts/run_evaluation_loop.py`
+  - CLI for writing evaluation snapshots and optional explicit signals, comparisons, and curation previews
 
 ## Setup
 
@@ -103,6 +107,10 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_recall_demo.py --list-requests
 .venv/bin/python scripts/run_recall_demo.py --eval --miss-report
 .venv/bin/python scripts/run_recall_demo.py --request-index 1
+.venv/bin/python scripts/run_evaluation_loop.py
+.venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind acceptance --source-event-id <event-id>
+.venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind review_resolved --source-event-id <event-id> --review-id <review-id> --resolution-summary "Review thread closed." --curation-preview
+.venv/bin/python scripts/run_evaluation_loop.py --curation-preview --curation-state ready --curation-reason review_resolved --curation-limit 10
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

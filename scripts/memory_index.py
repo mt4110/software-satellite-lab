@@ -17,7 +17,7 @@ from software_work_events import (
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 
 
 def _clean_text(value: Any) -> str | None:
@@ -25,6 +25,38 @@ def _clean_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _quality_check_verdict(value: bool) -> str:
+    return "pass" if value else "fail"
+
+
+def _quality_check_terms(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    terms: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        check_name = _clean_text(item.get("name"))
+        passed = item.get("pass")
+        if check_name is None or not isinstance(passed, bool):
+            continue
+        check_detail = _clean_text(item.get("detail"))
+        check_verdict = _quality_check_verdict(passed)
+        term = " ".join(
+            part
+            for part in (check_name, check_verdict, check_detail)
+            if part
+        )
+        if term:
+            terms.append(term)
+    return terms
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -44,27 +76,41 @@ def default_memory_index_path(
 
 
 def _event_row(event: dict[str, Any]) -> dict[str, Any]:
-    session = dict(event.get("session") or {})
-    content = dict(event.get("content") or {})
-    options = dict(content.get("options") or {})
-    outcome = dict(event.get("outcome") or {})
-    source_refs = dict(event.get("source_refs") or {})
-    artifact_ref = dict(source_refs.get("artifact_ref") or {})
+    session = _dict_or_empty(event.get("session"))
+    content = _dict_or_empty(event.get("content"))
+    options = _dict_or_empty(content.get("options"))
+    outcome = _dict_or_empty(event.get("outcome"))
+    workspace = _dict_or_empty(event.get("workspace"))
+    source_refs = _dict_or_empty(event.get("source_refs"))
+    artifact_ref = _dict_or_empty(source_refs.get("artifact_ref"))
     notes = content.get("notes") or []
+    quality_status = _clean_text(outcome.get("quality_status"))
+    execution_status = _clean_text(outcome.get("execution_status"))
+    evaluation_terms = [
+        quality_status,
+        execution_status,
+        _clean_text(options.get("validation_mode")),
+        _clean_text(options.get("validation_command")),
+        _clean_text(options.get("claim_scope")),
+    ]
+    evaluation_terms.extend(_quality_check_terms(options.get("quality_checks")))
     return {
         "event_id": str(event.get("event_id") or ""),
         "recorded_at_utc": event.get("recorded_at_utc"),
-        "workspace_id": dict(event.get("workspace") or {}).get("workspace_id"),
+        "workspace_id": workspace.get("workspace_id"),
         "session_id": session.get("session_id"),
         "session_surface": session.get("surface"),
         "session_mode": session.get("mode"),
         "model_id": session.get("selected_model_id") or outcome.get("model_id"),
         "event_kind": event.get("event_kind"),
         "status": outcome.get("status"),
+        "quality_status": quality_status,
+        "execution_status": execution_status,
         "prompt": content.get("prompt"),
         "output_text": content.get("output_text"),
         "notes_text": "\n".join(item for item in notes if isinstance(item, str)),
         "pass_definition": _clean_text(options.get("pass_definition")),
+        "evaluation_signal_text": "\n".join(item for item in evaluation_terms if item),
         "artifact_path": artifact_ref.get("artifact_path"),
         "payload_json": json.dumps(event, ensure_ascii=False),
     }
@@ -115,6 +161,7 @@ class MemoryIndex:
                 """
             )
             if self._schema_version(connection) != INDEX_SCHEMA_VERSION:
+                # The index is a rebuildable cache sourced from manifests and event logs.
                 connection.executescript(
                     """
                     DROP TABLE IF EXISTS events_fts;
@@ -133,10 +180,13 @@ class MemoryIndex:
                     model_id TEXT,
                     event_kind TEXT,
                     status TEXT,
+                    quality_status TEXT,
+                    execution_status TEXT,
                     prompt TEXT,
                     output_text TEXT,
                     notes_text TEXT,
                     pass_definition TEXT,
+                    evaluation_signal_text TEXT,
                     artifact_path TEXT,
                     payload_json TEXT NOT NULL
                 );
@@ -152,6 +202,9 @@ class MemoryIndex:
                     session_mode,
                     model_id,
                     status,
+                    quality_status,
+                    execution_status,
+                    evaluation_signal_text,
                     tokenize = 'unicode61'
                 );
                 """
@@ -186,13 +239,16 @@ class MemoryIndex:
                         model_id,
                         event_kind,
                         status,
+                        quality_status,
+                        execution_status,
                         prompt,
                         output_text,
                         notes_text,
                         pass_definition,
+                        evaluation_signal_text,
                         artifact_path,
                         payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["event_id"],
@@ -204,10 +260,13 @@ class MemoryIndex:
                         row["model_id"],
                         row["event_kind"],
                         row["status"],
+                        row["quality_status"],
+                        row["execution_status"],
                         row["prompt"],
                         row["output_text"],
                         row["notes_text"],
                         row["pass_definition"],
+                        row["evaluation_signal_text"],
                         row["artifact_path"],
                         row["payload_json"],
                     ),
@@ -225,8 +284,11 @@ class MemoryIndex:
                         session_surface,
                         session_mode,
                         model_id,
-                        status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status,
+                        quality_status,
+                        execution_status,
+                        evaluation_signal_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["event_id"],
@@ -240,6 +302,9 @@ class MemoryIndex:
                         row["session_mode"],
                         row["model_id"],
                         row["status"],
+                        row["quality_status"],
+                        row["execution_status"],
+                        row["evaluation_signal_text"],
                     ),
                 )
         return len(events)
@@ -281,10 +346,13 @@ class MemoryIndex:
                         e.model_id,
                         e.event_kind,
                         e.status,
+                        e.quality_status,
+                        e.execution_status,
                         e.prompt,
                         e.output_text,
                         e.notes_text,
                         e.pass_definition,
+                        e.evaluation_signal_text,
                         e.artifact_path,
                         bm25(events_fts) AS score
                     FROM events_fts
@@ -306,10 +374,13 @@ class MemoryIndex:
                         e.model_id,
                         e.event_kind,
                         e.status,
+                        e.quality_status,
+                        e.execution_status,
                         e.prompt,
                         e.output_text,
                         e.notes_text,
                         e.pass_definition,
+                        e.evaluation_signal_text,
                         e.artifact_path,
                         NULL AS score
                     FROM events e
@@ -335,10 +406,13 @@ class MemoryIndex:
                     model_id,
                     event_kind,
                     status,
+                    quality_status,
+                    execution_status,
                     prompt,
                     output_text,
                     notes_text,
                     pass_definition,
+                    evaluation_signal_text,
                     artifact_path,
                     payload_json
                 FROM events

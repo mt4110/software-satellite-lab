@@ -43,6 +43,15 @@ from audio_service import (
     serialize_audio_record,
 )
 from doctor import assets_summary, probe_optional_modules, probe_torch, probe_transformers
+from evaluation_loop import (
+    CURATION_EXPORT_DECISIONS,
+    CURATION_STATES,
+    format_curation_export_preview_report,
+    format_evaluation_snapshot_report,
+    record_curation_export_preview,
+    record_evaluation_snapshot,
+    record_review_resolution_signal,
+)
 from gemma_core import CancellationSignal, SessionManager
 from gemma_runtime import (
     UserFacingError,
@@ -2422,6 +2431,171 @@ def recall_bundle_has_candidate_navigation(bundle: Mapping[str, Any]) -> bool:
     return True
 
 
+def build_evaluation_snapshot_state(
+    snapshot: Mapping[str, Any] | None,
+    *,
+    empty: str = "Refresh the evaluation snapshot to load software-work signals.",
+) -> str:
+    if not snapshot:
+        return empty
+    counts = dict(snapshot.get("counts") or {})
+    generated_at_utc = str(snapshot.get("generated_at_utc") or "").strip()
+    state = (
+        f"{int(snapshot.get('signal_count') or 0)} signal(s) from "
+        f"{int(snapshot.get('event_count') or 0)} event(s). "
+        f"accept={int(counts.get('acceptance') or 0)}, "
+        f"reject={int(counts.get('rejection') or 0)}, "
+        f"review={int(counts.get('review_resolved') or 0)}/{int(counts.get('review_unresolved') or 0)}, "
+        f"pass={int(counts.get('test_pass') or 0)}, "
+        f"fail={int(counts.get('test_fail') or 0)}."
+    )
+    if generated_at_utc:
+        state += f" Generated {generated_at_utc}."
+    return state
+
+
+def build_evaluation_acceptance_text(snapshot: Mapping[str, Any] | None) -> str:
+    if not snapshot:
+        return "No acceptance or rejection signals loaded yet."
+    counts = dict(snapshot.get("counts") or {})
+    return (
+        f"accepted={int(counts.get('acceptance') or 0)}; "
+        f"rejected={int(counts.get('rejection') or 0)}; "
+        f"review={int(counts.get('review_resolved') or 0)}/{int(counts.get('review_unresolved') or 0)}; "
+        f"explicit={int(snapshot.get('explicit_signal_count') or 0)}"
+    )
+
+
+def build_evaluation_test_text(snapshot: Mapping[str, Any] | None) -> str:
+    if not snapshot:
+        return "No test pass/fail signals loaded yet."
+    counts = dict(snapshot.get("counts") or {})
+    return (
+        f"passed={int(counts.get('test_pass') or 0)}; "
+        f"failed={int(counts.get('test_fail') or 0)}; "
+        f"derived={int(snapshot.get('derived_signal_count') or 0)}"
+    )
+
+
+def build_evaluation_repair_text(snapshot: Mapping[str, Any] | None) -> str:
+    if not snapshot:
+        return "No repair or follow-up links loaded yet."
+    counts = dict(snapshot.get("counts") or {})
+    return (
+        f"repaired={int(counts.get('repaired_failures') or 0)}; "
+        f"follow-up={int(counts.get('followed_up_failures') or 0)}; "
+        f"pending={int(counts.get('pending_failures') or 0)}"
+    )
+
+
+def build_evaluation_comparison_text(snapshot: Mapping[str, Any] | None) -> str:
+    if not snapshot:
+        return "No comparison records loaded yet."
+    counts = dict(snapshot.get("counts") or {})
+    return (
+        f"comparisons={int(counts.get('comparisons') or 0)}; "
+        f"winners={int(counts.get('comparison_winners') or 0)}; "
+        f"open={int(counts.get('unresolved_comparisons') or 0)}"
+    )
+
+
+def build_evaluation_curation_text(snapshot: Mapping[str, Any] | None) -> str:
+    if not snapshot:
+        return "No curation candidates loaded yet."
+    counts = dict(snapshot.get("counts") or {})
+    return (
+        f"ready={int(counts.get('curation_ready') or 0)}; "
+        f"review={int(counts.get('curation_needs_review') or 0)}; "
+        f"blocked={int(counts.get('curation_blocked') or 0)}"
+    )
+
+
+def build_evaluation_adoption_text(preview: Mapping[str, Any] | None) -> str:
+    if not preview:
+        return "No adoption preview loaded yet."
+    counts = dict(preview.get("counts") or {})
+    return (
+        f"matched={int(counts.get('matched_candidate_count') or 0)}; "
+        f"ready-for-policy={int(counts.get('ready_for_policy') or 0)}; "
+        "export=preview-only"
+    )
+
+
+def build_evaluation_curation_rows(preview: Mapping[str, Any] | None, *, limit: int = 24) -> list[dict[str, str]]:
+    if not preview:
+        return []
+    rows: list[dict[str, str]] = []
+    for index, item in enumerate(preview.get("candidates") or [], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        event_id = str(item.get("event_id") or "").strip()
+        steps = [
+            str(step).strip()
+            for step in (item.get("required_next_steps") or [])
+            if str(step).strip()
+        ]
+        reasons = [
+            str(reason).strip()
+            for reason in (item.get("reasons") or [])
+            if str(reason).strip()
+        ]
+        rows.append(
+            {
+                "row_id": event_id or f"curation-{index}",
+                "event_id": event_id,
+                "state": str(item.get("state") or ""),
+                "decision": str(item.get("export_decision") or ""),
+                "next": summarize_text_preview(", ".join(steps), limit=120),
+                "label": summarize_text_preview(str(item.get("label") or event_id or "candidate"), limit=140),
+                "reasons": summarize_text_preview(", ".join(reasons), limit=160),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def build_evaluation_signal_rows(snapshot: Mapping[str, Any] | None, *, limit: int = 12) -> list[dict[str, str]]:
+    if not snapshot:
+        return []
+    rows: list[dict[str, str]] = []
+    for index, item in enumerate(snapshot.get("recent_signals") or [], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        source_event_id = str(item.get("source_event_id") or "").strip()
+        target_event_id = str(item.get("target_event_id") or "").strip()
+        relation_kind = str(item.get("relation_kind") or "").strip()
+        relation = f"{relation_kind} {target_event_id}" if relation_kind and target_event_id else ""
+        label = (
+            str(item.get("test_name") or "").strip()
+            or str(item.get("prompt_excerpt") or "").strip()
+            or source_event_id
+            or "signal"
+        )
+        detail = (
+            str(item.get("rationale") or "").strip()
+            or str(item.get("resolution_summary") or "").strip()
+            or str(item.get("review_id") or "").strip()
+            or str(item.get("failure_summary") or "").strip()
+            or str(item.get("quality_status") or "").strip()
+            or str(item.get("status") or "").strip()
+        )
+        rows.append(
+            {
+                "row_id": str(item.get("signal_id") or f"signal-{index}"),
+                "kind": str(item.get("signal_kind") or ""),
+                "source": source_event_id,
+                "relation": relation,
+                "status": str(item.get("quality_status") or item.get("status") or ""),
+                "label": summarize_text_preview(label, limit=120),
+                "detail": summarize_text_preview(detail, limit=180),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 class LocalUiController:
     def __init__(
         self,
@@ -3114,6 +3288,58 @@ class LocalUiController:
             "report": "\n\n".join(block for block in report_blocks if block),
         }
 
+    def build_evaluation_snapshot(self, *, curation_filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        snapshot, latest_path, run_path = record_evaluation_snapshot(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+        )
+        curation_preview, preview_latest_path, preview_run_path = record_curation_export_preview(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            snapshot=snapshot,
+            filters=curation_filters,
+        )
+        report = "\n\n".join(
+            [
+                format_evaluation_snapshot_report(snapshot),
+                format_curation_export_preview_report(curation_preview),
+            ]
+        )
+        return {
+            "selected_model_id": self.selected_model_id,
+            "snapshot": snapshot,
+            "snapshot_latest_path": str(latest_path),
+            "snapshot_run_path": str(run_path),
+            "curation_preview": curation_preview,
+            "curation_preview_latest_path": str(preview_latest_path),
+            "curation_preview_run_path": str(preview_run_path),
+            "report": report,
+        }
+
+    def record_evaluation_review_resolution(
+        self,
+        *,
+        source_event_id: str,
+        resolved: bool,
+        review_id: str = "",
+        review_url: str = "",
+        resolution_summary: str = "",
+        curation_filters: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        signal = record_review_resolution_signal(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            source_event_id=source_event_id,
+            resolved=resolved,
+            review_id=review_id,
+            review_url=review_url,
+            resolution_summary=resolution_summary,
+            origin="local_ui",
+        )
+        result = self.build_evaluation_snapshot(curation_filters=curation_filters)
+        result["recorded_signal"] = signal
+        return result
+
     def _ui_recall_bundle_path(self, *, task_kind: str) -> Path:
         return (
             self.workspace_store.root
@@ -3761,6 +3987,33 @@ class LocalUiApp:
                 "differences appear here."
             )
         )
+        self.evaluation_state = tk.StringVar(
+            value="Refresh the evaluation snapshot to load software-work signals."
+        )
+        self.evaluation_acceptance_var = tk.StringVar(
+            value="No acceptance or rejection signals loaded yet."
+        )
+        self.evaluation_test_var = tk.StringVar(
+            value="No test pass/fail signals loaded yet."
+        )
+        self.evaluation_repair_var = tk.StringVar(
+            value="No repair or follow-up links loaded yet."
+        )
+        self.evaluation_comparison_var = tk.StringVar(
+            value="No comparison records loaded yet."
+        )
+        self.evaluation_curation_var = tk.StringVar(
+            value="No curation candidates loaded yet."
+        )
+        self.evaluation_adoption_var = tk.StringVar(
+            value="No adoption preview loaded yet."
+        )
+        self.evaluation_curation_state_filter = tk.StringVar(value="all")
+        self.evaluation_curation_decision_filter = tk.StringVar(value="all")
+        self.evaluation_curation_reason_filter = tk.StringVar(value="")
+        self.evaluation_review_id = tk.StringVar(value="")
+        self.evaluation_review_url = tk.StringVar(value="")
+        self.evaluation_review_summary = tk.StringVar(value="")
         self._recall_request_rows: dict[str, dict[str, Any]] = {}
         self._recall_selected_request_index: int | None = None
         self._recall_eval_miss_rows: dict[str, dict[str, Any]] = {}
@@ -3772,10 +4025,13 @@ class LocalUiApp:
         self.recall_eval_source_copy_button: Any | None = None
         self.recall_eval_source_rerun_button: Any | None = None
         self.recall_eval_winner_chip_labels: list[dict[str, Any]] = [{} for _ in range(RECALL_TOP_SELECTED_COMPARE_LIMIT)]
+        self._evaluation_signal_rows: dict[str, dict[str, str]] = {}
+        self._evaluation_curation_rows: dict[str, dict[str, str]] = {}
         self.recall_eval_winner_buttons: list[Any] = []
         self._recall_candidate_rows: dict[str, dict[str, Any]] = {}
         self._recall_selected_candidate_event_id: str | None = None
         self._recall_pinned_candidate_rows: dict[str, dict[str, Any]] = {}
+        self._evaluation_signal_rows: dict[str, dict[str, str]] = {}
 
         self.forensics_surface = tk.StringVar(value="chat")
         self.forensics_artifact_path = tk.StringVar(value="")
@@ -3896,6 +4152,7 @@ class LocalUiApp:
         self.audio_tab = self._build_audio_tab(self.notebook)
         self.thinking_tab = self._build_thinking_tab(self.notebook)
         self.recall_tab = self._build_recall_tab(self.notebook)
+        self.evaluation_tab = self._build_evaluation_tab(self.notebook)
         self.forensics_tab = self._build_forensics_tab(self.notebook)
         self.diagnostics_tab = self._build_diagnostics_tab(self.notebook)
 
@@ -4411,6 +4668,137 @@ class LocalUiApp:
 
         ttk.Label(frame, text="Recall Output", style="Section.TLabel").grid(row=24, column=0, sticky="w", pady=(12, 0))
         self.recall_output = self._readonly_text(frame, row=25, columnspan=3, height=12)
+        return frame
+
+    def _build_evaluation_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
+        frame = ttk.Frame(notebook, style="Card.TFrame", padding=18)
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(6, weight=1)
+        frame.grid_rowconfigure(9, weight=1)
+        frame.grid_rowconfigure(11, weight=1)
+        frame.grid_rowconfigure(13, weight=1)
+        notebook.add(frame, text="Evaluation")
+
+        header = ttk.Frame(frame, style="Card.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        ttk.Label(header, text="Snapshot", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        self.refresh_evaluation_button = ttk.Button(
+            header,
+            text="Refresh Snapshot",
+            style="Lab.TButton",
+            command=self.refresh_evaluation_snapshot,
+        )
+        self.refresh_evaluation_button.grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            frame,
+            textvariable=self.evaluation_state,
+            style="Subtitle.TLabel",
+            wraplength=920,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        metric_frame = ttk.Frame(frame, style="Card.TFrame")
+        metric_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        for column in range(3):
+            metric_frame.grid_columnconfigure(column, weight=1)
+        self._build_compare_card(metric_frame, column=0, title="Accept / Reject", variable=self.evaluation_acceptance_var)
+        self._build_compare_card(metric_frame, column=1, title="Tests", variable=self.evaluation_test_var)
+        self._build_compare_card(metric_frame, column=2, title="Repair", variable=self.evaluation_repair_var)
+
+        second_metric_frame = ttk.Frame(frame, style="Card.TFrame")
+        second_metric_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        for column in range(3):
+            second_metric_frame.grid_columnconfigure(column, weight=1)
+        self._build_compare_card(second_metric_frame, column=0, title="Comparison", variable=self.evaluation_comparison_var)
+        self._build_compare_card(second_metric_frame, column=1, title="Curation", variable=self.evaluation_curation_var)
+        self._build_compare_card(second_metric_frame, column=2, title="Adoption", variable=self.evaluation_adoption_var)
+
+        filter_frame = ttk.Frame(frame, style="Card.TFrame")
+        filter_frame.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        filter_frame.grid_columnconfigure(3, weight=1)
+        ttk.Label(filter_frame, text="Curation Filter", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        state_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.evaluation_curation_state_filter,
+            values=["all", *CURATION_STATES],
+            width=16,
+            state="readonly",
+        )
+        state_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        decision_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.evaluation_curation_decision_filter,
+            values=["all", *CURATION_EXPORT_DECISIONS],
+            width=24,
+            state="readonly",
+        )
+        decision_combo.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Entry(
+            filter_frame,
+            textvariable=self.evaluation_curation_reason_filter,
+            width=28,
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.apply_evaluation_filter_button = ttk.Button(
+            filter_frame,
+            text="Apply Filter",
+            style="Lab.TButton",
+            command=self.refresh_evaluation_snapshot,
+        )
+        self.apply_evaluation_filter_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+
+        ttk.Label(frame, text="Curation Preview", style="Section.TLabel").grid(row=5, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_curation_tree = self._build_treeview(
+            frame,
+            row=6,
+            columns=("state", "decision", "next", "label"),
+            headings=("State", "Decision", "Next", "Label"),
+            height=5,
+        )
+        self.evaluation_curation_tree.column("state", width=110, stretch=False)
+        self.evaluation_curation_tree.column("decision", width=180, stretch=False)
+        self.evaluation_curation_tree.column("next", width=220, stretch=False)
+        self.evaluation_curation_tree.column("label", width=540, stretch=True)
+
+        review_frame = ttk.Frame(frame, style="Card.TFrame")
+        review_frame.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        review_frame.grid_columnconfigure(2, weight=1)
+        ttk.Entry(review_frame, textvariable=self.evaluation_review_id, width=18).grid(row=0, column=0, sticky="w")
+        ttk.Entry(review_frame, textvariable=self.evaluation_review_url, width=28).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Entry(review_frame, textvariable=self.evaluation_review_summary, width=52).grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        self.mark_review_resolved_button = ttk.Button(
+            review_frame,
+            text="Mark Resolved",
+            style="Lab.TButton",
+            command=self.mark_selected_evaluation_review_resolved,
+        )
+        self.mark_review_resolved_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        self.mark_review_unresolved_button = ttk.Button(
+            review_frame,
+            text="Mark Unresolved",
+            style="Lab.TButton",
+            command=self.mark_selected_evaluation_review_unresolved,
+        )
+        self.mark_review_unresolved_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
+
+        ttk.Label(frame, text="Signals", style="Section.TLabel").grid(row=8, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_signals_tree = self._build_treeview(
+            frame,
+            row=9,
+            columns=("kind", "source", "relation", "status", "label"),
+            headings=("Kind", "Source", "Relation", "Status", "Label"),
+            height=7,
+        )
+        self.evaluation_signals_tree.column("kind", width=110, stretch=False)
+        self.evaluation_signals_tree.column("source", width=240, stretch=False)
+        self.evaluation_signals_tree.column("relation", width=180, stretch=False)
+        self.evaluation_signals_tree.column("status", width=110, stretch=False)
+        self.evaluation_signals_tree.column("label", width=420, stretch=True)
+
+        ttk.Label(frame, text="Details", style="Section.TLabel").grid(row=10, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_detail_output = self._readonly_text(frame, row=11, height=8)
+
+        ttk.Label(frame, text="Report", style="Section.TLabel").grid(row=12, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_output = self._readonly_text(frame, row=13, height=10)
         return frame
 
     def _build_forensics_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -5853,6 +6241,171 @@ class LocalUiApp:
             self._clear_busy()
             self._resume_startup_prewarm_if_needed()
 
+    def _current_evaluation_curation_filters(self) -> dict[str, Any]:
+        state = self.evaluation_curation_state_filter.get().strip()
+        decision = self.evaluation_curation_decision_filter.get().strip()
+        reason_text = self.evaluation_curation_reason_filter.get().strip()
+        return {
+            "states": [] if state in ("", "all") else [state],
+            "export_decisions": [] if decision in ("", "all") else [decision],
+            "reasons": [
+                item.strip()
+                for item in reason_text.split(",")
+                if item.strip()
+            ],
+        }
+
+    def _selected_evaluation_candidate_event_id(self) -> str | None:
+        selection = self.evaluation_curation_tree.selection()
+        if not selection:
+            return None
+        row = self._evaluation_curation_rows.get(str(selection[0]))
+        if row is None:
+            return None
+        return str(row.get("event_id") or "").strip() or None
+
+    def _populate_evaluation_curation_preview(self, preview: Mapping[str, Any] | None) -> None:
+        rows = build_evaluation_curation_rows(preview)
+        self._evaluation_curation_rows = {row["row_id"]: row for row in rows}
+        children = self.evaluation_curation_tree.get_children()
+        if children:
+            self.evaluation_curation_tree.delete(*children)
+        for row in rows:
+            self.evaluation_curation_tree.insert(
+                "",
+                tk.END,
+                iid=row["row_id"],
+                values=(
+                    row["state"],
+                    row["decision"],
+                    row["next"],
+                    row["label"],
+                ),
+            )
+
+    def _record_selected_evaluation_review(self, *, resolved: bool) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Review signal recording is disabled while a worker job is running.")
+            return
+        event_id = self._selected_evaluation_candidate_event_id()
+        if event_id is None:
+            self.status_var.set("Select a curation candidate first.")
+            return
+
+        summary = self.evaluation_review_summary.get().strip()
+        if not summary:
+            summary = "Review resolved from Local UI." if resolved else "Review remains unresolved from Local UI."
+            self.evaluation_review_summary.set(summary)
+
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Recording review signal...")
+        try:
+            result = self.controller.record_evaluation_review_resolution(
+                source_event_id=event_id,
+                resolved=resolved,
+                review_id=self.evaluation_review_id.get(),
+                review_url=self.evaluation_review_url.get(),
+                resolution_summary=summary,
+                curation_filters=self._current_evaluation_curation_filters(),
+            )
+            signal = dict(result.get("recorded_signal") or {})
+            self._apply_evaluation_snapshot(
+                result,
+                status_message=f"Recorded {signal.get('signal_kind') or 'review signal'} for curation candidate.",
+            )
+        except Exception as exc:
+            self.status_var.set(f"Review signal failed: {type(exc).__name__}: {exc}")
+            self.hint_var.set("")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
+    def mark_selected_evaluation_review_resolved(self) -> None:
+        self._record_selected_evaluation_review(resolved=True)
+
+    def mark_selected_evaluation_review_unresolved(self) -> None:
+        self._record_selected_evaluation_review(resolved=False)
+
+    def _populate_evaluation_signals(self, snapshot: Mapping[str, Any] | None) -> None:
+        rows = build_evaluation_signal_rows(snapshot)
+        self._evaluation_signal_rows = {row["row_id"]: row for row in rows}
+        children = self.evaluation_signals_tree.get_children()
+        if children:
+            self.evaluation_signals_tree.delete(*children)
+        for row in rows:
+            self.evaluation_signals_tree.insert(
+                "",
+                tk.END,
+                iid=row["row_id"],
+                values=(
+                    row["kind"],
+                    row["source"],
+                    row["relation"],
+                    row["status"],
+                    row["label"],
+                ),
+            )
+        detail_lines = [
+            f"{row['kind']} {row['source']}"
+            + (f" -> {row['relation']}" if row["relation"] else "")
+            + (f": {row['detail']}" if row["detail"] else "")
+            for row in rows
+        ]
+        self._set_output(
+            self.evaluation_detail_output,
+            "\n".join(detail_lines) if detail_lines else "No evaluation signals are available yet.",
+        )
+
+    def _apply_evaluation_snapshot(self, result: Mapping[str, Any], *, status_message: str) -> None:
+        snapshot = dict(result.get("snapshot") or result)
+        preview = dict(result.get("curation_preview") or {})
+        self.evaluation_state.set(build_evaluation_snapshot_state(snapshot))
+        self.evaluation_acceptance_var.set(build_evaluation_acceptance_text(snapshot))
+        self.evaluation_test_var.set(build_evaluation_test_text(snapshot))
+        self.evaluation_repair_var.set(build_evaluation_repair_text(snapshot))
+        self.evaluation_comparison_var.set(build_evaluation_comparison_text(snapshot))
+        self.evaluation_curation_var.set(build_evaluation_curation_text(snapshot))
+        self.evaluation_adoption_var.set(build_evaluation_adoption_text(preview))
+        self._populate_evaluation_curation_preview(preview)
+        self._populate_evaluation_signals(snapshot)
+        self._set_output(
+            self.evaluation_output,
+            str(result.get("report") or format_evaluation_snapshot_report(snapshot)),
+        )
+        self.status_var.set(status_message)
+        self.backend_var.set("Backend: local-evaluation-loop")
+        self.device_var.set("Device: local files / SQLite")
+        snapshot_path = result.get("snapshot_run_path") or "n/a"
+        preview_path = result.get("curation_preview_run_path")
+        if preview_path:
+            self.artifact_var.set(f"Evaluation snapshot: {snapshot_path}; curation preview: {preview_path}")
+        else:
+            self.artifact_var.set(f"Evaluation snapshot: {snapshot_path}")
+        self.hint_var.set(
+            "Acceptance, rejection, review, test, repair-link, and preview signals share local files."
+        )
+
+    def refresh_evaluation_snapshot(self) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Evaluation snapshot is disabled while a worker job is running.")
+            return
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Refreshing evaluation snapshot...")
+        try:
+            result = self.controller.build_evaluation_snapshot(
+                curation_filters=self._current_evaluation_curation_filters(),
+            )
+            self._apply_evaluation_snapshot(
+                result,
+                status_message="Evaluation snapshot is ready.",
+            )
+        except Exception as exc:
+            self.status_var.set(f"Evaluation snapshot failed: {type(exc).__name__}: {exc}")
+            self.hint_var.set("")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
     def _populate_forensics_navigation(self, snapshot: dict[str, Any]) -> None:
         recent_sessions = list(snapshot.get("recent_sessions") or [])
         recent_entries = list(snapshot.get("recent_entries") or [])
@@ -6140,6 +6693,15 @@ class LocalUiApp:
         self.open_recall_candidate_button.configure(state=run_state)
         self.pin_recall_candidate_button.configure(state=run_state)
         self.clear_recall_pins_button.configure(state=run_state)
+        self.refresh_evaluation_button.configure(state=run_state)
+        for button_name in (
+            "apply_evaluation_filter_button",
+            "mark_review_resolved_button",
+            "mark_review_unresolved_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=run_state)
         self.refresh_diagnostics_button.configure(state=run_state)
 
     def _begin_status_animation(self, *, job_id: int, base_message: str) -> None:

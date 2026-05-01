@@ -339,7 +339,17 @@ Validation:
 Current baseline:
 
 - M3 already includes a narrow source-hit evaluation loop for Recall quality
-- broader M4 work remains open: acceptance/rejection signals, repair linkage, model-output comparison, and evidence curation across the whole system
+- `scripts/evaluation_loop.py` defines the first broader, file-first evaluation signal layer
+- acceptance, rejection, test pass, and test fail use one local signal schema under `artifacts/evaluation/<workspace>/signals.jsonl`
+- review-resolution uses the same signal schema via `review_resolved` / `review_unresolved`; resolved review can satisfy the human-selection gate when a test pass is present, while unresolved review blocks curation
+- test pass/fail signals can be derived from software-work events, including capability matrix validation and Local UI artifact validation
+- failure to repair/follow-up linkage is explicit through `relation_kind` and `target_event_id`, avoiding noisy automatic repair guesses
+- `comparisons.jsonl` stores local comparison records for competing outputs without mixing them into pass/fail signals
+- evaluation snapshots derive curation candidates as `ready`, `needs_review`, or `blocked`; training export remains deliberately downstream and gated
+- curation export preview writes `artifacts/evaluation/<workspace>/curation/preview-latest.json` and run artifacts as `preview_only`, listing candidate decisions, filters, adoption checklist state, and required next steps without writing downstream training data
+- `scripts/run_evaluation_loop.py` writes the same reusable snapshot that the Local UI Evaluation tab displays; both paths support curation filters for state, export decision, and reason
+- the Local UI Evaluation tab can record minimal `review_resolved` / `review_unresolved` signals against selected curation candidates
+- broader M4 work still remains open for richer multi-backend comparison UX and final export policy definition
 
 ### M5. Agent Lane for Software Tasks
 
@@ -384,8 +394,8 @@ Goal:
 
 Deliverables:
 
-- curation filters
-- export format for supervised examples
+- curation filters for preview-only export
+- final export policy and supervised example format
 - candidate LoRA / SFT dataset generation
 - comparison and adoption checklist
 

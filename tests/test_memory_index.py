@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
-from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
+from memory_index import INDEX_SCHEMA_VERSION, MemoryIndex, rebuild_memory_index  # noqa: E402
 from software_work_events import read_event_log  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
@@ -219,6 +220,93 @@ class MemoryIndexTests(unittest.TestCase):
         self.assertEqual(summary["capability_matrix_error_count"], 1)
         self.assertEqual(summary["capability_matrix_errors"][0]["path"], str(broken_path.resolve()))
         self.assertIn("JSONDecodeError", summary["capability_matrix_errors"][0]["error"])
+
+    def test_schema_version_change_rebuilds_derived_index_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "memory.sqlite3"
+            stale_schema_version = str(INDEX_SCHEMA_VERSION - 1)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
+                    (stale_schema_version,),
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE events (
+                        event_id TEXT PRIMARY KEY,
+                        payload_json TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO events(event_id, payload_json)
+                    VALUES ('stale-event', '{}')
+                    """
+                )
+                connection.execute(
+                    "CREATE VIRTUAL TABLE events_fts USING fts5(event_id UNINDEXED, prompt)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            index = MemoryIndex(path)
+            index.ensure_schema()
+            with index.connection() as connection:
+                version = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()["value"]
+                columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(events)").fetchall()
+                }
+                count_row = connection.execute("SELECT COUNT(*) AS count FROM events").fetchone()
+                event_count = count_row["count"]
+            indexed_count = index.index_events(
+                [
+                    {
+                        "event_id": "local-default:test-schema-rebuild",
+                        "recorded_at_utc": "2026-01-01T00:00:00Z",
+                        "workspace": {"workspace_id": "local-default"},
+                        "session": {
+                            "session_id": "test-session",
+                            "surface": "chat",
+                            "mode": "unit",
+                            "selected_model_id": "backend-a",
+                        },
+                        "outcome": {
+                            "status": "ok",
+                            "quality_status": "pass",
+                            "execution_status": "ok",
+                        },
+                        "content": {
+                            "prompt": "Check schema rebuild.",
+                            "output_text": "Schema rebuild accepted.",
+                            "notes": [],
+                            "options": {
+                                "validation_mode": "unit",
+                                "quality_checks": [
+                                    {"name": "compile", "pass": True, "detail": "ok"}
+                                ],
+                            },
+                        },
+                        "source_refs": {},
+                    }
+                ]
+            )
+            matches = index.search("compile AND pass")
+
+        self.assertEqual(version, str(INDEX_SCHEMA_VERSION))
+        self.assertEqual(event_count, 0)
+        self.assertEqual(indexed_count, 1)
+        self.assertIn("quality_status", columns)
+        self.assertIn("execution_status", columns)
+        self.assertIn("evaluation_signal_text", columns)
+        self.assertEqual(matches[0]["event_id"], "local-default:test-schema-rebuild")
+        self.assertEqual(matches[0]["quality_status"], "pass")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,14 @@ from run_local_ui import (  # noqa: E402
     build_recall_miss_suggested_manual_config,
     build_recall_pins_summary,
     build_recall_request_summary,
+    build_evaluation_acceptance_text,
+    build_evaluation_adoption_text,
+    build_evaluation_comparison_text,
+    build_evaluation_curation_rows,
+    build_evaluation_curation_text,
+    build_evaluation_repair_text,
+    build_evaluation_snapshot_state,
+    build_evaluation_test_text,
     build_thinking_debug_report,
 )
 from workspace_state import WorkspaceSessionStore, session_manifest_path  # noqa: E402
@@ -682,6 +690,84 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertIn("Hit rate:", snapshot["report"])
         self.assertEqual(snapshot["requests"][0]["index"], 1)
         self.assertTrue(snapshot["requests"][0]["source_hit"])
+
+    def test_build_evaluation_snapshot_exposes_m4_signal_metrics(self) -> None:
+        controller, store, root = self.make_controller()
+        artifact_path = root / "artifacts" / "text" / "validated.json"
+        write_artifact(
+            artifact_path,
+            build_artifact_payload(
+                artifact_kind="text",
+                status="ok",
+                runtime=build_runtime_record(
+                    backend=CHAT_BACKEND,
+                    model_id="backend-a",
+                    device_info="cpu",
+                ),
+                prompts=build_prompt_record(
+                    prompt="Run evaluation loop check.",
+                    resolved_user_prompt="Run evaluation loop check.",
+                ),
+                extra={
+                    "validation": {
+                        "validation_mode": "unit",
+                        "claim_scope": "local UI evaluation snapshot",
+                        "pass_definition": "M4 snapshot sees workspace validation",
+                        "quality_status": "pass",
+                        "execution_status": "ok",
+                        "quality_checks": [{"name": "snapshot", "pass": True, "detail": "ready"}],
+                    },
+                    "output_text": "Snapshot ready.",
+                },
+            ),
+        )
+        store.record_session_run(
+            surface="thinking",
+            model_id="backend-a",
+            mode="tool",
+            artifact_kind="thinking",
+            artifact_path=artifact_path,
+            status="ok",
+            prompt="Run evaluation loop check.",
+            system_prompt=None,
+            resolved_user_prompt="Run evaluation loop check.",
+            output_text="Snapshot ready.",
+        )
+
+        result = controller.build_evaluation_snapshot()
+        snapshot = result["snapshot"]
+
+        self.assertTrue(Path(result["snapshot_latest_path"]).exists())
+        self.assertTrue(Path(result["snapshot_run_path"]).exists())
+        self.assertTrue(Path(result["curation_preview_latest_path"]).exists())
+        self.assertTrue(Path(result["curation_preview_run_path"]).exists())
+        self.assertIn("Test pass: 1", result["report"])
+        self.assertIn("Curation export preview: preview_only", result["report"])
+        self.assertIn("pass=1", build_evaluation_snapshot_state(snapshot))
+        self.assertIn("accepted=0", build_evaluation_acceptance_text(snapshot))
+        self.assertIn("review=0/0", build_evaluation_acceptance_text(snapshot))
+        self.assertIn("passed=1", build_evaluation_test_text(snapshot))
+        self.assertIn("pending=0", build_evaluation_repair_text(snapshot))
+        self.assertIn("comparisons=0", build_evaluation_comparison_text(snapshot))
+        self.assertIn("review=1", build_evaluation_curation_text(snapshot))
+        self.assertIn("matched=1", build_evaluation_adoption_text(result["curation_preview"]))
+        self.assertIn("ready-for-policy=0", build_evaluation_adoption_text(result["curation_preview"]))
+        curation_rows = build_evaluation_curation_rows(result["curation_preview"])
+        self.assertEqual(curation_rows[0]["state"], "needs_review")
+
+        resolved = controller.record_evaluation_review_resolution(
+            source_event_id=curation_rows[0]["event_id"],
+            resolved=True,
+            review_id="ui-review-1",
+            resolution_summary="UI review resolved.",
+            curation_filters={"states": ["ready"]},
+        )
+
+        self.assertEqual(resolved["recorded_signal"]["signal_kind"], "review_resolved")
+        self.assertEqual(resolved["snapshot"]["counts"]["review_resolved"], 1)
+        self.assertIn("ready=1", build_evaluation_curation_text(resolved["snapshot"]))
+        self.assertIn("ready-for-policy=1", build_evaluation_adoption_text(resolved["curation_preview"]))
+        self.assertEqual(resolved["curation_preview"]["filters"]["states"], ["ready"])
 
     def test_build_recall_bundle_prefers_stored_dataset_bundle(self) -> None:
         controller, store, _root = self.make_controller()
