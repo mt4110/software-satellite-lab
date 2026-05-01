@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from agent_lane import agent_run_log_path, read_agent_runs
 from artifact_schema import read_artifact
 from gemma_runtime import repo_root, timestamp_utc
 from workspace_state import (
@@ -346,6 +347,120 @@ def build_event_record(
     }
 
 
+def build_event_from_agent_run(
+    *,
+    root: Path | None,
+    workspace_id: str,
+    run: dict[str, Any],
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    run_id = _clean_text(run.get("run_id")) or "agent-run"
+    task = run.get("task_snapshot") if isinstance(run.get("task_snapshot"), dict) else {}
+    outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
+    paths = run.get("paths") if isinstance(run.get("paths"), dict) else {}
+    verification = task.get("verification") if isinstance(task.get("verification"), dict) else {}
+    commands = [
+        command.get("command")
+        for command in verification.get("commands") or []
+        if isinstance(command, dict) and _clean_text(command.get("command")) is not None
+    ]
+    quality_checks = _clean_quality_checks(outcome.get("quality_checks"))
+    result_summary = _clean_text(outcome.get("result_summary"))
+    failure_summary = _clean_text(outcome.get("failure_summary"))
+    run_artifact_path_text = _clean_text(paths.get("run_artifact_path"))
+    run_artifact_path = Path(run_artifact_path_text).expanduser() if run_artifact_path_text else None
+    recorded_at = _clean_text(run.get("completed_at_utc")) or _clean_text(run.get("started_at_utc")) or timestamp_utc()
+
+    workspace_manifest = workspace_manifest_path(workspace_id=workspace_id, root=resolved_root)
+    workspace_record = {
+        "workspace_id": workspace_id,
+        "workspace_manifest_path": str(workspace_manifest),
+    }
+    task_id = _clean_text(run.get("task_id")) or _clean_text(task.get("task_id")) or run_id
+    task_kind = _clean_text(task.get("task_kind")) or "patch_plan_verify"
+    session_record = {
+        "session_id": task_id,
+        "surface": "agent_lane",
+        "mode": task_kind,
+        "title": _clean_text(task.get("title")),
+        "selected_model_id": None,
+        "session_manifest_path": None,
+    }
+    options = {
+        "validation_mode": "agent_lane",
+        "validation_command": "\n".join(str(command) for command in commands if command),
+        "claim_scope": _clean_text(task.get("title")),
+        "pass_definition": _clean_text(verification.get("pass_definition")),
+        "quality_status": _clean_text(outcome.get("quality_status")),
+        "execution_status": _clean_text(outcome.get("execution_status")),
+        "quality_checks": quality_checks,
+        "agent_task_id": task_id,
+        "agent_run_id": run_id,
+        "tool_trace_count": len(run.get("tool_traces") or []),
+    }
+    notes = [
+        item
+        for item in (
+            result_summary,
+            failure_summary,
+        )
+        if item
+    ]
+    source_refs = {
+        "artifact_ref": {
+            "entry_id": run_id,
+            "artifact_kind": "agent_run",
+            "action": "agent_lane",
+            "status": _clean_text(run.get("status")),
+            "recorded_at_utc": recorded_at,
+            "artifact_path": str(run_artifact_path) if run_artifact_path is not None else None,
+            "artifact_workspace_relative_path": (
+                _workspace_relative_path(run_artifact_path, root=resolved_root)
+                if run_artifact_path is not None
+                else None
+            ),
+        },
+        "agent_task_ref": {
+            "task_id": task_id,
+            "task_kind": task_kind,
+        },
+    }
+    tags = [
+        tag
+        for tag in (
+            "agent_lane",
+            "m5",
+            task_kind,
+            _clean_text(run.get("status")),
+            _clean_text(outcome.get("quality_status")),
+            _clean_text(outcome.get("execution_status")),
+        )
+        if isinstance(tag, str) and tag
+    ]
+    return build_event_record(
+        event_id=run_id,
+        event_kind="agent_task_run",
+        recorded_at_utc=recorded_at,
+        workspace=workspace_record,
+        session=session_record,
+        outcome={
+            "status": _clean_text(run.get("status")),
+            "quality_status": _clean_text(outcome.get("quality_status")),
+            "execution_status": _clean_text(outcome.get("execution_status")),
+        },
+        content={
+            "prompt": _clean_text(task.get("goal")),
+            "system_prompt": None,
+            "resolved_user_prompt": _clean_text(task.get("goal")),
+            "output_text": result_summary,
+            "notes": notes,
+            "options": options,
+        },
+        source_refs=source_refs,
+        tags=tags,
+    )
+
+
 def build_event_log_payload(
     *,
     workspace_id: str,
@@ -604,6 +719,38 @@ def iter_capability_matrix_events(
                 )
             )
 
+    events.sort(key=lambda item: str(item.get("recorded_at_utc") or ""))
+    return events
+
+
+def iter_agent_lane_events(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    errors: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_root = _resolve_root(root)
+    run_log = agent_run_log_path(workspace_id=workspace_id, root=resolved_root)
+    try:
+        runs = read_agent_runs(run_log)
+    except Exception as exc:
+        if errors is not None:
+            errors.append(
+                {
+                    "path": str(run_log),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        return []
+
+    events = [
+        build_event_from_agent_run(
+            root=resolved_root,
+            workspace_id=workspace_id,
+            run=run,
+        )
+        for run in runs
+    ]
     events.sort(key=lambda item: str(item.get("recorded_at_utc") or ""))
     return events
 
