@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shlex
 import subprocess
@@ -64,10 +65,12 @@ def agent_run_artifact_path(
     root: Path | None = None,
     run_id: str,
 ) -> Path:
+    run_id_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
     safe_run_id = "".join(
         char if char.isalnum() or char in ("-", "_") else "-"
         for char in run_id
     ).strip("-") or "agent-run"
+    safe_run_id = f"{safe_run_id[:96]}-{run_id_digest}"
     return agent_lane_root(workspace_id=workspace_id, root=root) / "runs" / f"{safe_run_id}.json"
 
 
@@ -144,7 +147,7 @@ def _read_log_header(path: Path, *, schema_name: str, schema_version: int) -> di
 
 def _append_jsonl(path: Path, *, header: dict[str, Any], payload: dict[str, Any], workspace_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         with path.open("w", encoding="utf-8") as handle:
             handle.write(json.dumps(header, ensure_ascii=False) + "\n")
     else:
@@ -339,7 +342,7 @@ def append_agent_task(path: Path, task: Mapping[str, Any], *, workspace_id: str)
 
 
 def read_agent_tasks(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         return []
     _read_log_header(
         path,
@@ -530,11 +533,7 @@ def run_agent_task(
         for trace in traces
         if _clean_text(trace.get("tool_kind")) == "verification_command"
     ]
-    if not verification_traces:
-        status = "blocked"
-        quality_status = "not_run"
-        execution_status = "blocked"
-    elif all(_clean_text(trace.get("status")) == "passed" for trace in verification_traces):
+    if all(_clean_text(trace.get("status")) == "passed" for trace in verification_traces):
         status = "succeeded"
         quality_status = "pass"
         execution_status = "ok"
@@ -652,7 +651,7 @@ def append_agent_run(path: Path, run: Mapping[str, Any], *, workspace_id: str) -
 
 
 def read_agent_runs(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         return []
     _read_log_header(
         path,
@@ -690,17 +689,28 @@ def record_agent_run(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
 ) -> tuple[dict[str, Any], Path]:
     payload = _validate_agent_run(run)
+    if payload.get("workspace_id") != workspace_id:
+        raise ValueError(f"Agent run belongs to workspace `{payload.get('workspace_id')}`.")
+    run_log_path = agent_run_log_path(workspace_id=workspace_id, root=root)
+    if run_log_path.exists() and run_log_path.stat().st_size > 0:
+        existing_header = _read_log_header(
+            run_log_path,
+            schema_name=AGENT_RUN_LOG_SCHEMA_NAME,
+            schema_version=AGENT_RUN_LOG_SCHEMA_VERSION,
+        )
+        if existing_header.get("workspace_id") != workspace_id:
+            raise ValueError(f"Agent lane log `{run_log_path}` belongs to workspace `{existing_header.get('workspace_id')}`.")
+        for existing in read_agent_runs(run_log_path):
+            if existing.get("run_id") == payload.get("run_id"):
+                raise ValueError(f"Agent run `{payload.get('run_id')}` already exists in `{run_log_path}`.")
     run_path = agent_run_artifact_path(
         workspace_id=workspace_id,
         root=root,
         run_id=str(payload["run_id"]),
     )
+    if run_path.exists():
+        raise ValueError(f"Agent run artifact `{run_path}` already exists.")
     payload["paths"]["run_artifact_path"] = str(run_path)
-    run_log_path = agent_run_log_path(workspace_id=workspace_id, root=root)
-    if run_log_path.exists():
-        for existing in read_agent_runs(run_log_path):
-            if existing.get("run_id") == payload.get("run_id"):
-                raise ValueError(f"Agent run `{payload.get('run_id')}` already exists in `{run_log_path}`.")
     write_json(run_path, payload)
     append_agent_run(
         run_log_path,

@@ -17,6 +17,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 from agent_lane import (  # noqa: E402
     AGENT_TASK_SCHEMA_NAME,
     AGENT_TASK_SCHEMA_VERSION,
+    agent_run_artifact_path,
+    agent_run_log_path,
     agent_task_log_path,
     build_agent_lane_snapshot,
     build_agent_task,
@@ -213,6 +215,56 @@ class AgentLaneTests(unittest.TestCase):
 
         self.assertIn("already exists", str(raised.exception))
         self.assertEqual(index_summary["agent_lane_event_count"], 1)
+
+    def test_artifact_paths_do_not_collide_for_similar_run_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            colon_path = agent_run_artifact_path(root=root, run_id="local-default:agent-run:a:b")
+            slash_path = agent_run_artifact_path(root=root, run_id="local-default:agent-run:a/b")
+
+        self.assertNotEqual(colon_path.name, slash_path.name)
+
+    def test_zero_byte_logs_are_recovered_on_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            agent_task_log_path(root=root).parent.mkdir(parents=True, exist_ok=True)
+            agent_task_log_path(root=root).write_text("", encoding="utf-8")
+            agent_run_log_path(root=root).parent.mkdir(parents=True, exist_ok=True)
+            agent_run_log_path(root=root).write_text("", encoding="utf-8")
+            task = build_agent_task(
+                title="Recover empty logs",
+                goal="Append should rewrite zero-byte log headers.",
+                plan_steps=["Run verification."],
+                verification_commands=[f"{sys.executable} -c \"print('ok')\""],
+            )
+            recorded_task = record_agent_task(task, root=root)
+            run = run_agent_task(recorded_task, root=root, timeout_seconds=10)
+            recorded_run, run_path = record_agent_run(run, root=root)
+            run_path_exists = run_path.exists()
+            lane_snapshot = build_agent_lane_snapshot(root=root)
+
+        self.assertEqual(recorded_run["status"], "succeeded")
+        self.assertTrue(run_path_exists)
+        self.assertEqual(lane_snapshot["counts"]["tasks"], 1)
+        self.assertEqual(lane_snapshot["counts"]["runs"], 1)
+
+    def test_workspace_mismatch_does_not_write_orphan_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            task = build_agent_task(
+                workspace_id="other-workspace",
+                title="Workspace mismatch",
+                goal="Reject before writing artifacts under the wrong workspace.",
+                plan_steps=["Run verification."],
+                verification_commands=[f"{sys.executable} -c \"print('ok')\""],
+            )
+            run = run_agent_task(task, root=root, timeout_seconds=10)
+            with self.assertRaises(ValueError) as raised:
+                record_agent_run(run, root=root)
+            artifact_files = list(root.glob("artifacts/agent_lane/**/*.json"))
+
+        self.assertIn("other-workspace", str(raised.exception))
+        self.assertEqual(artifact_files, [])
 
     def test_cli_records_task_run_snapshot_and_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
