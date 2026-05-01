@@ -130,6 +130,26 @@ class SoftwareWorkEventTests(unittest.TestCase):
                             "validation_mode": None,
                             "pass_definition": None,
                             "preprocessing_lineage": [],
+                        },
+                        {
+                            "capability": "long-context",
+                            "phase": "phase6-retry",
+                            "status": "ok",
+                            "artifact_kind": "text",
+                            "artifact_path": str(root / "artifacts" / "text" / "long-context-retry.json"),
+                            "validation_command": "python scripts/run_capability_matrix.py --only long-context",
+                            "claim_scope": "retry long context on local hardware",
+                            "output_preview": "Retry completed.",
+                            "blocker": None,
+                            "quality_status": "pass",
+                            "quality_checks": [],
+                            "quality_notes": ["retry passed"],
+                            "notes": [],
+                            "runtime_backend": "local",
+                            "execution_status": "ok",
+                            "validation_mode": "live",
+                            "pass_definition": "Retry completes without overwriting the first row.",
+                            "preprocessing_lineage": [],
                         }
                     ]
                 },
@@ -138,10 +158,22 @@ class SoftwareWorkEventTests(unittest.TestCase):
 
             events = iter_capability_matrix_events(root=root)
 
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(len({event["event_id"] for event in events}), 2)
+        self.assertTrue(events[0]["event_id"].endswith(":row-1:long-context"))
+        self.assertTrue(events[1]["event_id"].endswith(":row-2:long-context"))
+        self.assertEqual(
+            events[0]["source_refs"]["artifact_ref"]["entry_id"],
+            "matrix:row-1:long-context",
+        )
+        self.assertEqual(
+            events[1]["source_refs"]["artifact_ref"]["entry_id"],
+            "matrix:row-2:long-context",
+        )
         self.assertEqual(events[0]["event_kind"], "capability_result")
         self.assertEqual(events[0]["outcome"]["status"], "blocked")
         self.assertIn("hardware-limited run", events[0]["content"]["notes"])
+        self.assertEqual(events[1]["outcome"]["status"], "ok")
 
 
 if __name__ == "__main__":

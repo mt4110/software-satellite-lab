@@ -106,6 +106,53 @@ class RecallContextTests(unittest.TestCase):
         self.assertEqual(request.limit, 12)
         self.assertEqual(request.context_budget_chars, 6000)
 
+    def test_rank_candidates_handles_mixed_timezone_timestamps(self) -> None:
+        request = normalize_recall_request(
+            {
+                "task_kind": "review",
+                "query_text": "memory review",
+            }
+        )
+        older_aware = RecallCandidate(
+            event_id="older-aware",
+            recorded_at_utc="2026-04-11T10:00:00+00:00",
+            session_id="s1",
+            session_surface="chat",
+            session_mode="review",
+            model_id="backend-a",
+            event_kind="chat_turn",
+            status="ok",
+            prompt="memory review",
+            output_text="accepted outcome",
+            notes_text="accepted",
+            pass_definition=None,
+            artifact_path=None,
+            raw_fts_score=0.1,
+            best_rank=1,
+        )
+        newer_naive = RecallCandidate(
+            event_id="newer-naive",
+            recorded_at_utc="2026-04-12T10:00:00",
+            session_id="s2",
+            session_surface="chat",
+            session_mode="review",
+            model_id="backend-a",
+            event_kind="chat_turn",
+            status="ok",
+            prompt="memory review",
+            output_text="accepted outcome",
+            notes_text="accepted",
+            pass_definition=None,
+            artifact_path=None,
+            raw_fts_score=0.1,
+            best_rank=1,
+        )
+
+        ranked = rank_candidates(request, [older_aware, newer_naive])
+
+        self.assertEqual(ranked[0].event_id, "newer-naive")
+        self.assertIn("recent", ranked[0].reasons)
+
     def test_review_context_prioritizes_file_hits_and_accepted_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

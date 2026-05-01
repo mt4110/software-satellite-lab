@@ -5,7 +5,7 @@ import argparse
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -141,9 +141,12 @@ def _coerce_iso_datetime(value: str | None) -> datetime | None:
     if not candidate:
         return None
     try:
-        return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _join_text(parts: Iterable[str | None]) -> str:

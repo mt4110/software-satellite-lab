@@ -140,6 +140,73 @@ class MemoryIndexTests(unittest.TestCase):
             "Opaque scratchpad seal uncompromised verdict retention.",
         )
 
+    def test_rebuild_keeps_duplicate_capability_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            matrix_path = root / "artifacts" / "capability_matrix" / "matrix.json"
+            payload = build_artifact_payload(
+                artifact_kind="capability_matrix",
+                status="ok",
+                runtime=build_runtime_record(backend="capability-matrix", model_id="backend-a"),
+                prompts=build_prompt_record(),
+                extra={
+                    "results": [
+                        {
+                            "capability": "thinking",
+                            "phase": "phase5",
+                            "status": "blocked",
+                            "artifact_kind": "thinking",
+                            "artifact_path": str(root / "artifacts" / "thinking" / "thinking-blocked.json"),
+                            "validation_command": "python scripts/run_capability_matrix.py --only thinking",
+                            "claim_scope": "first thinking attempt",
+                            "output_preview": "First attempt blocked.",
+                            "blocker": None,
+                            "quality_status": "not_run",
+                            "quality_checks": [],
+                            "quality_notes": [],
+                            "notes": [],
+                            "runtime_backend": "backend-a",
+                            "execution_status": "blocked",
+                            "validation_mode": "live",
+                            "pass_definition": "First row should stay indexed.",
+                            "preprocessing_lineage": [],
+                        },
+                        {
+                            "capability": "thinking",
+                            "phase": "phase5-retry",
+                            "status": "ok",
+                            "artifact_kind": "thinking",
+                            "artifact_path": str(root / "artifacts" / "thinking" / "thinking-retry.json"),
+                            "validation_command": "python scripts/run_capability_matrix.py --only thinking",
+                            "claim_scope": "second thinking attempt",
+                            "output_preview": "Retry succeeded.",
+                            "blocker": None,
+                            "quality_status": "pass",
+                            "quality_checks": [],
+                            "quality_notes": [],
+                            "notes": [],
+                            "runtime_backend": "backend-a",
+                            "execution_status": "ok",
+                            "validation_mode": "live",
+                            "pass_definition": "Second row should stay indexed.",
+                            "preprocessing_lineage": [],
+                        },
+                    ]
+                },
+            )
+            write_artifact(matrix_path, payload)
+
+            summary = rebuild_memory_index(root=root)
+            index = MemoryIndex(Path(summary["index_path"]))
+            matches = index.search("thinking", limit=10)
+            event_log = read_event_log(Path(summary["event_log_path"]))
+
+        self.assertEqual(summary["capability_event_count"], 2)
+        self.assertEqual(summary["indexed_count"], 2)
+        self.assertEqual(event_log["event_count"], 2)
+        self.assertEqual(len(matches), 2)
+        self.assertEqual(len({match["event_id"] for match in matches}), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

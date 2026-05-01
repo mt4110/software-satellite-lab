@@ -144,6 +144,7 @@ def build_event_from_capability_matrix_result(
     runtime = matrix_payload.get("runtime") if isinstance(matrix_payload.get("runtime"), dict) else {}
     recorded_at = _clean_text(matrix_payload.get("timestamp_utc")) or timestamp_utc()
     session_id = f"capability-matrix:{matrix_artifact_path.stem}"
+    matrix_row_ref = f"{matrix_artifact_path.stem}:row-{result_index + 1}:{capability}"
     artifact_path_text = _clean_text(result.get("artifact_path"))
     artifact_path = Path(artifact_path_text).expanduser() if artifact_path_text else matrix_artifact_path
     attached_assets = _capability_attached_assets(result, root=resolved_root)
@@ -196,7 +197,7 @@ def build_event_from_capability_matrix_result(
     }
     source_refs = {
         "artifact_ref": {
-            "entry_id": f"{matrix_artifact_path.stem}:{capability}",
+            "entry_id": matrix_row_ref,
             "artifact_kind": _clean_text(result.get("artifact_kind")) or "artifact",
             "action": "capability_matrix",
             "status": status,
@@ -239,7 +240,7 @@ def build_event_from_capability_matrix_result(
         },
     }
     return build_event_record(
-        event_id=f"{workspace_id}:{session_id}:{matrix_artifact_path.stem}:{capability}",
+        event_id=f"{workspace_id}:{session_id}:row-{result_index + 1}:{capability}",
         event_kind="capability_result",
         recorded_at_utc=recorded_at,
         workspace=workspace_record,
