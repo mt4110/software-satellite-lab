@@ -909,7 +909,14 @@ def build_evaluation_snapshot(
         _enrich_comparison(comparison, events_by_id)
         for comparison in read_evaluation_comparisons(resolved_comparison_log_path)
     ]
-    comparison_summaries = [_comparison_summary(comparison) for comparison in comparisons]
+    comparison_summaries = sorted(
+        [_comparison_summary(comparison) for comparison in comparisons],
+        key=lambda comparison: (
+            _timestamp_sort_key(comparison.get("recorded_at_utc")),
+            str(comparison.get("comparison_id") or ""),
+        ),
+        reverse=True,
+    )
     derived_signals = [
         signal
         for event in events
@@ -1042,11 +1049,14 @@ def record_review_resolution_signal(
     if event_id is None:
         raise ValueError("Review-resolution signals require a source_event_id.")
     events_by_id = software_work_events_by_id(root=resolved_root, workspace_id=workspace_id)
+    source_event = events_by_id.get(event_id)
+    if source_event is None:
+        raise ValueError(f"Unknown review-resolution source_event_id `{event_id}`.")
     signal = build_evaluation_signal(
         workspace_id=workspace_id,
         signal_kind="review_resolved" if resolved else "review_unresolved",
         source_event_id=event_id,
-        source_event=events_by_id.get(event_id),
+        source_event=source_event,
         rationale=_clean_text(resolution_summary),
         evidence={
             "review_id": _clean_text(review_id),

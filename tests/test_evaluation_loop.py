@@ -333,6 +333,50 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(snapshot["counts"]["review_resolved"], 1)
         self.assertEqual(snapshot["counts"]["curation_ready"], 1)
 
+    def test_record_review_resolution_signal_rejects_unknown_source_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            with self.assertRaises(ValueError) as raised:
+                record_review_resolution_signal(
+                    root=root,
+                    source_event_id="local-default:missing-event",
+                    resolved=True,
+                    resolution_summary="This should not create an orphan signal.",
+                    origin="test",
+                )
+
+        self.assertIn("Unknown review-resolution source_event_id", str(raised.exception))
+
+    def test_recent_comparisons_are_sorted_before_snapshot_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            passing_event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            failing_event_id = "local-default:capability-matrix:matrix:row-2:vision"
+            for index in range(13):
+                comparison = build_evaluation_comparison(
+                    candidate_event_ids=[passing_event_id, failing_event_id],
+                    winner_event_id=passing_event_id,
+                    comparison_id=f"local-default:compare:test-{index:02d}",
+                    recorded_at_utc=f"2026-04-01T00:{index:02d}:00Z",
+                    task_label=f"comparison {index:02d}",
+                )
+                append_evaluation_comparison(
+                    evaluation_comparison_log_path(root=root),
+                    comparison,
+                    workspace_id="local-default",
+                )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+
+        comparison_ids = [item["comparison_id"] for item in snapshot["comparisons"]]
+        self.assertEqual(snapshot["counts"]["comparisons"], 13)
+        self.assertEqual(len(comparison_ids), 12)
+        self.assertEqual(comparison_ids[0], "local-default:compare:test-12")
+        self.assertEqual(comparison_ids[-1], "local-default:compare:test-01")
+        self.assertNotIn("local-default:compare:test-00", comparison_ids)
+
     def test_latest_review_resolution_signal_controls_curation_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
