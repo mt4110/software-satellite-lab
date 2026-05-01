@@ -82,6 +82,10 @@
   - `SQLite FTS5` ベースのローカル memory index
 - `scripts/rebuild_memory_index.py`
   - event log と memory index の再構築コマンド
+- `scripts/evaluation_loop.py`
+  - acceptance / rejection / review-resolution / test pass / test fail signal、comparison、curation filter、adoption checklist、preview-only export、evaluation snapshot の土台
+- `scripts/run_evaluation_loop.py`
+  - CLI から evaluation snapshot を作成し、必要なら明示 signal / comparison / curation preview を追記するコマンド
 
 ## セットアップ
 
@@ -102,6 +106,10 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_recall_demo.py --list-requests
 .venv/bin/python scripts/run_recall_demo.py --eval --miss-report
 .venv/bin/python scripts/run_recall_demo.py --request-index 1
+.venv/bin/python scripts/run_evaluation_loop.py
+.venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind acceptance --source-event-id <event-id>
+.venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind review_resolved --source-event-id <event-id> --review-id <review-id> --resolution-summary "Review thread closed." --curation-preview
+.venv/bin/python scripts/run_evaluation_loop.py --curation-preview --curation-state ready --curation-reason review_resolved --curation-limit 10
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

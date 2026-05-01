@@ -63,6 +63,33 @@ def _clean_string_list(value: Any) -> list[str]:
     return cleaned
 
 
+def _clean_quality_checks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    checks: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        check: dict[str, Any] = {}
+        name = _clean_text(item.get("name"))
+        passed = item.get("pass")
+        detail = _clean_text(item.get("detail"))
+        if name is None or not isinstance(passed, bool):
+            continue
+        check["name"] = name
+        check["pass"] = passed
+        if detail is not None:
+            check["detail"] = detail
+        checks.append(check)
+    return checks
+
+
+def _quality_check_verdict(value: bool) -> str:
+    return "pass" if value else "fail"
+
+
 def _workspace_relative_path(path: Path, *, root: Path) -> str | None:
     try:
         return str(path.resolve().relative_to(root))
@@ -81,6 +108,41 @@ def _capability_surface(result: dict[str, Any]) -> str:
     if artifact_kind == "text":
         return "chat"
     return "evaluation"
+
+
+def _artifact_validation_context(artifact_ref: dict[str, Any]) -> dict[str, Any]:
+    artifact_path = _clean_text(artifact_ref.get("artifact_path"))
+    if artifact_path is None:
+        return {}
+    path = Path(artifact_path).expanduser()
+    if not path.exists():
+        return {}
+    try:
+        payload = read_artifact(path)
+    except Exception:
+        return {}
+    validation = payload.get("validation")
+    if not isinstance(validation, dict):
+        return {}
+
+    context: dict[str, Any] = {}
+    for key in (
+        "validation_mode",
+        "claim_scope",
+        "pass_definition",
+        "quality_status",
+        "execution_status",
+    ):
+        value = _clean_text(validation.get(key))
+        if value is not None:
+            context[key] = value
+    quality_checks = _clean_quality_checks(validation.get("quality_checks"))
+    if quality_checks:
+        context["quality_checks"] = quality_checks
+    quality_notes = _clean_string_list(validation.get("quality_notes"))
+    if quality_notes:
+        context["quality_notes"] = quality_notes
+    return context
 
 
 def _capability_attached_assets(result: dict[str, Any], *, root: Path) -> list[dict[str, Any]]:
@@ -138,6 +200,7 @@ def build_event_from_capability_matrix_result(
     quality_status = _clean_text(result.get("quality_status"))
     claim_scope = _clean_text(result.get("claim_scope"))
     validation_command = _clean_text(result.get("validation_command"))
+    quality_checks = _clean_quality_checks(result.get("quality_checks"))
     output_preview = _clean_text(result.get("output_preview"))
     blocker = result.get("blocker") if isinstance(result.get("blocker"), dict) else {}
     blocker_message = _clean_text(blocker.get("message"))
@@ -161,16 +224,14 @@ def build_event_from_capability_matrix_result(
         notes.append(f"execution_status: {execution_status}")
     if blocker_message:
         notes.append(blocker_message)
-    for item in result.get("quality_checks") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in quality_checks:
         name = _clean_text(item.get("name")) or "quality_check"
         detail = _clean_text(item.get("detail"))
-        passed = item.get("pass")
+        verdict = _quality_check_verdict(item.get("pass"))
         if detail:
-            notes.append(f"{name}: {'pass' if passed else 'fail'} - {detail}")
+            notes.append(f"{name}: {verdict} - {detail}")
         else:
-            notes.append(f"{name}: {'pass' if passed else 'fail'}")
+            notes.append(f"{name}: {verdict}")
 
     prompt_parts = [capability]
     if claim_scope:
@@ -233,7 +294,9 @@ def build_event_from_capability_matrix_result(
         "options": {
             "phase": phase,
             "quality_status": quality_status,
+            "quality_checks": quality_checks,
             "validation_mode": validation_mode,
+            "validation_command": validation_command,
             "claim_scope": claim_scope,
             "pass_definition": _clean_text(result.get("pass_definition")),
             "matrix_artifact_path": str(matrix_artifact_path),
@@ -360,6 +423,8 @@ def build_event_from_session_entry(
     artifact_ref = copy.deepcopy(entry.get("artifact_ref") or {})
     attached_assets = copy.deepcopy(entry.get("attached_assets") or [])
     notes = _clean_string_list(entry.get("notes"))
+    validation_context = _artifact_validation_context(artifact_ref)
+    notes.extend(_clean_string_list(validation_context.get("quality_notes")))
 
     session_manifest = session_manifest_path(
         session_id=session_id,
@@ -385,16 +450,50 @@ def build_event_from_session_entry(
     }
     outcome = {
         "status": _clean_text(entry.get("status")),
+        "quality_status": _clean_text(validation_context.get("quality_status")),
+        "execution_status": _clean_text(validation_context.get("execution_status"))
+        or _clean_text(entry.get("status")),
         "message_count_before_turn": entry.get("message_count_before_turn"),
         "message_count_after_turn": entry.get("message_count_after_turn"),
     }
+    entry_options = entry.get("options")
+    options = copy.deepcopy(entry_options) if isinstance(entry_options, dict) else {}
+    for key in (
+        "validation_mode",
+        "claim_scope",
+        "pass_definition",
+        "quality_status",
+        "execution_status",
+        "quality_checks",
+    ):
+        if key in validation_context and key not in options:
+            options[key] = copy.deepcopy(validation_context[key])
+    for key in (
+        "validation_mode",
+        "claim_scope",
+        "pass_definition",
+        "quality_status",
+        "execution_status",
+    ):
+        if key in options:
+            value = _clean_text(options.get(key))
+            if value is None:
+                options.pop(key, None)
+            else:
+                options[key] = value
+    if "quality_checks" in options:
+        quality_checks = _clean_quality_checks(options.get("quality_checks"))
+        if quality_checks:
+            options["quality_checks"] = quality_checks
+        else:
+            options.pop("quality_checks", None)
     content = {
         "prompt": _clean_text(entry.get("prompt")),
         "system_prompt": _clean_text(entry.get("system_prompt")),
         "resolved_user_prompt": _clean_text(entry.get("resolved_user_prompt")),
         "output_text": _clean_text(entry.get("output_text")),
         "notes": notes,
-        "options": copy.deepcopy(entry.get("options") or {}),
+        "options": options,
     }
     source_refs = {
         "artifact_ref": artifact_ref,
