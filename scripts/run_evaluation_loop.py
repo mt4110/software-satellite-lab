@@ -177,6 +177,8 @@ def main() -> int:
                     workspace_id=args.workspace_id,
                 )
             source_event = events_by_id.get(source_event_id)
+            if source_event is None:
+                raise ValueError(f"Unknown evaluation source_event_id `{source_event_id}`.")
             evidence = {
                 key: value
                 for key, value in {

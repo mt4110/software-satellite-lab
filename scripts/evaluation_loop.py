@@ -297,6 +297,13 @@ def build_evaluation_comparison(
     tags: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     candidates = _normalize_candidate_event_ids(candidate_event_ids)
+    if events_by_id is not None:
+        missing_event_ids = [event_id for event_id in candidates if event_id not in events_by_id]
+        if missing_event_ids:
+            raise ValueError(
+                "Evaluation comparison candidate_event_id was not found in software-work events: "
+                + ", ".join(missing_event_ids)
+            )
     winner = _clean_text(winner_event_id)
     normalized_outcome = _normalize_comparison_outcome(outcome, winner_event_id=winner)
     if winner is not None and winner not in candidates:

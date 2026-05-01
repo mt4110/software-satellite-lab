@@ -509,6 +509,41 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("Evaluation comparisons require at least two candidate event ids.", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_cli_rejects_unknown_signal_source_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stderr = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--record-signal",
+                    "--signal-kind",
+                    "acceptance",
+                    "--source-event-id",
+                    "local-default:missing-event",
+                ],
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    evaluation_main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("Unknown evaluation source_event_id `local-default:missing-event`.", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_comparison_rejects_unknown_candidate_when_events_are_supplied(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            build_evaluation_comparison(
+                candidate_event_ids=["known-event", "missing-event"],
+                winner_event_id="known-event",
+                events_by_id={"known-event": {"event_id": "known-event"}},
+            )
+
+        self.assertIn("missing-event", str(raised.exception))
+
     def test_cli_records_review_resolution_and_curation_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
