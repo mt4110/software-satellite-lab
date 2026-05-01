@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from artifact_schema import read_artifact
 from gemma_runtime import repo_root, timestamp_utc
 from workspace_state import (
     DEFAULT_WORKSPACE_ID,
@@ -40,6 +41,10 @@ def workspace_event_log_path(
     return event_logs_root(root) / f"{workspace_id}.jsonl"
 
 
+def capability_matrix_root(root: Path | None = None) -> Path:
+    return _resolve_root(root) / "artifacts" / "capability_matrix"
+
+
 def _clean_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -56,6 +61,199 @@ def _clean_string_list(value: Any) -> list[str]:
         if normalized is not None:
             cleaned.append(normalized)
     return cleaned
+
+
+def _workspace_relative_path(path: Path, *, root: Path) -> str | None:
+    try:
+        return str(path.resolve().relative_to(root))
+    except ValueError:
+        return None
+
+
+def _capability_surface(result: dict[str, Any]) -> str:
+    artifact_kind = _clean_text(result.get("artifact_kind"))
+    if artifact_kind == "vision":
+        return "vision"
+    if artifact_kind == "audio":
+        return "audio"
+    if artifact_kind == "thinking":
+        return "thinking"
+    if artifact_kind == "text":
+        return "chat"
+    return "evaluation"
+
+
+def _capability_attached_assets(result: dict[str, Any], *, root: Path) -> list[dict[str, Any]]:
+    attached_assets: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    asset_used = _clean_text(result.get("asset_used"))
+    if asset_used:
+        resolved = Path(asset_used).expanduser()
+        seen_paths.add(str(resolved))
+        attached_assets.append(
+            {
+                "role": "primary_input",
+                "kind": "file",
+                "path": str(resolved),
+                "workspace_relative_path": _workspace_relative_path(resolved, root=root),
+            }
+        )
+
+    for lineage in result.get("preprocessing_lineage") or []:
+        if not isinstance(lineage, dict):
+            continue
+        source_path = _clean_text(lineage.get("source_path"))
+        if not source_path:
+            continue
+        resolved = Path(source_path).expanduser()
+        path_key = str(resolved)
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        attached_assets.append(
+            {
+                "role": "preprocessing_source",
+                "kind": "file",
+                "path": path_key,
+                "workspace_relative_path": _workspace_relative_path(resolved, root=root),
+            }
+        )
+    return attached_assets
+
+
+def build_event_from_capability_matrix_result(
+    *,
+    root: Path | None,
+    workspace_id: str,
+    matrix_artifact_path: Path,
+    matrix_payload: dict[str, Any],
+    result: dict[str, Any],
+    result_index: int,
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    capability = _clean_text(result.get("capability")) or f"result-{result_index + 1}"
+    phase = _clean_text(result.get("phase"))
+    status = _clean_text(result.get("status")) or _clean_text(result.get("result"))
+    quality_status = _clean_text(result.get("quality_status"))
+    claim_scope = _clean_text(result.get("claim_scope"))
+    validation_command = _clean_text(result.get("validation_command"))
+    output_preview = _clean_text(result.get("output_preview"))
+    blocker = result.get("blocker") if isinstance(result.get("blocker"), dict) else {}
+    blocker_message = _clean_text(blocker.get("message"))
+    runtime = matrix_payload.get("runtime") if isinstance(matrix_payload.get("runtime"), dict) else {}
+    recorded_at = _clean_text(matrix_payload.get("timestamp_utc")) or timestamp_utc()
+    session_id = f"capability-matrix:{matrix_artifact_path.stem}"
+    matrix_row_ref = f"{matrix_artifact_path.stem}:row-{result_index + 1}:{capability}"
+    artifact_path_text = _clean_text(result.get("artifact_path"))
+    artifact_path = Path(artifact_path_text).expanduser() if artifact_path_text else matrix_artifact_path
+    attached_assets = _capability_attached_assets(result, root=resolved_root)
+
+    notes = _clean_string_list(result.get("notes"))
+    notes.extend(_clean_string_list(result.get("quality_notes")))
+    if quality_status:
+        notes.append(f"quality_status: {quality_status}")
+    validation_mode = _clean_text(result.get("validation_mode"))
+    if validation_mode:
+        notes.append(f"validation_mode: {validation_mode}")
+    execution_status = _clean_text(result.get("execution_status"))
+    if execution_status:
+        notes.append(f"execution_status: {execution_status}")
+    if blocker_message:
+        notes.append(blocker_message)
+    for item in result.get("quality_checks") or []:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_text(item.get("name")) or "quality_check"
+        detail = _clean_text(item.get("detail"))
+        passed = item.get("pass")
+        if detail:
+            notes.append(f"{name}: {'pass' if passed else 'fail'} - {detail}")
+        else:
+            notes.append(f"{name}: {'pass' if passed else 'fail'}")
+
+    prompt_parts = [capability]
+    if claim_scope:
+        prompt_parts.append(claim_scope)
+    if validation_command:
+        prompt_parts.append(validation_command)
+
+    workspace_manifest = workspace_manifest_path(
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+    workspace_record = {
+        "workspace_id": workspace_id,
+        "workspace_manifest_path": str(workspace_manifest),
+    }
+    session_record = {
+        "session_id": session_id,
+        "surface": _capability_surface(result),
+        "mode": phase or "capability-matrix",
+        "title": "Capability Matrix",
+        "selected_model_id": _clean_text(result.get("model_used"))
+        or _clean_text(runtime.get("model_id")),
+        "session_manifest_path": None,
+    }
+    source_refs = {
+        "artifact_ref": {
+            "entry_id": matrix_row_ref,
+            "artifact_kind": _clean_text(result.get("artifact_kind")) or "artifact",
+            "action": "capability_matrix",
+            "status": status,
+            "recorded_at_utc": recorded_at,
+            "artifact_path": str(artifact_path),
+            "artifact_workspace_relative_path": _workspace_relative_path(artifact_path, root=resolved_root),
+        },
+        "attached_assets": attached_assets,
+        "matrix_artifact_ref": {
+            "artifact_path": str(matrix_artifact_path),
+            "artifact_workspace_relative_path": _workspace_relative_path(matrix_artifact_path, root=resolved_root),
+        },
+    }
+    tags = [
+        tag
+        for tag in (
+            "capability_matrix",
+            session_record["surface"],
+            phase,
+            capability,
+            status,
+            quality_status,
+            _clean_text(result.get("runtime_backend")),
+        )
+        if isinstance(tag, str) and tag
+    ]
+    content = {
+        "prompt": " | ".join(part for part in prompt_parts if part),
+        "system_prompt": None,
+        "resolved_user_prompt": validation_command or claim_scope,
+        "output_text": output_preview or blocker_message or f"{capability} run completed.",
+        "notes": notes,
+        "options": {
+            "phase": phase,
+            "quality_status": quality_status,
+            "validation_mode": validation_mode,
+            "claim_scope": claim_scope,
+            "pass_definition": _clean_text(result.get("pass_definition")),
+            "matrix_artifact_path": str(matrix_artifact_path),
+        },
+    }
+    return build_event_record(
+        event_id=f"{workspace_id}:{session_id}:row-{result_index + 1}:{capability}",
+        event_kind="capability_result",
+        recorded_at_utc=recorded_at,
+        workspace=workspace_record,
+        session=session_record,
+        outcome={
+            "status": status,
+            "quality_status": quality_status,
+            "execution_status": execution_status,
+        },
+        content=content,
+        source_refs=source_refs,
+        tags=tags,
+    )
 
 
 def build_event_record(
@@ -264,6 +462,50 @@ def iter_workspace_events(
             )
 
     events.sort(key=lambda event: str(event.get("recorded_at_utc") or ""))
+    return events
+
+
+def iter_capability_matrix_events(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    errors: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_root = _resolve_root(root)
+    matrix_root = capability_matrix_root(resolved_root)
+    if not matrix_root.exists():
+        return []
+
+    events: list[dict[str, Any]] = []
+    for path in sorted(matrix_root.glob("*.json")):
+        try:
+            payload = read_artifact(path)
+        except Exception as exc:
+            if errors is not None:
+                errors.append(
+                    {
+                        "path": str(path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            continue
+        if payload.get("artifact_kind") != "capability_matrix":
+            continue
+        for index, result in enumerate(payload.get("results") or []):
+            if not isinstance(result, dict):
+                continue
+            events.append(
+                build_event_from_capability_matrix_result(
+                    root=resolved_root,
+                    workspace_id=workspace_id,
+                    matrix_artifact_path=path,
+                    matrix_payload=payload,
+                    result=result,
+                    result_index=index,
+                )
+            )
+
+    events.sort(key=lambda item: str(item.get("recorded_at_utc") or ""))
     return events
 
 

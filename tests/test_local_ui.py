@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import sys
 import tempfile
 import threading
@@ -30,6 +31,8 @@ from gemma_runtime import (  # noqa: E402
 from run_local_ui import (  # noqa: E402
     AUDIO_BACKEND,
     CHAT_BACKEND,
+    DEFAULT_CONTEXT_BUDGET_CHARS,
+    DEFAULT_LIMIT,
     JOB_STATE_CANCELLED,
     JOB_STATE_COMPLETED,
     JOB_STATE_FAILED,
@@ -43,7 +46,20 @@ from run_local_ui import (  # noqa: E402
     UiActionResult,
     UiJobSnapshot,
     build_artifact_overview_fields,
+    build_recall_diagnostic_guide_fields,
+    build_recall_eval_compare_fields,
+    build_recall_eval_source_card_text,
+    build_recall_eval_source_chip_texts,
+    build_recall_eval_source_why_text,
+    build_recall_eval_winner_chip_texts,
+    build_recall_eval_winner_why_text,
     build_entry_compare_fields,
+    build_recall_compare_fields,
+    build_recall_candidate_summary,
+    build_recall_eval_miss_summary,
+    build_recall_miss_suggested_manual_config,
+    build_recall_pins_summary,
+    build_recall_request_summary,
     build_thinking_debug_report,
 )
 from workspace_state import WorkspaceSessionStore, session_manifest_path  # noqa: E402
@@ -164,6 +180,97 @@ class FakeAppJobRunner:
         return SimpleNamespace(job_id=len(self.submissions))
 
 
+class FakeTextWidget:
+    def __init__(self) -> None:
+        self.state = "disabled"
+        self.content = ""
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = str(kwargs["state"])
+
+    def delete(self, *_args: object) -> None:
+        self.content = ""
+
+    def insert(self, _index: str, text: str) -> None:
+        self.content = text
+
+
+class FakeTreeview:
+    def __init__(self) -> None:
+        self.rows: dict[str, tuple[object, ...]] = {}
+        self.focused: str | None = None
+        self._selection: tuple[str, ...] = ()
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(self.rows.keys())
+
+    def delete(self, *children: str) -> None:
+        for child in children:
+            self.rows.pop(str(child), None)
+            if self.focused == str(child):
+                self.focused = None
+        self._selection = tuple(item for item in self._selection if item in self.rows)
+
+    def insert(self, _parent: str, _index: str, *, iid: str, values: tuple[object, ...]) -> None:
+        self.rows[str(iid)] = values
+
+    def selection(self) -> tuple[str, ...]:
+        return self._selection
+
+    def selection_set(self, iid: str) -> None:
+        self._selection = (str(iid),)
+
+    def focus(self, iid: str) -> None:
+        self.focused = str(iid)
+
+    def exists(self, iid: str) -> bool:
+        return str(iid) in self.rows
+
+
+class FakeNotebook:
+    def __init__(self) -> None:
+        self.selected_tabs: list[object] = []
+
+    def select(self, tab: object) -> None:
+        self.selected_tabs.append(tab)
+
+
+class FakeRecallController:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        snapshot: dict[str, object],
+        evaluation_snapshot: dict[str, object],
+        result: dict[str, object],
+        pinned_result: dict[str, object] | None = None,
+    ) -> None:
+        self.workspace_store = SimpleNamespace(root=root, workspace_id="local-default")
+        self.snapshot = snapshot
+        self.evaluation_snapshot = evaluation_snapshot
+        self.result = result
+        self.pinned_result = pinned_result or result
+        self.collect_calls: list[bool] = []
+        self.evaluate_calls: list[bool] = []
+        self.bundle_calls: list[dict[str, object]] = []
+
+    def collect_recall_requests(self, *, refresh_dataset: bool = False) -> dict[str, object]:
+        self.collect_calls.append(refresh_dataset)
+        return self.snapshot
+
+    def evaluate_recall_dataset(self, *, refresh_dataset: bool = False) -> dict[str, object]:
+        self.evaluate_calls.append(refresh_dataset)
+        return self.evaluation_snapshot
+
+    def build_recall_bundle(self, **kwargs: object) -> dict[str, object]:
+        self.bundle_calls.append(dict(kwargs))
+        pinned_event_ids = list(kwargs.get("pinned_event_ids") or [])
+        if pinned_event_ids:
+            return self.pinned_result
+        return self.result
+
+
 class LocalUiControllerTests(unittest.TestCase):
     def make_controller(
         self,
@@ -178,6 +285,53 @@ class LocalUiControllerTests(unittest.TestCase):
             workspace_store=store,
         )
         return controller, store, root
+
+    def seed_recall_history(
+        self,
+        *,
+        store: WorkspaceSessionStore,
+        root: Path,
+        model_id: str = "backend-a",
+        prompt: str = "Review the memory index patch.",
+        output_text: str = "Looks good with one regression note.",
+        notes: list[str] | None = None,
+    ) -> Path:
+        artifact_path = root / "artifacts" / "text" / "chat.json"
+        write_artifact(
+            artifact_path,
+            build_artifact_payload(
+                artifact_kind="text",
+                status="ok",
+                runtime=build_runtime_record(
+                    backend=CHAT_BACKEND,
+                    model_id=model_id,
+                    device_info="cpu",
+                    elapsed_seconds=0.2,
+                ),
+                prompts=build_prompt_record(
+                    system_prompt="You are concise.",
+                    prompt=prompt,
+                    resolved_user_prompt=prompt,
+                ),
+                extra={"output_text": output_text},
+            ),
+        )
+        messages = store.chat_messages_for_next_turn(
+            model_id=model_id,
+            system_prompt="You are concise.",
+        )
+        store.record_chat_turn(
+            model_id=model_id,
+            status="ok",
+            artifact_path=artifact_path,
+            prompt=prompt,
+            system_prompt="You are concise.",
+            resolved_user_prompt=prompt,
+            output_text=output_text,
+            base_messages=messages,
+            notes=notes or ["review accepted"],
+        )
+        return artifact_path
 
     def test_set_model_id_clears_sessions_only_when_model_changes(self) -> None:
         manager = FakeSessionManager()
@@ -502,6 +656,95 @@ class LocalUiControllerTests(unittest.TestCase):
             "text",
         )
         self.assertEqual(diagnostics["workspace_state"]["selected_model_id"], controller.selected_model_id)
+
+    def test_collect_recall_requests_returns_prepared_catalog(self) -> None:
+        controller, store, _root = self.make_controller()
+        self.seed_recall_history(store=store, root=controller.workspace_store.root)
+
+        snapshot = controller.collect_recall_requests(refresh_dataset=True, max_requests=4)
+
+        self.assertGreaterEqual(snapshot["request_count"], 1)
+        self.assertTrue(Path(snapshot["dataset_path"]).exists())
+        self.assertEqual(snapshot["requests"][0]["index"], 1)
+        self.assertEqual(snapshot["request_entries"][0]["task_kind"], snapshot["requests"][0]["task_kind"])
+
+    def test_evaluate_recall_dataset_writes_summary_and_syncs_catalog(self) -> None:
+        controller, store, _root = self.make_controller()
+        self.seed_recall_history(store=store, root=controller.workspace_store.root)
+
+        snapshot = controller.evaluate_recall_dataset(refresh_dataset=True, max_requests=4)
+
+        self.assertEqual(snapshot["request_count"], 1)
+        self.assertEqual(snapshot["summary"]["source_hits"], 1)
+        self.assertTrue(Path(snapshot["dataset_path"]).exists())
+        self.assertTrue(Path(snapshot["evaluation_latest_path"]).exists())
+        self.assertTrue(Path(snapshot["evaluation_run_path"]).exists())
+        self.assertIn("Hit rate:", snapshot["report"])
+        self.assertEqual(snapshot["requests"][0]["index"], 1)
+        self.assertTrue(snapshot["requests"][0]["source_hit"])
+
+    def test_build_recall_bundle_prefers_stored_dataset_bundle(self) -> None:
+        controller, store, _root = self.make_controller()
+        self.seed_recall_history(store=store, root=controller.workspace_store.root)
+        snapshot = controller.collect_recall_requests(refresh_dataset=True, max_requests=4)
+
+        bundle_path = Path(snapshot["request_entries"][0]["bundle_path"])
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        bundle["query_text"] = "SENTINEL UI RECALL BUNDLE"
+        bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        result = controller.build_recall_bundle(request_index=1, max_requests=4)
+
+        self.assertIn("SENTINEL UI RECALL BUNDLE", result["report"])
+        self.assertEqual(result["bundle_path"], str(bundle_path))
+
+    def test_build_recall_bundle_manual_query_writes_ui_bundle(self) -> None:
+        controller, store, _root = self.make_controller()
+        self.seed_recall_history(store=store, root=controller.workspace_store.root)
+
+        result = controller.build_recall_bundle(
+            task_kind="review",
+            query_text="Review the memory index patch.",
+            request_basis="pass_definition",
+            file_hint="scripts/memory_index.py",
+            pinned_event_ids=["local-default:chat-main:pinned"],
+        )
+
+        self.assertIn("Task: review", result["report"])
+        self.assertTrue(Path(result["bundle_path"]).exists())
+        self.assertIn("/artifacts/recall_data/local-default/ui/", result["bundle_path"])
+        self.assertEqual(
+            result["request_payload"]["pinned_event_ids"],
+            ["local-default:chat-main:pinned"],
+        )
+        self.assertEqual(result["request_payload"]["request_basis"], "pass_definition")
+        self.assertEqual(result["pin_compare"]["before_bundle"]["pinned_event_ids"], [])
+        self.assertEqual(
+            result["pin_compare"]["after_bundle"]["pinned_event_ids"],
+            ["local-default:chat-main:pinned"],
+        )
+
+    def test_build_recall_bundle_with_pins_uses_ui_bundle_for_dataset_request(self) -> None:
+        controller, store, _root = self.make_controller()
+        self.seed_recall_history(store=store, root=controller.workspace_store.root)
+        controller.collect_recall_requests(refresh_dataset=True, max_requests=4)
+
+        result = controller.build_recall_bundle(
+            request_index=1,
+            pinned_event_ids=["local-default:chat-main:pinned"],
+            max_requests=4,
+        )
+
+        self.assertIn("/artifacts/recall_data/local-default/ui/", result["bundle_path"])
+        self.assertEqual(
+            result["request_payload"]["pinned_event_ids"],
+            ["local-default:chat-main:pinned"],
+        )
+        self.assertEqual(result["pin_compare"]["before_bundle"]["pinned_event_ids"], [])
+        self.assertEqual(
+            result["pin_compare"]["after_bundle"]["pinned_event_ids"],
+            ["local-default:chat-main:pinned"],
+        )
 
     def test_collect_forensics_returns_session_trail_and_artifact_summary(self) -> None:
         controller, store, root = self.make_controller()
@@ -1319,6 +1562,1031 @@ class LocalUiAppStartupPrewarmTests(unittest.TestCase):
         self.assertIn("Cancel accepted", app.status_var.get())
         self.assertIn("take effect quickly", app.status_var.get())
         self.assertIn("Immediate effect is expected", app.hint_var.get())
+
+
+class LocalUiAppRecallTests(unittest.TestCase):
+    def _build_app(self) -> tuple[LocalUiApp, FakeRecallController]:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        snapshot = {
+            "dataset_path": str(root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"),
+            "generated_at_utc": "2026-04-13T12:00:00Z",
+            "request_count": 1,
+            "requests": [
+                {
+                    "index": 1,
+                    "task_kind": "review",
+                    "query_text": "Review the memory index patch.",
+                    "source_hit": False,
+                    "source_status": "ok",
+                }
+            ],
+            "request_entries": [
+                {
+                    "index": 1,
+                    "task_kind": "review",
+                    "query_text": "Review the memory index patch.",
+                    "source_hit": False,
+                    "source_status": "ok",
+                    "file_hints": ["scripts/memory_index.py"],
+                    "request_basis": "pass_definition",
+                    "limit": 8,
+                    "context_budget_chars": 5000,
+                    "source_event_id": "local-default:chat-main:entry-1",
+                    "miss_reason": "dropped_by_context_budget",
+                    "source_rank": 6,
+                    "source_block_title": "Accepted outcomes",
+                    "source_reasons": ["query-coverage", "accepted-signal"],
+                    "top_selected": [
+                        {
+                            "event_id": "top-1",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:40:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                            "block_title": "Open risks",
+                            "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                            "reasons": ["fts-hit", "risk-signal"],
+                        },
+                        {
+                            "event_id": "top-2",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:32:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other-two.json"),
+                            "block_title": "Accepted outcomes",
+                            "prompt_excerpt": "Accepted outcome summary from the prior review.",
+                            "reasons": ["accepted-signal", "recent"],
+                        },
+                        {
+                            "event_id": "top-3",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:25:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other-three.json"),
+                            "block_title": "Relevant context",
+                            "prompt_excerpt": "Relevant context bundle from the earlier recall run.",
+                            "reasons": ["multi-query-hit", "recent"],
+                        }
+                    ],
+                }
+            ],
+        }
+        result = {
+            "report": "Task: review\nQuery: Review the memory index patch.",
+            "bundle_path": str(root / "artifacts" / "recall_data" / "local-default" / "ui" / "bundle.json"),
+            "request_label": "dataset[1] review hit=yes",
+            "bundle": {
+                "budget": {
+                    "used_chars": 880,
+                    "context_budget_chars": 7500,
+                },
+                "selected_candidates": [
+                    {
+                        "event_id": "local-default:chat-main:entry-1",
+                        "session_id": "chat-main",
+                        "block_title": "Relevant context",
+                        "status": "ok",
+                        "session_surface": "chat",
+                        "recorded_at_utc": "2026-04-13T11:55:00Z",
+                        "artifact_path": str(root / "artifacts" / "text" / "chat.json"),
+                        "prompt_excerpt": "Review the memory index patch.",
+                        "reasons": ["pinned", "query-coverage"],
+                    }
+                ],
+                "source_evaluation": {
+                    "source_event_id": "local-default:chat-main:entry-1",
+                    "source_selected": True,
+                    "source_rank": 1,
+                    "source_prompt_excerpt": "Review the memory index patch.",
+                    "top_selected": [
+                        {
+                            "event_id": "local-default:chat-main:entry-1",
+                            "prompt_excerpt": "Review the memory index patch.",
+                        }
+                    ],
+                },
+            },
+        }
+        evaluation_snapshot = {
+            **snapshot,
+            "summary": {
+                "workspace_id": "local-default",
+                "request_count": 1,
+                "source_hits": 0,
+                "source_misses": 1,
+                "hit_rate": 0.0,
+                "evaluated_at_utc": "2026-04-14T10:00:00+00:00",
+                "variants": {
+                    "baseline": {
+                        "request_count": 1,
+                        "source_hits": 0,
+                        "source_misses": 1,
+                        "hit_rate": 0.0,
+                    }
+                },
+                "miss_reason_counts": {"dropped_by_context_budget": 1},
+                "misses": [
+                    {
+                        "index": 1,
+                        "task_kind": "review",
+                        "query_text": "Review the memory index patch.",
+                        "source_status": "ok",
+                        "source_event_id": "local-default:chat-main:entry-1",
+                        "source_rank": 6,
+                        "source_prompt_excerpt": "Review the memory index patch.",
+                        "miss_reason": "dropped_by_context_budget",
+                        "request_variant": "baseline",
+                        "top_selected": [
+                            {
+                                "event_id": "top-1",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:40:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                                "block_title": "Open risks",
+                                "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                                "reasons": ["fts-hit", "risk-signal"],
+                            },
+                            {
+                                "event_id": "top-2",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:32:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "other-two.json"),
+                                "block_title": "Accepted outcomes",
+                                "prompt_excerpt": "Accepted outcome summary from the prior review.",
+                                "reasons": ["accepted-signal", "recent"],
+                            },
+                            {
+                                "event_id": "top-3",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:25:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "other-three.json"),
+                                "block_title": "Relevant context",
+                                "prompt_excerpt": "Relevant context bundle from the earlier recall run.",
+                                "reasons": ["multi-query-hit", "recent"],
+                            }
+                        ],
+                    }
+                ],
+            },
+            "comparison": {
+                "before_summary": {
+                    "workspace_id": "local-default",
+                    "request_count": 1,
+                    "source_hits": 0,
+                    "source_misses": 1,
+                    "hit_rate": 0.0,
+                    "variants": {
+                        "baseline": {
+                            "request_count": 1,
+                            "source_hits": 0,
+                            "source_misses": 1,
+                            "hit_rate": 0.0,
+                        }
+                    },
+                    "miss_reason_counts": {"ranked_out_by_limit": 1},
+                },
+                "after_summary": {
+                    "workspace_id": "local-default",
+                    "request_count": 1,
+                    "source_hits": 0,
+                    "source_misses": 1,
+                    "hit_rate": 0.0,
+                    "variants": {
+                        "baseline": {
+                            "request_count": 1,
+                            "source_hits": 0,
+                            "source_misses": 1,
+                            "hit_rate": 0.0,
+                        }
+                    },
+                    "miss_reason_counts": {"dropped_by_context_budget": 1},
+                },
+            },
+            "misses": [
+                {
+                    "index": 1,
+                    "task_kind": "review",
+                    "query_text": "Review the memory index patch.",
+                    "source_status": "ok",
+                    "source_event_id": "local-default:chat-main:entry-1",
+                    "source_rank": 6,
+                    "source_prompt_excerpt": "Review the memory index patch.",
+                    "miss_reason": "dropped_by_context_budget",
+                    "request_variant": "baseline",
+                    "top_selected": [
+                        {
+                            "event_id": "top-1",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:40:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                            "block_title": "Open risks",
+                            "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                            "reasons": ["fts-hit", "risk-signal"],
+                        },
+                        {
+                            "event_id": "top-2",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:32:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other-two.json"),
+                            "block_title": "Accepted outcomes",
+                            "prompt_excerpt": "Accepted outcome summary from the prior review.",
+                            "reasons": ["accepted-signal", "recent"],
+                        },
+                        {
+                            "event_id": "top-3",
+                            "session_id": "chat-main",
+                            "session_surface": "chat",
+                            "recorded_at_utc": "2026-04-13T11:25:00Z",
+                            "artifact_path": str(root / "artifacts" / "text" / "other-three.json"),
+                            "block_title": "Relevant context",
+                            "prompt_excerpt": "Relevant context bundle from the earlier recall run.",
+                            "reasons": ["multi-query-hit", "recent"],
+                        }
+                    ],
+                }
+            ],
+            "evaluation_run_path": str(
+                root / "artifacts" / "recall_data" / "local-default" / "evaluation" / "runs" / "eval.json"
+            ),
+            "report": (
+                "Workspace: local-default\nRequests: 1\nSource hits: 0\nSource misses: 1\nHit rate: 0.000"
+            ),
+        }
+        pinned_result = {
+            "report": "Task: review\nQuery: Review the memory index patch.\nPins: 1",
+            "bundle_path": str(root / "artifacts" / "recall_data" / "local-default" / "ui" / "bundle-with-pin.json"),
+            "request_label": "dataset[1] review hit=yes pins=1",
+            "bundle": {
+                "budget": {
+                    "used_chars": 520,
+                    "context_budget_chars": 1800,
+                },
+                "selected_candidates": [
+                    {
+                        "event_id": "local-default:chat-main:entry-1",
+                        "session_id": "chat-main",
+                        "block_title": "Relevant context",
+                        "status": "ok",
+                        "session_surface": "chat",
+                        "recorded_at_utc": "2026-04-13T11:55:00Z",
+                        "artifact_path": str(root / "artifacts" / "text" / "chat.json"),
+                        "prompt_excerpt": "Review the memory index patch.",
+                        "reasons": ["pinned", "query-coverage"],
+                    },
+                    {
+                        "event_id": "top-1",
+                        "session_id": "chat-main",
+                        "block_title": "Open risks",
+                        "status": "ok",
+                        "session_surface": "chat",
+                        "recorded_at_utc": "2026-04-13T11:40:00Z",
+                        "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                        "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                        "reasons": ["query-coverage"],
+                    },
+                ],
+                "source_evaluation": {
+                    "source_event_id": "local-default:chat-main:entry-1",
+                    "source_selected": True,
+                    "source_rank": 1,
+                    "source_prompt_excerpt": "Review the memory index patch.",
+                    "top_selected": [
+                        {
+                            "event_id": "local-default:chat-main:entry-1",
+                            "prompt_excerpt": "Review the memory index patch.",
+                        },
+                        {
+                            "event_id": "top-1",
+                            "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                        },
+                    ],
+                },
+            },
+            "pin_compare": {
+                "before_bundle": {
+                    "budget": {
+                        "used_chars": 420,
+                        "context_budget_chars": 1800,
+                    },
+                    "selected_candidates": [
+                        {
+                            "event_id": "top-1",
+                            "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                        },
+                        {
+                            "event_id": "top-2",
+                            "prompt_excerpt": "Accepted outcomes from the prior review.",
+                        },
+                    ],
+                    "source_evaluation": {
+                        "source_event_id": "local-default:chat-main:entry-1",
+                        "source_selected": False,
+                        "source_rank": 6,
+                        "miss_reason": "dropped_by_context_budget",
+                        "source_prompt_excerpt": "Review the memory index patch.",
+                        "top_selected": [
+                            {
+                                "event_id": "top-1",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:40:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                                "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                            },
+                            {
+                                "event_id": "top-2",
+                                "prompt_excerpt": "Accepted outcomes from the prior review.",
+                            },
+                        ],
+                    },
+                },
+                "after_bundle": {
+                    "budget": {
+                        "used_chars": 520,
+                        "context_budget_chars": 1800,
+                    },
+                    "selected_candidates": [
+                        {
+                            "event_id": "local-default:chat-main:entry-1",
+                            "prompt_excerpt": "Review the memory index patch.",
+                        },
+                        {
+                            "event_id": "top-1",
+                            "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                        },
+                    ],
+                    "source_evaluation": {
+                        "source_event_id": "local-default:chat-main:entry-1",
+                        "source_selected": True,
+                        "source_rank": 1,
+                        "source_prompt_excerpt": "Review the memory index patch.",
+                        "top_selected": [
+                            {
+                                "event_id": "local-default:chat-main:entry-1",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:55:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "chat.json"),
+                                "prompt_excerpt": "Review the memory index patch.",
+                            },
+                            {
+                                "event_id": "top-1",
+                                "session_id": "chat-main",
+                                "session_surface": "chat",
+                                "recorded_at_utc": "2026-04-13T11:40:00Z",
+                                "artifact_path": str(root / "artifacts" / "text" / "other.json"),
+                                "prompt_excerpt": "Code generation notes outranked the source bundle.",
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+        controller = FakeRecallController(
+            root=root,
+            snapshot=snapshot,
+            evaluation_snapshot=evaluation_snapshot,
+            result=result,
+            pinned_result=pinned_result,
+        )
+
+        app = LocalUiApp.__new__(LocalUiApp)
+        app.controller = controller
+        app.job_runner = FakeAppJobRunner()
+        app.status_var = FakeVar("")
+        app.backend_var = FakeVar("")
+        app.device_var = FakeVar("")
+        app.artifact_var = FakeVar("")
+        app.hint_var = FakeVar("")
+        app.recall_requests_state = FakeVar("")
+        app.recall_eval_state = FakeVar("")
+        app.recall_eval_misses_state = FakeVar("")
+        app.recall_eval_miss_selection_state = FakeVar("")
+        app.recall_eval_previous_var = FakeVar("")
+        app.recall_eval_current_var = FakeVar("")
+        app.recall_eval_change_var = FakeVar("")
+        app.recall_eval_winner_compare_state = FakeVar("")
+        app.recall_eval_source_var = FakeVar("")
+        app.recall_eval_source_why_var = FakeVar("")
+        app.recall_eval_source_action_hint_var = FakeVar("")
+        app.recall_eval_winner_vars = [FakeVar("") for _ in range(3)]
+        app.recall_eval_source_chip_vars = {
+            "winner_only": FakeVar(""),
+            "shared": FakeVar(""),
+            "source_only": FakeVar(""),
+            "pending": FakeVar(""),
+        }
+        app.recall_eval_winner_chip_vars = [
+            {
+                "winner_only": FakeVar(""),
+                "shared": FakeVar(""),
+                "source_only": FakeVar(""),
+                "pending": FakeVar(""),
+            }
+            for _ in range(3)
+        ]
+        app.recall_selection_state = FakeVar("")
+        app.recall_task_kind = FakeVar("proposal")
+        app.recall_query = FakeVar("")
+        app.recall_request_basis = FakeVar("")
+        app.recall_file_hint = FakeVar("")
+        app.recall_limit = FakeVar(DEFAULT_LIMIT)
+        app.recall_context_budget_chars = FakeVar(DEFAULT_CONTEXT_BUDGET_CHARS)
+        app.recall_candidates_state = FakeVar("")
+        app.recall_candidate_selection_state = FakeVar("")
+        app.recall_pins_state = FakeVar("")
+        app.recall_compare_before_var = FakeVar("")
+        app.recall_compare_after_var = FakeVar("")
+        app.recall_compare_change_var = FakeVar("")
+        app.recall_diagnostic_diagnosis_var = FakeVar("")
+        app.recall_diagnostic_action_var = FakeVar("")
+        app.recall_diagnostic_manual_var = FakeVar("")
+        app.recall_requests_tree = FakeTreeview()
+        app.recall_eval_misses_tree = FakeTreeview()
+        app.recall_candidates_tree = FakeTreeview()
+        app.recall_output = FakeTextWidget()
+        app._recall_request_rows = {}
+        app._recall_selected_request_index = None
+        app._recall_eval_miss_rows = {}
+        app._recall_selected_eval_miss_index = None
+        app._recall_eval_source_row = None
+        app._recall_eval_winner_rows = [None, None, None]
+        app.recall_eval_source_chip_labels = {}
+        app.recall_eval_winner_chip_labels = [{}, {}, {}]
+        app._recall_candidate_rows = {}
+        app._recall_selected_candidate_event_id = None
+        app._recall_pinned_candidate_rows = {}
+        app._set_output = lambda widget, text: setattr(widget, "content", text)
+        app._cancel_pending_startup_prewarm = lambda: None
+        app._resume_startup_prewarm_if_needed = lambda: None
+        app._set_busy = lambda _message: None
+        app._clear_busy = lambda: None
+        app.apply_recall_miss_tweak_button = SimpleNamespace(configure=lambda **_kwargs: None)
+        app.open_recall_miss_winner_button = SimpleNamespace(configure=lambda **_kwargs: None)
+        app.recall_eval_source_button = SimpleNamespace(configure=lambda **_kwargs: None)
+        app.recall_eval_source_copy_button = SimpleNamespace(configure=lambda **_kwargs: None)
+        app.recall_eval_source_rerun_button = SimpleNamespace(configure=lambda **_kwargs: None)
+        app.recall_eval_winner_buttons = [SimpleNamespace(configure=lambda **_kwargs: None) for _ in range(3)]
+        app.forensics_surface = FakeVar("chat")
+        app.forensics_artifact_path = FakeVar("")
+        app._forensics_selected_session_id = None
+        app._forensics_selected_entry_id = None
+        app.refresh_forensics_calls = 0
+        app.refresh_forensics = lambda: setattr(app, "refresh_forensics_calls", app.refresh_forensics_calls + 1)
+        app.notebook = FakeNotebook()
+        app.forensics_tab = "forensics-tab"
+        return app, controller
+
+    def test_refresh_recall_requests_populates_selection_and_copy(self) -> None:
+        app, controller = self._build_app()
+
+        app.refresh_recall_requests()
+        self.assertEqual(controller.collect_calls, [False])
+        self.assertEqual(app._recall_selected_request_index, 1)
+        self.assertIn("prepared requests", app.recall_requests_state.get())
+        self.assertIn("request 1", app.recall_selection_state.get())
+        self.assertIn("miss_reason=dropped_by_context_budget", app.recall_selection_state.get())
+
+        app.copy_selected_recall_request()
+
+        self.assertEqual(app.recall_task_kind.get(), "review")
+        self.assertEqual(app.recall_query.get(), "Review the memory index patch.")
+        self.assertEqual(app.recall_request_basis.get(), "pass_definition")
+        self.assertEqual(app.recall_file_hint.get(), "scripts/memory_index.py")
+        self.assertEqual(app.recall_limit.get(), 8)
+        self.assertEqual(app.recall_context_budget_chars.get(), 5000)
+
+    def test_run_recall_evaluation_populates_compare_and_misses(self) -> None:
+        app, controller = self._build_app()
+        app.refresh_recall_requests()
+
+        app.run_recall_evaluation()
+
+        self.assertEqual(controller.evaluate_calls, [False])
+        self.assertIn("hit rate 0.000", app.recall_eval_state.get())
+        self.assertIn("requests=1", app.recall_eval_current_var.get())
+        self.assertIn("miss reasons:", app.recall_eval_change_var.get())
+        self.assertEqual(app._recall_selected_eval_miss_index, 1)
+        self.assertIn("source miss(es)", app.recall_eval_misses_state.get())
+        self.assertIn("Recall evaluation:", app.artifact_var.get())
+        self.assertIn("Context budget squeeze", app.recall_diagnostic_diagnosis_var.get())
+        self.assertIn("Raise context budget", app.recall_diagnostic_action_var.get())
+        self.assertIn("budget=7500", app.recall_diagnostic_manual_var.get())
+        self.assertIn("Showing 3 winner slot", app.recall_eval_winner_compare_state.get())
+        self.assertIn("Review the memory index patch.", app.recall_eval_source_var.get())
+        self.assertIn("reason=dropped by context budget", app.recall_eval_source_var.get())
+        self.assertEqual(app.recall_eval_source_why_var.get(), "lost to winners on fts hit, risk signal")
+        self.assertEqual(app.recall_eval_source_chip_vars["winner_only"].get(), "+ query coverage")
+        self.assertEqual(app.recall_eval_source_chip_vars["shared"].get(), "= accepted signal")
+        self.assertEqual(app.recall_eval_source_chip_vars["source_only"].get(), "- fts hit, risk signal")
+        self.assertIn("Rerun suggested tweak: budget 5000 -> 7500.", app.recall_eval_source_action_hint_var.get())
+        self.assertIn("Code generation notes", app.recall_eval_winner_vars[0].get())
+        self.assertIn("beat source on fts hit, risk signal", app.recall_eval_winner_vars[0].get())
+        self.assertEqual(app.recall_eval_winner_chip_vars[0]["winner_only"].get(), "+ fts hit, risk signal")
+        self.assertEqual(app.recall_eval_winner_chip_vars[0]["shared"].get(), "")
+        self.assertEqual(app.recall_eval_winner_chip_vars[0]["source_only"].get(), "- query coverage, accepted signal")
+        self.assertIn("Accepted outcome summary", app.recall_eval_winner_vars[1].get())
+        self.assertEqual(app.recall_eval_winner_chip_vars[1]["winner_only"].get(), "+ recent")
+        self.assertEqual(app.recall_eval_winner_chip_vars[1]["shared"].get(), "= accepted signal")
+
+    def test_copy_selected_recall_eval_miss_syncs_request_and_manual_form(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.copy_selected_recall_eval_miss()
+
+        self.assertEqual(app._recall_selected_request_index, 1)
+        self.assertEqual(app.recall_task_kind.get(), "review")
+        self.assertEqual(app.recall_query.get(), "Review the memory index patch.")
+        self.assertEqual(app.recall_request_basis.get(), "pass_definition")
+        self.assertEqual(app.recall_file_hint.get(), "scripts/memory_index.py")
+        self.assertEqual(app.recall_limit.get(), 8)
+        self.assertEqual(app.recall_context_budget_chars.get(), 5000)
+        self.assertIn("manual recall", app.status_var.get())
+
+    def test_apply_selected_recall_eval_miss_tweak_updates_manual_controls(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.apply_selected_recall_eval_miss_tweak()
+
+        self.assertEqual(app.recall_task_kind.get(), "review")
+        self.assertEqual(app.recall_query.get(), "Review the memory index patch.")
+        self.assertEqual(app.recall_request_basis.get(), "pass_definition")
+        self.assertEqual(app.recall_file_hint.get(), "scripts/memory_index.py")
+        self.assertEqual(app.recall_limit.get(), 8)
+        self.assertEqual(app.recall_context_budget_chars.get(), 7500)
+        self.assertIn("suggested tweak", app.status_var.get())
+
+    def test_open_selected_recall_eval_miss_winner_routes_to_forensics(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.open_selected_recall_eval_miss_winner()
+
+        self.assertEqual(app.forensics_surface.get(), "chat")
+        self.assertEqual(app._forensics_selected_session_id, "chat-main")
+        self.assertEqual(app._forensics_selected_entry_id, "top-1")
+        self.assertTrue(app.forensics_artifact_path.get().endswith("/artifacts/text/other.json"))
+        self.assertEqual(app.refresh_forensics_calls, 1)
+        self.assertEqual(app.notebook.selected_tabs, ["forensics-tab"])
+        self.assertIn("winner #1", app.status_var.get().lower())
+
+    def test_open_second_recall_eval_winner_routes_to_forensics(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.open_recall_eval_winner_at(1)
+
+        self.assertEqual(app.forensics_surface.get(), "chat")
+        self.assertEqual(app._forensics_selected_session_id, "chat-main")
+        self.assertEqual(app._forensics_selected_entry_id, "top-2")
+        self.assertTrue(app.forensics_artifact_path.get().endswith("/artifacts/text/other-two.json"))
+        self.assertEqual(app.refresh_forensics_calls, 1)
+        self.assertIn("winner #2", app.status_var.get().lower())
+
+    def test_open_selected_recall_eval_source_routes_to_forensics(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.open_selected_recall_eval_source()
+
+        self.assertEqual(app.forensics_surface.get(), "chat")
+        self.assertEqual(app._forensics_selected_session_id, "chat-main")
+        self.assertEqual(app._forensics_selected_entry_id, "entry-1")
+        self.assertEqual(app.forensics_artifact_path.get(), "")
+        self.assertEqual(app.refresh_forensics_calls, 1)
+        self.assertEqual(app.notebook.selected_tabs, ["forensics-tab"])
+        self.assertIn("source candidate", app.status_var.get().lower())
+
+    def test_copy_selected_recall_eval_source_to_manual_updates_manual_form(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.copy_selected_recall_eval_source_to_manual()
+
+        self.assertEqual(app._recall_selected_request_index, 1)
+        self.assertEqual(app.recall_task_kind.get(), "review")
+        self.assertEqual(app.recall_query.get(), "Review the memory index patch.")
+        self.assertEqual(app.recall_request_basis.get(), "pass_definition")
+        self.assertEqual(app.recall_file_hint.get(), "scripts/memory_index.py")
+        self.assertEqual(app.recall_limit.get(), 8)
+        self.assertEqual(app.recall_context_budget_chars.get(), 5000)
+        self.assertIn("source candidate", app.recall_selection_state.get().lower())
+        self.assertIn("source candidate", app.status_var.get().lower())
+        self.assertIn("run manual recall now", app.hint_var.get().lower())
+
+    def test_rerun_selected_recall_eval_source_applies_suggestion_and_runs_manual_recall(self) -> None:
+        app, controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        app.rerun_selected_recall_eval_source()
+
+        self.assertEqual(len(controller.bundle_calls), 1)
+        self.assertEqual(controller.bundle_calls[0]["task_kind"], "review")
+        self.assertEqual(controller.bundle_calls[0]["query_text"], "Review the memory index patch.")
+        self.assertEqual(controller.bundle_calls[0]["request_basis"], "pass_definition")
+        self.assertEqual(controller.bundle_calls[0]["file_hint"], "scripts/memory_index.py")
+        self.assertEqual(controller.bundle_calls[0]["limit"], 8)
+        self.assertEqual(controller.bundle_calls[0]["context_budget_chars"], 7500)
+        self.assertEqual(app.recall_context_budget_chars.get(), 7500)
+        self.assertIn("Suggested rerun for evaluation miss 1", app.recall_selection_state.get())
+        self.assertEqual(app.status_var.get(), "Suggested rerun for evaluation miss 1 is ready.")
+        self.assertEqual(
+            app.hint_var.get(),
+            "Before: source was rank 6 and dropped by context budget. After rerun: source made the bundle at rank 1.",
+        )
+        self.assertEqual(
+            app.recall_eval_source_action_hint_var.get(),
+            "Before: source was rank 6 and dropped by context budget. After rerun: source made the bundle at rank 1.",
+        )
+        self.assertIn("Recall bundle:", app.artifact_var.get())
+
+    def test_source_action_hint_explains_missing_source_navigation(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_recall_evaluation()
+
+        miss_row = dict(app._recall_eval_miss_rows["1"])
+        request_row = dict(app._recall_request_rows["1"])
+        miss_row.pop("source_event_id", None)
+        miss_row.pop("source_entry_id", None)
+        miss_row.pop("source_session_id", None)
+        miss_row.pop("source_artifact_path", None)
+        request_row.pop("source_event_id", None)
+        request_row.pop("source_entry_id", None)
+        request_row.pop("source_session_id", None)
+        request_row.pop("source_artifact_path", None)
+        app._recall_request_rows["1"] = request_row
+
+        app._apply_recall_eval_winner_compare(miss_row)
+
+        self.assertIsNone(app._recall_eval_source_row)
+        self.assertIn("Open needs a fresh source snapshot.", app.recall_eval_source_action_hint_var.get())
+        self.assertIn("Rerun suggested tweak: budget 5000 -> 7500.", app.recall_eval_source_action_hint_var.get())
+
+    def test_run_selected_and_manual_recall_update_output(self) -> None:
+        app, controller = self._build_app()
+        app.refresh_recall_requests()
+
+        app.run_selected_recall_request()
+        self.assertEqual(controller.bundle_calls[0]["request_index"], 1)
+        self.assertIn("Task: review", app.recall_output.content)
+        self.assertIn("Recall bundle:", app.artifact_var.get())
+        self.assertEqual(app._recall_selected_candidate_event_id, "local-default:chat-main:entry-1")
+        self.assertIn("selected candidates", app.recall_candidates_state.get())
+        self.assertIn("unpin", app.recall_compare_before_var.get().lower())
+        self.assertIn("differences appear here", app.recall_compare_change_var.get())
+
+        app.recall_task_kind.set("review")
+        app.recall_query.set("Tighten ranking weights for source_hit=false requests.")
+        app.recall_request_basis.set("pass_definition")
+        app.recall_file_hint.set("scripts/recall_context.py")
+        app.run_manual_recall()
+
+        self.assertEqual(controller.bundle_calls[1]["task_kind"], "review")
+        self.assertEqual(
+            controller.bundle_calls[1]["query_text"],
+            "Tighten ranking weights for source_hit=false requests.",
+        )
+        self.assertEqual(controller.bundle_calls[1]["request_basis"], "pass_definition")
+        self.assertEqual(controller.bundle_calls[1]["file_hint"], "scripts/recall_context.py")
+        self.assertEqual(controller.bundle_calls[1]["limit"], DEFAULT_LIMIT)
+        self.assertEqual(controller.bundle_calls[1]["context_budget_chars"], DEFAULT_CONTEXT_BUDGET_CHARS)
+
+    def test_pin_selected_recall_candidate_applies_to_next_runs_and_can_clear(self) -> None:
+        app, controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_selected_recall_request()
+
+        app.pin_selected_recall_candidate()
+        self.assertIn("Pinned for the next recall run (1)", app.recall_pins_state.get())
+        self.assertTrue(app._recall_candidate_rows["local-default:chat-main:entry-1"]["pinned"])
+        self.assertIn("pinned=yes", app.recall_candidate_selection_state.get())
+
+        app.run_manual_recall()
+        self.assertEqual(
+            controller.bundle_calls[1]["pinned_event_ids"],
+            ["local-default:chat-main:entry-1"],
+        )
+        self.assertIn("source rank=6", app.recall_compare_before_var.get())
+        self.assertIn("source rank=1", app.recall_compare_after_var.get())
+        self.assertIn("source rank: 6 -> 1", app.recall_compare_change_var.get())
+        self.assertIn("miss reason: dropped_by_context_budget -> selected", app.recall_compare_change_var.get())
+        self.assertIn("selected candidates:", app.recall_compare_change_var.get())
+        self.assertIn("budget:", app.recall_compare_change_var.get())
+        self.assertIn("source vs winners:", app.recall_compare_change_var.get())
+
+        app.clear_recall_pins()
+        self.assertIn("Pinned candidates: none", app.recall_pins_state.get())
+        self.assertFalse(app._recall_candidate_rows["local-default:chat-main:entry-1"]["pinned"])
+
+    def test_open_selected_recall_candidate_routes_to_forensics(self) -> None:
+        app, _controller = self._build_app()
+        app.refresh_recall_requests()
+        app.run_selected_recall_request()
+
+        app.open_selected_recall_candidate()
+
+        self.assertEqual(app.forensics_surface.get(), "chat")
+        self.assertEqual(app._forensics_selected_session_id, "chat-main")
+        self.assertEqual(app._forensics_selected_entry_id, "entry-1")
+        self.assertTrue(app.forensics_artifact_path.get().endswith("/artifacts/text/chat.json"))
+        self.assertEqual(app.refresh_forensics_calls, 1)
+        self.assertEqual(app.notebook.selected_tabs, ["forensics-tab"])
+        self.assertIn("Opened recall candidate", app.status_var.get())
+
+    def test_recall_summary_helpers_include_miss_and_pin_state(self) -> None:
+        request_summary = build_recall_request_summary(
+            {
+                "index": 2,
+                "task_kind": "proposal",
+                "query_text": "Opaque scratchpad seal uncompromised verdict retention.",
+                "file_hints": ["scripts/recall_context.py"],
+                "source_hit": False,
+                "source_status": "ok",
+                "request_basis": "pass_definition",
+                "request_variant": "adversarial-pass-definition",
+                "miss_reason": "dropped_by_context_budget",
+                "source_rank": 11,
+                "source_block_title": "Accepted outcomes",
+            }
+        )
+        self.assertIn("basis=pass_definition", request_summary)
+        self.assertIn("miss_reason=dropped_by_context_budget", request_summary)
+
+        pins_summary = build_recall_pins_summary(
+            [
+                {"event_id": "event-1", "prompt_excerpt": "Review the memory index patch."},
+                {"event_id": "event-2", "prompt_excerpt": "Pin the accepted candidate for the next run."},
+            ]
+        )
+        self.assertIn("Pinned for the next recall run (2)", pins_summary)
+
+        candidate_summary = build_recall_candidate_summary(
+            {
+                "event_id": "leader",
+                "block_title": "Accepted outcomes",
+                "session_surface": "evaluation",
+                "status": "ok",
+                "prompt_excerpt": "3 results share pass definition.",
+                "artifact_path": "/tmp/source.json",
+                "group_member_count": 3,
+                "group_member_labels": ["leader capability", "source capability", "third capability"],
+            },
+            root=Path("/tmp"),
+        )
+        self.assertIn("group=3", candidate_summary)
+        self.assertIn("group_members=3: leader capability; source capability; third capability", candidate_summary)
+
+    def test_recall_compare_fields_summarize_pin_diff(self) -> None:
+        fields = dict(
+            build_recall_compare_fields(
+                {
+                    "before_bundle": {
+                        "budget": {"used_chars": 420, "context_budget_chars": 1800},
+                        "selected_candidates": [
+                            {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                        ],
+                        "source_evaluation": {
+                            "source_event_id": "source-1",
+                            "source_selected": False,
+                            "source_rank": 6,
+                            "miss_reason": "dropped_by_context_budget",
+                            "source_prompt_excerpt": "Review the memory index patch.",
+                            "top_selected": [
+                                {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                            ],
+                        },
+                    },
+                    "after_bundle": {
+                        "budget": {"used_chars": 520, "context_budget_chars": 1800},
+                        "selected_candidates": [
+                            {"event_id": "source-1", "prompt_excerpt": "Review the memory index patch."},
+                            {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                        ],
+                        "source_evaluation": {
+                            "source_event_id": "source-1",
+                            "source_selected": True,
+                            "source_rank": 1,
+                            "source_prompt_excerpt": "Review the memory index patch.",
+                            "source_selected_via_group": True,
+                            "source_grouped_by": "pass_definition",
+                            "source_group_member_count": 2,
+                            "source_group_member_labels": ["Review the memory index patch.", "Code generation notes"],
+                            "top_selected": [
+                                {"event_id": "source-1", "prompt_excerpt": "Review the memory index patch."},
+                                {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                            ],
+                        },
+                    },
+                }
+            )
+        )
+
+        self.assertIn("source rank=6", fields["Before"])
+        self.assertIn("source rank=1", fields["After"])
+        self.assertIn("source rank: 6 -> 1", fields["Change"])
+        self.assertIn("miss reason: dropped_by_context_budget -> selected", fields["Change"])
+        self.assertIn("selected candidates:", fields["Change"])
+        self.assertIn("budget:", fields["Change"])
+        self.assertIn("source vs winners:", fields["Change"])
+        self.assertIn("joined pass_definition", fields["After"])
+
+    def test_recall_eval_helpers_summarize_delta_and_selected_miss(self) -> None:
+        fields = dict(
+            build_recall_eval_compare_fields(
+                {
+                    "before_summary": {
+                        "request_count": 2,
+                        "source_hits": 0,
+                        "source_misses": 2,
+                        "hit_rate": 0.0,
+                        "variants": {
+                            "baseline": {
+                                "request_count": 2,
+                                "source_hits": 0,
+                                "source_misses": 2,
+                                "hit_rate": 0.0,
+                            }
+                        },
+                        "miss_reason_counts": {"ranked_out_by_limit": 2},
+                    },
+                    "after_summary": {
+                        "request_count": 2,
+                        "source_hits": 1,
+                        "source_misses": 1,
+                        "hit_rate": 0.5,
+                        "variants": {
+                            "baseline": {
+                                "request_count": 2,
+                                "source_hits": 1,
+                                "source_misses": 1,
+                                "hit_rate": 0.5,
+                            }
+                        },
+                        "miss_reason_counts": {"dropped_by_context_budget": 1},
+                    },
+                }
+            )
+        )
+
+        self.assertIn("source hits=0", fields["Previous"])
+        self.assertIn("source hits=1", fields["Current"])
+        self.assertIn("source hits: 0 -> 1 (+1)", fields["Change"])
+        self.assertIn("miss reasons:", fields["Change"])
+
+        miss_summary = build_recall_eval_miss_summary(
+            {
+                "index": 3,
+                "task_kind": "review",
+                "query_text": "Review the memory index patch.",
+                "source_rank": 6,
+                "source_prompt_excerpt": "Review the memory index patch.",
+                "miss_reason": "dropped_by_context_budget",
+                "request_variant": "adversarial-pass-definition",
+            }
+        )
+        self.assertIn("request 3", miss_summary)
+        self.assertIn("variant=adversarial-pass-definition", miss_summary)
+        self.assertIn("source=Review the memory index patch.", miss_summary)
+
+        suggestion = build_recall_miss_suggested_manual_config(
+            {
+                "index": 3,
+                "task_kind": "review",
+                "query_text": "Review the memory index patch.",
+                "source_rank": 6,
+                "source_prompt_excerpt": "Review the memory index patch.",
+                "source_reasons": ["query-coverage", "accepted-signal"],
+                "miss_reason": "dropped_by_context_budget",
+                "top_selected": [
+                    {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                ],
+            },
+            request_row={
+                "task_kind": "review",
+                "query_text": "Review the memory index patch.",
+                "request_basis": "pass_definition",
+                "file_hints": ["scripts/memory_index.py"],
+                "limit": 8,
+                "context_budget_chars": 5000,
+            },
+        )
+        self.assertEqual(suggestion["context_budget_chars"], 7500)
+        self.assertTrue(suggestion["apply_ready"])
+        self.assertIn("Context budget squeeze", suggestion["diagnosis_text"])
+        self.assertIn("Raise context budget", suggestion["actions_text"])
+
+        guide_fields = dict(
+            build_recall_diagnostic_guide_fields(
+                {
+                    "index": 3,
+                    "task_kind": "review",
+                    "query_text": "Review the memory index patch.",
+                    "source_rank": 6,
+                    "source_reasons": ["query-coverage"],
+                    "miss_reason": "dropped_by_context_budget",
+                    "top_selected": [
+                        {"event_id": "winner-1", "prompt_excerpt": "Code generation notes outranked the source bundle."},
+                    ],
+                },
+                request_row={
+                    "task_kind": "review",
+                    "query_text": "Review the memory index patch.",
+                    "request_basis": "pass_definition",
+                    "file_hints": ["scripts/memory_index.py"],
+                    "limit": 8,
+                    "context_budget_chars": 5000,
+                },
+            )
+        )
+        self.assertIn("Context budget squeeze", guide_fields["Diagnosis"])
+        self.assertIn("Raise context budget", guide_fields["Next"])
+        self.assertIn("budget=7500", guide_fields["Suggested Manual"])
+
+        chip_texts = build_recall_eval_winner_chip_texts(
+            {"source_reasons": ["query-coverage", "accepted-signal"]},
+            {"reasons": ["fts-hit", "accepted-signal", "risk-signal"]},
+        )
+        self.assertEqual(chip_texts["winner_only"], "+ fts hit, risk signal")
+        self.assertEqual(chip_texts["shared"], "= accepted signal")
+        self.assertEqual(chip_texts["source_only"], "- query coverage")
+        self.assertEqual(chip_texts["pending"], "")
+
+        self.assertEqual(
+            build_recall_eval_winner_why_text(
+                {"source_reasons": ["query-coverage", "accepted-signal"]},
+                {"reasons": []},
+            ),
+            "Winner reasons pending in this snapshot.",
+        )
+        pending_chip_texts = build_recall_eval_winner_chip_texts(
+            {"source_reasons": ["query-coverage"]},
+            {"event_id": "winner-1"},
+        )
+        self.assertEqual(pending_chip_texts["pending"], "Reasons pending")
+        self.assertEqual(pending_chip_texts["winner_only"], "")
+
+        source_chip_texts = build_recall_eval_source_chip_texts(
+            {
+                "source_reasons": ["query-coverage", "accepted-signal"],
+                "top_selected": [
+                    {"reasons": ["fts-hit", "accepted-signal", "risk-signal"]},
+                    {"reasons": ["accepted-signal", "recent"]},
+                ],
+            }
+        )
+        self.assertEqual(source_chip_texts["winner_only"], "+ query coverage")
+        self.assertEqual(source_chip_texts["shared"], "= accepted signal")
+        self.assertEqual(source_chip_texts["source_only"], "- fts hit, risk signal")
+        self.assertEqual(source_chip_texts["pending"], "")
+        self.assertEqual(
+            build_recall_eval_source_why_text(
+                {
+                    "source_reasons": ["query-coverage", "accepted-signal"],
+                    "top_selected": [
+                        {"reasons": ["fts-hit", "accepted-signal", "risk-signal"]},
+                    ],
+                }
+            ),
+            "lost to winners on fts hit, risk signal",
+        )
+        self.assertIn(
+            "reason=dropped by context budget",
+            build_recall_eval_source_card_text(
+                {
+                    "query_text": "Review the memory index patch.",
+                    "source_prompt_excerpt": "Review the memory index patch.",
+                    "source_block_title": "Accepted outcomes",
+                    "source_rank": 6,
+                    "source_reasons": ["query-coverage", "accepted-signal"],
+                    "miss_reason": "dropped_by_context_budget",
+                    "top_selected": [
+                        {"reasons": ["fts-hit", "accepted-signal", "risk-signal"]},
+                    ],
+                }
+            ),
+        )
+        pending_source_chip_texts = build_recall_eval_source_chip_texts(
+            {"top_selected": [{"reasons": ["fts-hit"]}]}
+        )
+        self.assertEqual(pending_source_chip_texts["pending"], "Reasons pending")
+        self.assertEqual(pending_source_chip_texts["winner_only"], "")
 
 
 class ThinkingDebugTests(unittest.TestCase):
