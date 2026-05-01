@@ -180,19 +180,17 @@ def build_real_recall_dataset(
 
     requests: list[dict[str, Any]] = []
     request_events: dict[str, dict[str, Any]] = {}
-    seen: set[tuple[str, str]] = set()
+    seen_source_event_ids: set[str] = set()
     for event in events:
         request = _baseline_request(event)
         if request is None:
             continue
-        task_kind = str(request["task_kind"])
-        query_text = str(request["query_text"])
-        dedupe_key = (task_kind, query_text)
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        requests.append(request)
         source_event_id = _clean_text(request.get("source_event_id"))
+        if source_event_id and source_event_id in seen_source_event_ids:
+            continue
+        if source_event_id:
+            seen_source_event_ids.add(source_event_id)
+        requests.append(request)
         if source_event_id:
             request_events[source_event_id] = event
         if len(requests) >= max_requests:

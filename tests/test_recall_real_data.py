@@ -187,6 +187,49 @@ class RecallRealDataTests(unittest.TestCase):
             self.assertTrue(all("miss_reason" in item for item in dataset["requests"]))
             self.assertTrue(all("request_variant" in item for item in dataset["requests"]))
 
+    def test_build_real_recall_dataset_keeps_repeated_prompt_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = WorkspaceSessionStore(root=root)
+            for index in range(2):
+                messages = store.chat_messages_for_next_turn(
+                    model_id="backend-a",
+                    system_prompt="You are concise.",
+                )
+                store.record_chat_turn(
+                    model_id="backend-a",
+                    status="ok",
+                    artifact_path=root / "artifacts" / "text" / f"review-{index}.json",
+                    prompt="Review the repeated release checklist.",
+                    system_prompt="You are concise.",
+                    resolved_user_prompt="Review the repeated release checklist.",
+                    output_text=f"Repeated review outcome {index}.",
+                    base_messages=messages,
+                    notes=["review accepted"],
+                )
+
+            dataset = build_real_recall_dataset(
+                root=root,
+                output_dir=root / "artifacts" / "recall_data" / "local-default",
+                index_path=root / "tmp-memory-index.sqlite3",
+                event_log_path=root / "tmp-event-log.jsonl",
+                max_requests=4,
+                max_adversarial_requests=0,
+            )
+
+            baseline_requests = [
+                item for item in dataset["requests"] if item["request_variant"] == BASELINE_REQUEST_VARIANT
+            ]
+            repeated_requests = [
+                item
+                for item in baseline_requests
+                if item["query_text"] == "Review the repeated release checklist."
+            ]
+
+        self.assertEqual(len(repeated_requests), 2)
+        self.assertEqual(len({item["source_event_id"] for item in repeated_requests}), 2)
+        self.assertTrue(all(item["source_hit"] for item in repeated_requests))
+
     def test_build_real_recall_dataset_adds_adversarial_pass_definition_request_that_can_retrieve_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
