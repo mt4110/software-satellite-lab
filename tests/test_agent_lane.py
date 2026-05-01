@@ -68,7 +68,10 @@ class AgentLaneTests(unittest.TestCase):
         self.assertIn("Succeeded: 1", report)
         self.assertEqual(index_summary["agent_lane_event_count"], 1)
         self.assertEqual(event_log["events"][0]["event_kind"], "agent_task_run")
+        self.assertEqual(event_log["events"][0]["outcome"]["status"], "ok")
         self.assertEqual(event_log["events"][0]["outcome"]["quality_status"], "pass")
+        self.assertEqual(event_log["events"][0]["content"]["options"]["agent_run_status"], "succeeded")
+        self.assertGreaterEqual(len(matches), 1)
         self.assertEqual(matches[0]["event_kind"], "agent_task_run")
         self.assertEqual(evaluation_snapshot["counts"]["test_pass"], 1)
 
@@ -92,6 +95,7 @@ class AgentLaneTests(unittest.TestCase):
         self.assertEqual(recorded_run["status"], "failed")
         self.assertEqual(recorded_run["outcome"]["quality_status"], "fail")
         self.assertEqual(recorded_run["outcome"]["verification_failed_count"], 1)
+        self.assertEqual(event_log["events"][0]["outcome"]["status"], "failed")
         self.assertEqual(event_log["events"][0]["outcome"]["execution_status"], "failed")
         self.assertEqual(evaluation_snapshot["counts"]["test_fail"], 1)
         self.assertEqual(evaluation_snapshot["counts"]["pending_failures"], 1)
@@ -220,9 +224,9 @@ class AgentLaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             colon_path = agent_run_artifact_path(root=root, run_id="local-default:agent-run:a:b")
-            slash_path = agent_run_artifact_path(root=root, run_id="local-default:agent-run:a/b")
+            dash_path = agent_run_artifact_path(root=root, run_id="local-default:agent-run:a-b")
 
-        self.assertNotEqual(colon_path.name, slash_path.name)
+        self.assertNotEqual(colon_path.name, dash_path.name)
 
     def test_zero_byte_logs_are_recovered_on_append(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

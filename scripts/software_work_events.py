@@ -347,6 +347,12 @@ def build_event_record(
     }
 
 
+def _agent_run_event_status(run_status: str | None) -> str | None:
+    if run_status == "succeeded":
+        return "ok"
+    return run_status
+
+
 def build_event_from_agent_run(
     *,
     root: Path | None,
@@ -370,6 +376,8 @@ def build_event_from_agent_run(
     run_artifact_path_text = _clean_text(paths.get("run_artifact_path"))
     run_artifact_path = Path(run_artifact_path_text).expanduser() if run_artifact_path_text else None
     recorded_at = _clean_text(run.get("completed_at_utc")) or _clean_text(run.get("started_at_utc")) or timestamp_utc()
+    run_status = _clean_text(run.get("status"))
+    event_status = _agent_run_event_status(run_status)
 
     workspace_manifest = workspace_manifest_path(workspace_id=workspace_id, root=resolved_root)
     workspace_record = {
@@ -394,6 +402,7 @@ def build_event_from_agent_run(
         "quality_status": _clean_text(outcome.get("quality_status")),
         "execution_status": _clean_text(outcome.get("execution_status")),
         "quality_checks": quality_checks,
+        "agent_run_status": run_status,
         "agent_task_id": task_id,
         "agent_run_id": run_id,
         "tool_trace_count": len(run.get("tool_traces") or []),
@@ -411,7 +420,7 @@ def build_event_from_agent_run(
             "entry_id": run_id,
             "artifact_kind": "agent_run",
             "action": "agent_lane",
-            "status": _clean_text(run.get("status")),
+            "status": run_status,
             "recorded_at_utc": recorded_at,
             "artifact_path": str(run_artifact_path) if run_artifact_path is not None else None,
             "artifact_workspace_relative_path": (
@@ -431,7 +440,7 @@ def build_event_from_agent_run(
             "agent_lane",
             "m5",
             task_kind,
-            _clean_text(run.get("status")),
+            run_status,
             _clean_text(outcome.get("quality_status")),
             _clean_text(outcome.get("execution_status")),
         )
@@ -444,7 +453,7 @@ def build_event_from_agent_run(
         workspace=workspace_record,
         session=session_record,
         outcome={
-            "status": _clean_text(run.get("status")),
+            "status": event_status,
             "quality_status": _clean_text(outcome.get("quality_status")),
             "execution_status": _clean_text(outcome.get("execution_status")),
         },
