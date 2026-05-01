@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -353,6 +354,15 @@ def _agent_run_event_status(run_status: str | None) -> str | None:
     return run_status
 
 
+def _agent_run_event_id(*, workspace_id: str, run_id: str) -> str:
+    run_id_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
+    safe_run_id = "".join(
+        char if char.isalnum() or char in ("-", "_") else "-"
+        for char in run_id
+    ).strip("-") or "agent-run"
+    return f"{workspace_id}:agent-lane-run:{safe_run_id[:64]}:{run_id_digest}"
+
+
 def build_event_from_agent_run(
     *,
     root: Path | None,
@@ -407,14 +417,10 @@ def build_event_from_agent_run(
         "agent_run_id": run_id,
         "tool_trace_count": len(run.get("tool_traces") or []),
     }
-    notes = [
-        item
-        for item in (
-            result_summary,
-            failure_summary,
-        )
-        if item
-    ]
+    if event_status == "failed":
+        notes = [item for item in (failure_summary, result_summary) if item]
+    else:
+        notes = [item for item in (result_summary, failure_summary) if item]
     source_refs = {
         "artifact_ref": {
             "entry_id": run_id,
@@ -447,7 +453,7 @@ def build_event_from_agent_run(
         if isinstance(tag, str) and tag
     ]
     return build_event_record(
-        event_id=run_id,
+        event_id=_agent_run_event_id(workspace_id=workspace_id, run_id=run_id),
         event_kind="agent_task_run",
         recorded_at_utc=recorded_at,
         workspace=workspace_record,

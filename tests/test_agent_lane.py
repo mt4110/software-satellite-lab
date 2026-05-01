@@ -68,6 +68,9 @@ class AgentLaneTests(unittest.TestCase):
         self.assertIn("Succeeded: 1", report)
         self.assertEqual(index_summary["agent_lane_event_count"], 1)
         self.assertEqual(event_log["events"][0]["event_kind"], "agent_task_run")
+        self.assertNotEqual(event_log["events"][0]["event_id"], recorded_run["run_id"])
+        self.assertTrue(event_log["events"][0]["event_id"].startswith("local-default:agent-lane-run:"))
+        self.assertEqual(event_log["events"][0]["source_refs"]["artifact_ref"]["entry_id"], recorded_run["run_id"])
         self.assertEqual(event_log["events"][0]["outcome"]["status"], "ok")
         self.assertEqual(event_log["events"][0]["outcome"]["quality_status"], "pass")
         self.assertEqual(event_log["events"][0]["content"]["options"]["agent_run_status"], "succeeded")
@@ -86,19 +89,31 @@ class AgentLaneTests(unittest.TestCase):
                 pass_definition="The command must exit with status 0.",
             )
             recorded_task = record_agent_task(task, root=root)
-            run = run_agent_task(recorded_task, root=root, timeout_seconds=10)
+            run = run_agent_task(
+                recorded_task,
+                root=root,
+                result_summary="Generic failed run summary.",
+                timeout_seconds=10,
+            )
             recorded_run, _run_path = record_agent_run(run, root=root)
             index_summary = rebuild_memory_index(root=root)
             event_log = read_event_log(Path(index_summary["event_log_path"]))
             evaluation_snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            event_notes = event_log["events"][0]["content"]["notes"]
 
         self.assertEqual(recorded_run["status"], "failed")
         self.assertEqual(recorded_run["outcome"]["quality_status"], "fail")
         self.assertEqual(recorded_run["outcome"]["verification_failed_count"], 1)
         self.assertEqual(event_log["events"][0]["outcome"]["status"], "failed")
         self.assertEqual(event_log["events"][0]["outcome"]["execution_status"], "failed")
+        self.assertEqual(event_notes[0], recorded_run["outcome"]["failure_summary"])
+        self.assertIn("Generic failed run summary.", event_notes[1:])
         self.assertEqual(evaluation_snapshot["counts"]["test_fail"], 1)
         self.assertEqual(evaluation_snapshot["counts"]["pending_failures"], 1)
+        self.assertEqual(
+            evaluation_snapshot["pending_failures"][0]["failure_summary"],
+            recorded_run["outcome"]["failure_summary"],
+        )
 
     def test_malformed_task_command_is_rejected_before_recording(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
