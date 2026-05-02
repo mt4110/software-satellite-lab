@@ -85,7 +85,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `scripts/rebuild_memory_index.py`
   - rebuild command for the event log and memory index
 - `scripts/evaluation_loop.py`
-  - foundation for evaluation signals, comparisons, curation filters, learning dataset previews, and evaluation snapshots
+  - foundation for evaluation signals, comparisons, curation filters, typed learning review queues, learning dataset previews, and evaluation snapshots
 - `scripts/run_evaluation_loop.py`
   - CLI for writing evaluation snapshots and preview-only artifacts
 - `scripts/agent_lane.py`

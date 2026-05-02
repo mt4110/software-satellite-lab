@@ -84,7 +84,7 @@
 - `scripts/rebuild_memory_index.py`
   - event log と memory index の再構築コマンド
 - `scripts/evaluation_loop.py`
-  - evaluation signal、comparison、curation filter、learning dataset preview、evaluation snapshot の土台
+  - evaluation signal、comparison、curation filter、typed learning review queue、learning dataset preview、evaluation snapshot の土台
 - `scripts/run_evaluation_loop.py`
   - CLI から evaluation snapshot と preview-only artifact を作成するコマンド
 - `scripts/agent_lane.py`

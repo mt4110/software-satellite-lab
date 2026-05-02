@@ -428,6 +428,13 @@ Validation:
 - generated datasets are traceable to accepted or high-value evidence
 - rejected or noisy examples are filtered out by default
 
+Current baseline:
+
+- learning dataset preview remains `preview_only`, human-gated, and downstream of evaluation/curation evidence
+- `review_queue` records every source curation candidate as a typed inspection item with queue state, priority, next action, blocked reason, and lifecycle summary
+- supervised candidates are still limited to test-passing work with accepted, review-resolved, or comparison-winner evidence
+- rejected, unresolved, noisy, failed, missing-source, and missing-text candidates stay out of supervised examples while preserving exclusion reasons for review
+
 ### M8. Human-Gated Model Evolution
 
 Goal:

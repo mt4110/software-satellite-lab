@@ -384,6 +384,11 @@ class EvaluationLoopTests(unittest.TestCase):
                 item["role"]
                 for item in candidate["evidence"]["comparisons"]
             }
+            first_queue_item = learning_preview["review_queue"][0]
+            excluded_by_event = {
+                item["event_id"]: item
+                for item in learning_preview["excluded_candidates"]
+            }
 
         self.assertTrue(learning_latest_exists)
         self.assertTrue(learning_run_exists)
@@ -394,11 +399,21 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(learning_preview["counts"]["eligible_candidate_count"], 1)
         self.assertEqual(learning_preview["counts"]["previewed_candidate_count"], 1)
         self.assertEqual(learning_preview["counts"]["excluded_candidate_count"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_count"], 2)
+        self.assertEqual(learning_preview["counts"]["review_queue_states"]["ready"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_states"]["blocked"], 1)
         self.assertEqual(direct_preview["counts"]["eligible_candidate_count"], 1)
         self.assertFalse(read_json_called)
         self.assertEqual(candidate["event_id"], pass_event_id)
         self.assertEqual(candidate["source_event"]["source_event_id"], pass_event_id)
         self.assertEqual(candidate["supervised_example"]["format"], "instruction_response")
+        self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
+        self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
+        self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_unconfirmed")
+        self.assertTrue(candidate["review_queue"]["eligible_for_supervised_candidate"])
+        self.assertEqual(candidate["review_queue"]["excluded_by"], [])
+        self.assertFalse(candidate["policy"]["raw_log_export_allowed"])
+        self.assertFalse(candidate["policy"]["training_job_allowed"])
         self.assertIn("acceptance", signal_kinds)
         self.assertIn("test_pass", signal_kinds)
         self.assertIn("winner", comparison_roles)
@@ -406,9 +421,18 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("event_log_path", candidate["source_paths"])
         self.assertIn("signal_log_path", candidate["source_paths"])
         self.assertIn("comparison_log_path", candidate["source_paths"])
+        self.assertEqual(first_queue_item["event_id"], fail_event_id)
+        self.assertEqual(first_queue_item["queue_priority"]["bucket"], "blocked_first")
+        self.assertNotIn("output_excerpt", first_queue_item["source_event"])
+        self.assertEqual(excluded_by_event[fail_event_id]["queue_state"], "blocked")
+        self.assertFalse(excluded_by_event[fail_event_id]["eligible_for_supervised_candidate"])
+        self.assertEqual(excluded_by_event[fail_event_id]["blocked_reason"], "test_fail")
+        self.assertEqual(excluded_by_event[fail_event_id]["next_action"], "repair_or_follow_up_failure")
         self.assertIn("Learning dataset preview: preview_only", report)
         self.assertIn("- accepted patch keeps the loop green", report)
         self.assertNotIn("- accepted patch\nkeeps the loop green", report)
+        self.assertIn("Learning review queue:", report)
+        self.assertIn("next=confirm_export_policy", report)
         self.assertIn("blocking_or_noisy_signal", learning_preview["counts"]["exclusion_reasons"])
 
     def test_learning_preview_excludes_test_pass_without_selection_signal(self) -> None:
@@ -441,6 +465,546 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn(
             "blocking_or_noisy_signal",
             excluded_by_event["local-default:capability-matrix:matrix:row-2:vision"],
+        )
+
+    def test_learning_review_queue_marks_missing_source_and_missing_text(self) -> None:
+        event_without_response = {
+            "event_id": "event-without-response",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {
+                "surface": "agent_lane",
+                "mode": "patch_plan_verify",
+                "title": "Missing response check",
+            },
+            "outcome": {
+                "status": "ok",
+                "quality_status": "pass",
+                "execution_status": "ok",
+            },
+            "content": {
+                "prompt": "Keep the queue typed.",
+                "output_text": "",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_queue",
+                    "pass_definition": "Queue stays typed.",
+                },
+            },
+            "source_refs": {
+                "artifact_ref": {
+                    "artifact_kind": "agent_run",
+                    "artifact_path": "/tmp/agent-run.json",
+                },
+            },
+        }
+        source_candidates = [
+            {
+                "event_id": "missing-event",
+                "state": "ready",
+                "label": "Missing source",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+                "adoption_checklist": [],
+                "required_next_steps": ["confirm_export_policy"],
+            },
+            {
+                "event_id": "event-without-response",
+                "state": "ready",
+                "label": "Missing supervised text",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+                "adoption_checklist": [],
+                "required_next_steps": ["confirm_export_policy"],
+            },
+        ]
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {"candidates": source_candidates},
+            events_by_id={"event-without-response": event_without_response},
+            explicit_signals=[],
+            comparisons=[],
+        )
+        queue_by_event = {
+            item["event_id"]: item
+            for item in preview["review_queue"]
+        }
+
+        self.assertEqual(preview["counts"]["eligible_candidate_count"], 0)
+        self.assertEqual(queue_by_event["missing-event"]["queue_state"], "missing_source")
+        self.assertEqual(queue_by_event["missing-event"]["next_action"], "restore_source_event")
+        self.assertEqual(queue_by_event["missing-event"]["blocked_reason"], "missing_source_event")
+        self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["test_state"],
+            "missing_trace",
+        )
+        self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["review_state"],
+            "unknown",
+        )
+        self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["selection_state"],
+            "missing_trace",
+        )
+        self.assertEqual(
+            queue_by_event["event-without-response"]["queue_state"],
+            "missing_supervised_text",
+        )
+        self.assertEqual(
+            queue_by_event["event-without-response"]["next_action"],
+            "restore_instruction_or_response_excerpt",
+        )
+        self.assertEqual(
+            preview["counts"]["review_queue_states"],
+            {"missing_source": 1, "missing_supervised_text": 1},
+        )
+
+    def test_learning_review_queue_uses_stable_ids_without_event_id(self) -> None:
+        long_label = "Missing source candidate " + ("x" * 320)
+        source_candidates = [
+            {
+                "state": "ready",
+                "label": long_label,
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+            },
+            {
+                "state": "ready",
+                "label": "Another missing source candidate",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+            },
+        ]
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {"candidates": source_candidates},
+            events_by_id={},
+            explicit_signals=[],
+            comparisons=[],
+        )
+        queue_ids = {
+            item["queue_item_id"]
+            for item in preview["review_queue"]
+        }
+
+        self.assertEqual(preview["counts"]["review_queue_count"], 2)
+        self.assertEqual(len(queue_ids), 2)
+        self.assertTrue(all(item["event_id"] is None for item in preview["review_queue"]))
+        self.assertEqual({item["source_index"] for item in preview["review_queue"]}, {0, 1})
+        self.assertIn("[preview truncated]", preview["review_queue"][0]["label"])
+        self.assertLess(len(preview["review_queue"][0]["label"]), len(long_label))
+
+    def test_learning_review_queue_ids_stay_unique_for_duplicate_missing_event_rows(self) -> None:
+        duplicate_candidate = {
+            "state": "ready",
+            "label": "Duplicate malformed candidate",
+            "reasons": ["accepted", "test_pass"],
+            "blocked_by": [],
+            "export_decision": "include_when_approved",
+            "ready_for_policy": True,
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {"candidates": [duplicate_candidate, dict(duplicate_candidate)]},
+            events_by_id={},
+            explicit_signals=[],
+            comparisons=[],
+        )
+        queue_ids = [item["queue_item_id"] for item in preview["review_queue"]]
+
+        self.assertEqual(len(queue_ids), 2)
+        self.assertEqual(len(set(queue_ids)), 2)
+        self.assertEqual([item["source_index"] for item in preview["review_queue"]], [0, 1])
+
+    def test_learning_review_queue_label_falls_back_without_label_or_event(self) -> None:
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "state": "ready",
+                        "reasons": ["accepted", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={},
+            explicit_signals=[],
+            comparisons=[],
+        )
+        queue_item = preview["review_queue"][0]
+
+        self.assertIsInstance(queue_item["label"], str)
+        self.assertEqual(queue_item["label"], queue_item["queue_item_id"])
+
+    def test_learning_preview_blocks_failed_reason_without_supervised_candidate(self) -> None:
+        event = {
+            "event_id": "failed-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Repair the failed candidate.",
+                "output_text": "The candidate still has a failed lifecycle reason.",
+                "options": {},
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "failed-candidate",
+                        "state": "ready",
+                        "label": "Failed lifecycle candidate",
+                        "reasons": ["accepted", "test_pass", "failed"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"failed-candidate": event},
+            explicit_signals=[],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "failed")
+        self.assertEqual(preview["excluded_candidates"][0]["next_action"], "repair_or_follow_up_failure")
+        self.assertEqual(preview["review_queue"][0]["lifecycle_summary"]["test_state"], "failed")
+
+    def test_curation_preview_treats_failed_reason_as_blocking(self) -> None:
+        preview = build_curation_export_preview(
+            {
+                "workspace_id": "local-default",
+                "paths": {},
+                "curation": {
+                    "candidate_count": 1,
+                    "candidates": [
+                        {
+                            "event_id": "failed-candidate",
+                            "state": "ready",
+                            "label": "Failed lifecycle candidate",
+                            "reasons": ["accepted", "test_pass", "failed"],
+                        }
+                    ],
+                },
+            }
+        )
+        candidate = preview["candidates"][0]
+
+        self.assertEqual(candidate["blocked_by"], ["failed"])
+        self.assertEqual(candidate["export_decision"], "exclude_until_repaired")
+        self.assertFalse(candidate["ready_for_policy"])
+        self.assertIn("repair_or_follow_up_failure", candidate["required_next_steps"])
+        self.assertEqual(
+            preview["adoption_checklist_counts"]["no_blocking_signal"]["blocked"],
+            1,
+        )
+
+    def test_learning_lifecycle_marks_curation_rejection_as_rejected(self) -> None:
+        event = {
+            "event_id": "rejected-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "This candidate was rejected during review.",
+                "output_text": "The preview should keep the rejection visible.",
+                "options": {},
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "rejected-candidate",
+                        "state": "ready",
+                        "label": "Rejected candidate",
+                        "reasons": ["rejected", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"rejected-candidate": event},
+            explicit_signals=[],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "rejected")
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
+            "rejected",
+        )
+
+    def test_learning_preview_requires_traceable_test_and_selection_evidence(self) -> None:
+        event = {
+            "event_id": "stale-ready-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "unknown", "execution_status": "ok"},
+            "content": {
+                "prompt": "This stale preview says ready.",
+                "output_text": "But no traceable test or selection evidence exists.",
+                "options": {},
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "stale-ready-candidate",
+                        "state": "ready",
+                        "label": "Stale ready candidate",
+                        "reasons": ["accepted", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"stale-ready-candidate": event},
+            explicit_signals=[],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["review_queue"][0]["queue_state"], "needs_review")
+        self.assertEqual(preview["review_queue"][0]["next_action"], "record_test_pass")
+        self.assertIn("missing_test_pass_trace", preview["excluded_candidates"][0]["excluded_by"])
+        self.assertIn("missing_selection_trace", preview["excluded_candidates"][0]["excluded_by"])
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["test_state"],
+            "missing_trace",
+        )
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
+            "missing_trace",
+        )
+
+    def test_learning_preview_blocks_stale_ready_candidate_with_negative_trace(self) -> None:
+        event = {
+            "event_id": "stale-negative-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "This stale preview still says ready.",
+                "output_text": "A later review reopened the concern.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_stale",
+                    "pass_definition": "Derived test pass remains traceable.",
+                },
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        resolved_signal = build_evaluation_signal(
+            signal_kind="review_resolved",
+            source_event_id="stale-negative-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:00:00+00:00",
+            signal_id="local-default:eval:resolved",
+        )
+        unresolved_signal = build_evaluation_signal(
+            signal_kind="review_unresolved",
+            source_event_id="stale-negative-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:unresolved",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "stale-negative-candidate",
+                        "state": "ready",
+                        "label": "Stale negative candidate",
+                        "reasons": ["review_resolved", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"stale-negative-candidate": event},
+            explicit_signals=[resolved_signal, unresolved_signal],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "review_unresolved")
+        self.assertEqual(preview["excluded_candidates"][0]["next_action"], "resolve_review_before_export")
+        self.assertIn("review_unresolved_trace", preview["excluded_candidates"][0]["excluded_by"])
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["review_state"],
+            "unresolved",
+        )
+
+    def test_learning_preview_uses_latest_test_trace_for_blocking(self) -> None:
+        event = {
+            "event_id": "repaired-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Repair the candidate after a failed test.",
+                "output_text": "The latest test pass should clear the old failure.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_repair",
+                    "pass_definition": "Latest validation passes.",
+                },
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        failed_signal = build_evaluation_signal(
+            signal_kind="test_fail",
+            source_event_id="repaired-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:00:00+00:00",
+            signal_id="local-default:eval:test-fail",
+        )
+        passed_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="repaired-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:02:00+00:00",
+            signal_id="local-default:eval:test-pass",
+        )
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="repaired-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:03:00+00:00",
+            signal_id="local-default:eval:accepted",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "repaired-candidate",
+                        "state": "ready",
+                        "label": "Repaired candidate",
+                        "reasons": ["accepted", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"repaired-candidate": event},
+            explicit_signals=[failed_signal, passed_signal, accepted_signal],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["counts"]["eligible_candidate_count"], 1)
+        self.assertEqual(preview["excluded_candidates"], [])
+        self.assertEqual(preview["review_queue"][0]["queue_state"], "ready")
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["test_state"],
+            "passed",
+        )
+
+    def test_learning_preview_blocks_latest_test_fail_trace(self) -> None:
+        event = {
+            "event_id": "regressed-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "This candidate regressed after an earlier pass.",
+                "output_text": "The latest test failure should block export.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_regression",
+                    "pass_definition": "Latest validation must pass.",
+                },
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        passed_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="regressed-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:00:00+00:00",
+            signal_id="local-default:eval:test-pass",
+        )
+        failed_signal = build_evaluation_signal(
+            signal_kind="test_fail",
+            source_event_id="regressed-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:02:00+00:00",
+            signal_id="local-default:eval:test-fail",
+        )
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="regressed-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:03:00+00:00",
+            signal_id="local-default:eval:accepted",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "regressed-candidate",
+                        "state": "ready",
+                        "label": "Regressed candidate",
+                        "reasons": ["accepted", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"regressed-candidate": event},
+            explicit_signals=[passed_signal, failed_signal, accepted_signal],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertIn("test_fail_trace", preview["excluded_candidates"][0]["excluded_by"])
+        self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "test_fail")
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["test_state"],
+            "failed",
         )
 
     def test_learning_preview_persists_supplied_in_memory_curation_preview(self) -> None:

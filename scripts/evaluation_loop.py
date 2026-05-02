@@ -33,6 +33,8 @@ LEARNING_DATASET_PREVIEW_SCHEMA_NAME = "software-satellite-learning-dataset-prev
 LEARNING_DATASET_PREVIEW_SCHEMA_VERSION = 1
 SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_NAME = "software-satellite-supervised-example-candidate"
 SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_VERSION = 1
+LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME = "software-satellite-learning-review-queue-item"
+LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = 1
 
 SIGNAL_KINDS = ("acceptance", "rejection", "test_pass", "test_fail", "review_resolved", "review_unresolved")
 POSITIVE_SIGNAL_KINDS = {"acceptance", "test_pass", "review_resolved"}
@@ -41,8 +43,10 @@ RELATION_KINDS = ("repairs", "follow_up_for")
 COMPARISON_OUTCOMES = ("winner_selected", "tie", "needs_follow_up")
 CURATION_STATES = ("ready", "needs_review", "blocked")
 CURATION_EXPORT_DECISIONS = ("include_when_approved", "hold_for_review", "exclude_until_repaired")
-LEARNING_BLOCKING_REASONS = {"rejected", "review_unresolved", "test_fail", "noisy", "unresolved"}
+CURATION_BLOCKING_REASONS = {"rejected", "review_unresolved", "test_fail", "failed"}
+LEARNING_BLOCKING_REASONS = CURATION_BLOCKING_REASONS | {"noisy", "unresolved"}
 LEARNING_SELECTION_REASONS = {"accepted", "review_resolved", "comparison_winner"}
+LEARNING_REVIEW_QUEUE_STATES = ("blocked", "missing_source", "missing_supervised_text", "ready", "needs_review")
 
 PASS_QUALITY_STATUSES = {"pass", "passed", "quality_pass"}
 FAIL_QUALITY_STATUSES = {"fail", "failed", "quality_fail"}
@@ -1103,6 +1107,9 @@ def record_review_resolution_signal(
 
 def _curation_export_decision(candidate: Mapping[str, Any]) -> str:
     state = _clean_text(candidate.get("state"))
+    reasons = set(_string_list(candidate.get("reasons")))
+    if reasons & CURATION_BLOCKING_REASONS:
+        return "exclude_until_repaired"
     if state == "ready":
         return "include_when_approved"
     if state == "blocked":
@@ -1115,7 +1122,7 @@ def _curation_candidate_adoption_checklist(candidate: Mapping[str, Any]) -> list
     blocked_by = {
         reason
         for reason in reasons
-        if reason in {"rejected", "review_unresolved", "test_fail"}
+        if reason in CURATION_BLOCKING_REASONS
     }
     human_selected = bool(reasons & {"accepted", "review_resolved", "comparison_winner"})
     items = [
@@ -1160,14 +1167,15 @@ def _curation_candidate_ready_for_policy(candidate: Mapping[str, Any]) -> bool:
 def _curation_required_next_steps(candidate: Mapping[str, Any]) -> list[str]:
     state = _clean_text(candidate.get("state"))
     reasons = set(_string_list(candidate.get("reasons")))
-    if state == "ready" or _curation_candidate_ready_for_policy(candidate):
+    blocked_by = reasons & CURATION_BLOCKING_REASONS
+    if not blocked_by and (state == "ready" or _curation_candidate_ready_for_policy(candidate)):
         return ["confirm_export_policy"]
     steps: list[str] = []
     if "needs_test_signal" in reasons:
         steps.append("record_test_pass")
     if "needs_human_selection" in reasons:
         steps.append("record_acceptance_or_review_resolution")
-    if "test_fail" in reasons:
+    if "test_fail" in reasons or "failed" in reasons:
         steps.append("repair_or_follow_up_failure")
     if "rejected" in reasons:
         steps.append("replace_or_rework_candidate")
@@ -1181,7 +1189,7 @@ def _curation_preview_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     blocked_by = [
         reason
         for reason in reasons
-        if reason in {"rejected", "review_unresolved", "test_fail"}
+        if reason in CURATION_BLOCKING_REASONS
     ]
     checklist = _curation_candidate_adoption_checklist(candidate)
     return {
@@ -1370,6 +1378,21 @@ def _stable_learning_candidate_id(*, workspace_id: str, event_id: str) -> str:
     return f"{workspace_id}:supervised-example-candidate:{digest}"
 
 
+def _stable_learning_review_queue_item_id(
+    *,
+    workspace_id: str,
+    event_id: str | None,
+    fallback_key: str | None = None,
+    source_index: int | None = None,
+) -> str:
+    if event_id is not None:
+        key = event_id
+    else:
+        key = f"{fallback_key or 'missing-event-id'}\nsource_index={source_index if source_index is not None else 'unknown'}"
+    digest = hashlib.sha256(f"{workspace_id}\n{key}".encode("utf-8")).hexdigest()[:12]
+    return f"{workspace_id}:learning-review-queue:{digest}"
+
+
 def _path_from_text(value: Any) -> Path | None:
     cleaned = _clean_text(value)
     if cleaned is None:
@@ -1464,6 +1487,13 @@ def _learning_source_event_record(event: Mapping[str, Any], *, event_id: str) ->
         "prompt_excerpt": _preview_excerpt(content.get("prompt"), limit=1200),
         "output_excerpt": _preview_excerpt(content.get("output_text"), limit=1200),
     }
+
+
+def _learning_review_queue_source_event_record(event: Mapping[str, Any], *, event_id: str) -> dict[str, Any]:
+    record = _learning_source_event_record(event, event_id=event_id)
+    record.pop("prompt_excerpt", None)
+    record.pop("output_excerpt", None)
+    return record
 
 
 def _learning_backend_metadata(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -1653,6 +1683,272 @@ def _learning_comparisons_for_event(
     return traces
 
 
+def _learning_candidate_blocked_reasons(
+    candidate: Mapping[str, Any],
+    *,
+    excluded_by: Iterable[str],
+) -> list[str]:
+    reasons = set(_string_list(candidate.get("reasons")))
+    blocked_by = set(_string_list(candidate.get("blocked_by")))
+    exclusions = set(_string_list(list(excluded_by)))
+    ordered_reasons: list[str] = []
+    for reason in (
+        "missing_source_event",
+        "missing_supervised_text",
+        "review_unresolved",
+        "test_fail",
+        "failed",
+        "rejected",
+        "noisy",
+        "unresolved",
+    ):
+        if reason in exclusions or reason in reasons or reason in blocked_by:
+            ordered_reasons.append(reason)
+    trace_blockers = {
+        "rejected_trace": "rejected",
+        "review_unresolved_trace": "review_unresolved",
+        "test_fail_trace": "test_fail",
+    }
+    for exclusion, reason in trace_blockers.items():
+        if exclusion in exclusions and reason not in ordered_reasons:
+            ordered_reasons.append(reason)
+    if not ordered_reasons and _clean_text(candidate.get("state")) == "blocked":
+        ordered_reasons.append("state_blocked")
+    if not ordered_reasons and "blocking_or_noisy_signal" in exclusions:
+        ordered_reasons.append("blocking_or_noisy_signal")
+    return ordered_reasons
+
+
+def _learning_queue_state(
+    candidate: Mapping[str, Any],
+    *,
+    excluded_by: Iterable[str],
+    blocked_reasons: Iterable[str],
+) -> str:
+    exclusions = set(_string_list(list(excluded_by)))
+    if "missing_source_event" in exclusions:
+        return "missing_source"
+    if "missing_supervised_text" in exclusions:
+        return "missing_supervised_text"
+    if _string_list(list(blocked_reasons)):
+        return "blocked"
+    if not exclusions:
+        return "ready"
+    return "needs_review"
+
+
+def _learning_queue_priority(queue_state: str) -> dict[str, Any]:
+    if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
+        return {
+            "rank": 1,
+            "bucket": "blocked_first",
+            "reason": "Resolve blocking or missing-source evidence before supervised review.",
+        }
+    if queue_state == "ready":
+        return {
+            "rank": 2,
+            "bucket": "ready_policy_unconfirmed",
+            "reason": "Confirm export policy before any downstream dataset work.",
+        }
+    return {
+        "rank": 3,
+        "bucket": "needs_review",
+        "reason": "Record missing test or human-selection evidence before supervised review.",
+    }
+
+
+def _learning_next_action(
+    candidate: Mapping[str, Any],
+    *,
+    excluded_by: Iterable[str],
+    blocked_reasons: Iterable[str],
+) -> str:
+    reasons = set(_string_list(candidate.get("reasons")))
+    exclusions = set(_string_list(list(excluded_by)))
+    blocked = set(_string_list(list(blocked_reasons)))
+    if "missing_source_event" in exclusions:
+        return "restore_source_event"
+    if "missing_supervised_text" in exclusions:
+        return "restore_instruction_or_response_excerpt"
+    if "review_unresolved" in blocked:
+        return "resolve_review_before_export"
+    if "test_fail" in blocked or "failed" in blocked:
+        return "repair_or_follow_up_failure"
+    if "rejected" in blocked:
+        return "replace_or_rework_candidate"
+    if blocked & {"noisy", "unresolved", "blocking_or_noisy_signal", "state_blocked"}:
+        return "review_blocking_evidence"
+    if not exclusions:
+        return "confirm_export_policy"
+    if "missing_test_pass" in exclusions or "missing_test_pass_trace" in exclusions:
+        return "record_test_pass"
+    if (
+        "missing_human_or_comparison_selection" in exclusions
+        or "missing_selection_trace" in exclusions
+        or not (reasons & LEARNING_SELECTION_REASONS)
+    ):
+        return "record_acceptance_or_review_resolution"
+    if "export_decision_not_include" in exclusions:
+        return "review_export_decision"
+    if "not_ready_for_policy" in exclusions:
+        return "complete_adoption_checklist"
+    required_next_steps = _string_list(candidate.get("required_next_steps"))
+    return required_next_steps[0] if required_next_steps else "review_candidate"
+
+
+def _learning_lifecycle_summary(
+    candidate: Mapping[str, Any],
+    *,
+    event: Mapping[str, Any] | None,
+    excluded_by: Iterable[str],
+) -> dict[str, Any]:
+    reasons = set(_string_list(candidate.get("reasons")))
+    exclusions = set(_string_list(list(excluded_by)))
+    outcome = _mapping_dict(event.get("outcome")) if event is not None else {}
+    if "missing_source_event" in exclusions:
+        test_state = "missing_trace"
+    elif "test_fail_trace" in exclusions:
+        test_state = "failed"
+    elif "missing_test_pass_trace" in exclusions:
+        test_state = "missing_trace"
+    elif "test_fail" in reasons or "failed" in reasons:
+        test_state = "failed"
+    elif "test_pass" in reasons:
+        test_state = "passed"
+    else:
+        test_state = "missing"
+    if "missing_source_event" in exclusions:
+        review_state = "unknown"
+    elif "review_unresolved_trace" in exclusions:
+        review_state = "unresolved"
+    elif "missing_selection_trace" in exclusions and "review_resolved" in reasons:
+        review_state = "missing_trace"
+    elif "review_unresolved" in reasons:
+        review_state = "unresolved"
+    elif "review_resolved" in reasons:
+        review_state = "resolved"
+    else:
+        review_state = "not_recorded"
+    if "missing_source_event" in exclusions:
+        selection_state = "missing_trace"
+    elif "rejected_trace" in exclusions:
+        selection_state = "rejected"
+    elif "rejected" in reasons:
+        selection_state = "rejected"
+    elif "missing_selection_trace" in exclusions:
+        selection_state = "missing_trace"
+    elif reasons & LEARNING_SELECTION_REASONS:
+        selection_state = "selected"
+    else:
+        selection_state = "missing"
+    if bool(candidate.get("ready_for_policy")):
+        policy_state = "pending_confirmation"
+    else:
+        policy_state = "not_ready"
+    if "missing_supervised_text" in exclusions:
+        supervised_text_state = "missing"
+    elif event is not None:
+        supervised_text_state = "available"
+    else:
+        supervised_text_state = "unknown"
+    return {
+        "curation_state": _clean_text(candidate.get("state")) or "needs_review",
+        "source_state": "available" if event is not None else "missing",
+        "test_state": test_state,
+        "review_state": review_state,
+        "selection_state": selection_state,
+        "policy_state": policy_state,
+        "supervised_text_state": supervised_text_state,
+        "quality_status": _clean_text(outcome.get("quality_status")),
+        "execution_status": _clean_text(outcome.get("execution_status")),
+    }
+
+
+def _learning_review_queue_item(
+    *,
+    workspace_id: str,
+    candidate: Mapping[str, Any],
+    event: Mapping[str, Any] | None,
+    excluded_by: Iterable[str],
+    source_index: int,
+) -> dict[str, Any]:
+    event_id = _clean_text(candidate.get("event_id"))
+    exclusions = _string_list(list(excluded_by))
+    blocked_reasons = _learning_candidate_blocked_reasons(candidate, excluded_by=exclusions)
+    queue_state = _learning_queue_state(
+        candidate,
+        excluded_by=exclusions,
+        blocked_reasons=blocked_reasons,
+    )
+    source_event = (
+        _learning_review_queue_source_event_record(event, event_id=event_id)
+        if event_id is not None and event is not None
+        else {"source_event_id": event_id}
+    )
+    fallback_key = (
+        None
+        if event_id is not None
+        else json.dumps(dict(candidate), ensure_ascii=False, sort_keys=True, default=str)
+    )
+    queue_item_id = _stable_learning_review_queue_item_id(
+        workspace_id=workspace_id,
+        event_id=event_id,
+        fallback_key=fallback_key,
+        source_index=source_index,
+    )
+    return {
+        "schema_name": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME,
+        "schema_version": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
+        "queue_item_id": queue_item_id,
+        "workspace_id": workspace_id,
+        "event_id": event_id,
+        "source_index": source_index,
+        "label": _preview_excerpt(
+            _clean_text(candidate.get("label")) or event_id or queue_item_id,
+            limit=240,
+        ) or queue_item_id,
+        "queue_state": queue_state,
+        "queue_priority": _learning_queue_priority(queue_state),
+        "next_action": _learning_next_action(
+            candidate,
+            excluded_by=exclusions,
+            blocked_reasons=blocked_reasons,
+        ),
+        "blocked_reason": blocked_reasons[0] if blocked_reasons else None,
+        "blocked_reasons": blocked_reasons,
+        "eligible_for_supervised_candidate": not exclusions,
+        "excluded_by": exclusions,
+        "lifecycle_summary": _learning_lifecycle_summary(
+            candidate,
+            event=event,
+            excluded_by=exclusions,
+        ),
+        "source_event": source_event,
+        "curation": {
+            "state": _clean_text(candidate.get("state")) or "needs_review",
+            "reasons": _string_list(candidate.get("reasons")),
+            "blocked_by": _string_list(candidate.get("blocked_by")),
+            "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
+            "ready_for_policy": bool(candidate.get("ready_for_policy")),
+            "required_next_steps": _string_list(candidate.get("required_next_steps")),
+        },
+    }
+
+
+def _learning_review_queue_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "queue_item_id": _clean_text(item.get("queue_item_id")),
+        "queue_state": _clean_text(item.get("queue_state")),
+        "queue_priority": copy.deepcopy(_mapping_dict(item.get("queue_priority"))),
+        "next_action": _clean_text(item.get("next_action")),
+        "blocked_reason": _clean_text(item.get("blocked_reason")),
+        "blocked_reasons": _string_list(item.get("blocked_reasons")),
+        "eligible_for_supervised_candidate": bool(item.get("eligible_for_supervised_candidate")),
+        "excluded_by": _string_list(item.get("excluded_by")),
+        "lifecycle_summary": copy.deepcopy(_mapping_dict(item.get("lifecycle_summary"))),
+    }
+
+
 def _learning_candidate_exclusions(candidate: Mapping[str, Any]) -> list[str]:
     state = _clean_text(candidate.get("state"))
     export_decision = _clean_text(candidate.get("export_decision"))
@@ -1674,7 +1970,101 @@ def _learning_candidate_exclusions(candidate: Mapping[str, Any]) -> list[str]:
     return exclusions
 
 
-def _learning_excluded_candidate(candidate: Mapping[str, Any], *, excluded_by: Iterable[str]) -> dict[str, Any]:
+def _learning_traceability_exclusions(
+    *,
+    signals: Iterable[Mapping[str, Any]],
+    comparisons: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    signal_list = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+    ]
+    latest_test_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"test_pass", "test_fail"},
+    )
+    latest_selection_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"acceptance", "rejection", "review_resolved", "review_unresolved"},
+    )
+    has_test_pass = latest_test_signal == "test_pass"
+    has_selection_signal = latest_selection_signal in {"acceptance", "review_resolved"}
+    has_comparison_winner = any(
+        _clean_text(comparison.get("role")) == "winner"
+        and _clean_text(comparison.get("outcome")) == "winner_selected"
+        for comparison in comparisons
+        if isinstance(comparison, Mapping)
+    )
+    exclusions: list[str] = []
+    if not has_test_pass:
+        exclusions.append("missing_test_pass_trace")
+    if not (has_selection_signal or has_comparison_winner):
+        exclusions.append("missing_selection_trace")
+    return exclusions
+
+
+def _learning_latest_signal_kind_from_traces(
+    signals: Iterable[Mapping[str, Any]],
+    *,
+    signal_kinds: set[str],
+) -> str | None:
+    matching_signals = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+        if _clean_text(signal.get("signal_kind")) in signal_kinds
+    ]
+    matching_signals.sort(
+        key=lambda signal: (
+            _timestamp_sort_key(signal.get("recorded_at_utc")),
+            str(signal.get("signal_id") or ""),
+        ),
+        reverse=True,
+    )
+    if not matching_signals:
+        return None
+    return _clean_text(matching_signals[0].get("signal_kind"))
+
+
+def _learning_latest_review_signal_kind_from_traces(signals: Iterable[Mapping[str, Any]]) -> str | None:
+    return _learning_latest_signal_kind_from_traces(
+        signals,
+        signal_kinds={"review_resolved", "review_unresolved"},
+    )
+
+
+def _learning_blocking_trace_exclusions(*, signals: Iterable[Mapping[str, Any]]) -> list[str]:
+    signal_list = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+    ]
+    latest_selection_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"acceptance", "rejection"},
+    )
+    latest_test_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"test_pass", "test_fail"},
+    )
+    exclusions: list[str] = []
+    if latest_selection_signal == "rejection":
+        exclusions.append("rejected_trace")
+    if _learning_latest_review_signal_kind_from_traces(signal_list) == "review_unresolved":
+        exclusions.append("review_unresolved_trace")
+    if latest_test_signal == "test_fail":
+        exclusions.append("test_fail_trace")
+    return exclusions
+
+
+def _learning_excluded_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    excluded_by: Iterable[str],
+    queue_item: Mapping[str, Any],
+) -> dict[str, Any]:
+    queue_summary = _learning_review_queue_summary(queue_item)
     return {
         "event_id": _clean_text(candidate.get("event_id")),
         "state": _clean_text(candidate.get("state")) or "needs_review",
@@ -1682,6 +2072,13 @@ def _learning_excluded_candidate(candidate: Mapping[str, Any], *, excluded_by: I
         "blocked_by": _string_list(candidate.get("blocked_by")),
         "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
         "excluded_by": _string_list(excluded_by),
+        "queue_state": queue_summary["queue_state"],
+        "queue_priority": queue_summary["queue_priority"],
+        "next_action": queue_summary["next_action"],
+        "blocked_reason": queue_summary["blocked_reason"],
+        "blocked_reasons": queue_summary["blocked_reasons"],
+        "eligible_for_supervised_candidate": queue_summary["eligible_for_supervised_candidate"],
+        "lifecycle_summary": queue_summary["lifecycle_summary"],
     }
 
 
@@ -1693,6 +2090,7 @@ def _build_supervised_example_candidate(
     signals: Iterable[Mapping[str, Any]],
     comparisons: Iterable[Mapping[str, Any]],
     source_paths: Mapping[str, Any],
+    queue_item: Mapping[str, Any],
 ) -> dict[str, Any]:
     event_id = _clean_text(candidate.get("event_id"))
     if event_id is None:
@@ -1720,6 +2118,7 @@ def _build_supervised_example_candidate(
             "comparisons": list(comparisons),
         },
         "backend_metadata": _learning_backend_metadata(event),
+        "review_queue": _learning_review_queue_summary(queue_item),
         "source_paths": {
             **copy.deepcopy(dict(source_paths)),
             "source_artifact_path": _clean_text(artifact_ref.get("artifact_path")),
@@ -1777,10 +2176,13 @@ def build_learning_dataset_preview(
     ]
     eligible_candidates: list[dict[str, Any]] = []
     excluded_candidates: list[dict[str, Any]] = []
-    for candidate in source_candidates:
+    review_queue: list[dict[str, Any]] = []
+    for source_index, candidate in enumerate(source_candidates):
         event_id = _clean_text(candidate.get("event_id"))
         exclusions = _learning_candidate_exclusions(candidate)
         event = resolved_events_by_id.get(event_id) if event_id is not None else None
+        signal_traces: list[dict[str, Any]] = []
+        comparison_traces: list[dict[str, Any]] = []
         if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
@@ -1789,21 +2191,43 @@ def build_learning_dataset_preview(
             missing_response = _clean_text(supervised_example.get("response")) is None
             if missing_instruction or missing_response:
                 exclusions.append("missing_supervised_text")
+            signal_traces = _learning_signals_for_event(
+                event_id=event_id,
+                event=event,
+                explicit_signals=resolved_signals,
+                workspace_id=resolved_workspace_id,
+            )
+            comparison_traces = _learning_comparisons_for_event(
+                event_id=event_id,
+                comparisons=resolved_comparisons,
+            )
+            exclusions.extend(_learning_blocking_trace_exclusions(signals=signal_traces))
+            if not exclusions:
+                exclusions.extend(
+                    _learning_traceability_exclusions(
+                        signals=signal_traces,
+                        comparisons=comparison_traces,
+                    )
+                )
 
+        queue_item = _learning_review_queue_item(
+            workspace_id=resolved_workspace_id,
+            candidate=candidate,
+            event=event,
+            excluded_by=exclusions,
+            source_index=source_index,
+        )
+        review_queue.append(queue_item)
         if exclusions:
-            excluded_candidates.append(_learning_excluded_candidate(candidate, excluded_by=exclusions))
+            excluded_candidates.append(
+                _learning_excluded_candidate(
+                    candidate,
+                    excluded_by=exclusions,
+                    queue_item=queue_item,
+                )
+            )
             continue
 
-        signal_traces = _learning_signals_for_event(
-            event_id=event_id,
-            event=event,
-            explicit_signals=resolved_signals,
-            workspace_id=resolved_workspace_id,
-        )
-        comparison_traces = _learning_comparisons_for_event(
-            event_id=event_id,
-            comparisons=resolved_comparisons,
-        )
         eligible_candidates.append(
             _build_supervised_example_candidate(
                 workspace_id=resolved_workspace_id,
@@ -1812,14 +2236,29 @@ def build_learning_dataset_preview(
                 signals=signal_traces,
                 comparisons=comparison_traces,
                 source_paths=source_paths,
+                queue_item=queue_item,
             )
         )
 
+    review_queue.sort(
+        key=lambda item: (
+            int(_mapping_dict(item.get("queue_priority")).get("rank") or 99),
+            str(item.get("event_id") or ""),
+        )
+    )
     preview_candidates = eligible_candidates[:limit] if isinstance(limit, int) else eligible_candidates
     exclusion_counts = Counter(
         reason
         for candidate in excluded_candidates
         for reason in _string_list(candidate.get("excluded_by"))
+    )
+    review_queue_state_counts = Counter(
+        str(item.get("queue_state") or "needs_review")
+        for item in review_queue
+    )
+    review_queue_priority_counts = Counter(
+        str(_mapping_dict(item.get("queue_priority")).get("bucket") or "unknown")
+        for item in review_queue
     )
     return {
         "schema_name": LEARNING_DATASET_PREVIEW_SCHEMA_NAME,
@@ -1837,12 +2276,22 @@ def build_learning_dataset_preview(
             "eligible_candidate_count": len(eligible_candidates),
             "previewed_candidate_count": len(preview_candidates),
             "excluded_candidate_count": len(excluded_candidates),
+            "review_queue_count": len(review_queue),
             "exclusion_reasons": {
                 key: int(value)
                 for key, value in sorted(exclusion_counts.items())
             },
+            "review_queue_states": {
+                key: int(value)
+                for key, value in sorted(review_queue_state_counts.items())
+            },
+            "review_queue_priorities": {
+                key: int(value)
+                for key, value in sorted(review_queue_priority_counts.items())
+            },
         },
         "truncated": len(eligible_candidates) > len(preview_candidates),
+        "review_queue": review_queue,
         "supervised_example_candidates": preview_candidates,
         "excluded_candidates": excluded_candidates,
         "export_policy": {
@@ -1957,6 +2406,16 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
     if exclusion_reasons:
         parts = [f"{key}={int(value)}" for key, value in exclusion_reasons.items()]
         lines.append(f"Exclusions: {'; '.join(parts)}")
+    queue_states = _mapping_dict(counts.get("review_queue_states"))
+    if queue_states:
+        ordered_states = [
+            state
+            for state in LEARNING_REVIEW_QUEUE_STATES
+            if state in queue_states
+        ]
+        ordered_states.extend(sorted(set(queue_states) - set(ordered_states)))
+        parts = [f"{state}={int(queue_states.get(state) or 0)}" for state in ordered_states]
+        lines.append(f"Review queue: {'; '.join(parts)}")
     candidates = [
         item
         for item in preview.get("supervised_example_candidates") or []
@@ -1981,6 +2440,28 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
             backend_label = _clean_text(backend.get("backend_id")) or _clean_text(backend.get("model_id")) or "n/a"
             signal_label = ",".join(item for item in signals if item) or "n/a"
             lines.append(f"- {label} (backend={backend_label}; signals={signal_label})")
+    queue_items = [
+        item
+        for item in preview.get("review_queue") or []
+        if isinstance(item, Mapping)
+    ]
+    if queue_items:
+        lines.extend(("", "Learning review queue:"))
+        for item in queue_items[:5]:
+            priority = _mapping_dict(item.get("queue_priority"))
+            rank = int(priority.get("rank") or 0)
+            label = _single_line_report_label(
+                _clean_text(item.get("label"))
+                or _clean_text(item.get("event_id"))
+                or "candidate"
+            )
+            state = _clean_text(item.get("queue_state")) or "needs_review"
+            next_action = _clean_text(item.get("next_action")) or "review_candidate"
+            blocked_reason = _clean_text(item.get("blocked_reason")) or "n/a"
+            lines.append(
+                f"- P{rank} {state} {label} "
+                f"(next={next_action}; blocked={blocked_reason})"
+            )
     return "\n".join(lines)
 
 
