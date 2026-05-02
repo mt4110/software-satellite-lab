@@ -27,7 +27,14 @@ from backend_swap import (  # noqa: E402
     read_backend_harness_runs,
     run_backend_swap_harness,
 )
-from evaluation_loop import record_evaluation_snapshot  # noqa: E402
+from evaluation_loop import (  # noqa: E402
+    append_evaluation_signal,
+    build_evaluation_signal,
+    evaluation_signal_log_path,
+    record_curation_export_preview,
+    record_evaluation_snapshot,
+    record_learning_dataset_preview,
+)
 from memory_index import MemoryIndex  # noqa: E402
 from run_backend_swap import main as backend_swap_main  # noqa: E402
 from software_work_events import read_event_log  # noqa: E402
@@ -81,6 +88,55 @@ class BackendSwapTests(unittest.TestCase):
             {"mock/fast-local-v1", "mock/careful-local-v1"},
         )
         self.assertGreaterEqual(len(matches), 2)
+
+    def test_learning_preview_traces_backend_swap_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            harness_run, _harness_path = run_backend_swap_harness(
+                root=root,
+                task_title="Backend metadata learning preview",
+                goal="Keep backend metadata traceable for a curated learning candidate.",
+                scope_paths=["scripts/backend_swap.py"],
+                plan_steps=[
+                    "Load backend config.",
+                    "Run shared verification.",
+                ],
+                verification_commands=[f"{sys.executable} -c \"print('metadata ok')\""],
+                pass_definition="Backend run completes verification.",
+                timeout_seconds=10,
+            )
+            selected_result = harness_run["backend_results"][0]
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=selected_result["event_id"],
+                rationale="The accepted backend run should remain traceable.",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                accepted_signal,
+                workspace_id="local-default",
+            )
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            candidate = learning_preview["supervised_example_candidates"][0]
+
+        self.assertEqual(candidate["event_id"], selected_result["event_id"])
+        self.assertEqual(candidate["backend_metadata"]["backend_id"], selected_result["backend_id"])
+        self.assertEqual(candidate["backend_metadata"]["model_id"], selected_result["model_id"])
+        self.assertEqual(candidate["backend_metadata"]["compatibility_status"], "compatible")
+        self.assertIn("latency_profile", candidate["backend_metadata"]["metadata"])
+        self.assertEqual(
+            candidate["backend_metadata"]["metadata_source_artifact_path"],
+            selected_result["run_artifact_path"],
+        )
 
     def test_compatibility_check_reports_missing_required_capability(self) -> None:
         config = build_backend_config(

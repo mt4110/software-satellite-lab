@@ -19,8 +19,10 @@ from evaluation_loop import (
     evaluation_signal_log_path,
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
+    format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_evaluation_snapshot,
+    record_learning_dataset_preview,
 )
 from gemma_runtime import repo_root
 from memory_index import rebuild_memory_index
@@ -69,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a preview-only curation export artifact next to the evaluation snapshot.",
     )
     parser.add_argument(
+        "--learning-preview",
+        action="store_true",
+        help="Write a preview-only supervised-example candidate artifact from curation evidence.",
+    )
+    parser.add_argument(
         "--curation-state",
         action="append",
         choices=CURATION_STATES,
@@ -93,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Maximum number of filtered curation preview candidates to include.",
+    )
+    parser.add_argument(
+        "--learning-limit",
+        type=int,
+        default=None,
+        help="Maximum number of eligible supervised-example candidates to include in the learning preview.",
     )
     parser.add_argument(
         "--signal-kind",
@@ -161,6 +174,9 @@ def main() -> int:
     curation_preview: dict[str, object] | None = None
     curation_preview_latest_path: Path | None = None
     curation_preview_run_path: Path | None = None
+    learning_preview: dict[str, object] | None = None
+    learning_preview_latest_path: Path | None = None
+    learning_preview_run_path: Path | None = None
     events_by_id: dict[str, dict[str, object]] | None = None
     index_summary: dict[str, object] | None = None
 
@@ -250,6 +266,27 @@ def main() -> int:
                 "limit": args.curation_limit,
             },
         )
+    if args.learning_preview:
+        try:
+            (
+                learning_preview,
+                learning_preview_latest_path,
+                learning_preview_run_path,
+            ) = record_learning_dataset_preview(
+                root=root,
+                workspace_id=args.workspace_id,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+                curation_filters={
+                    "states": args.curation_state,
+                    "export_decisions": args.curation_decision,
+                    "reasons": args.curation_reason,
+                    "limit": args.curation_limit,
+                },
+                limit=args.learning_limit,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.format == "json":
         payload: dict[str, object] = {"snapshot": snapshot}
         if recorded_signal is not None:
@@ -258,14 +295,22 @@ def main() -> int:
             payload["recorded_comparison"] = recorded_comparison
         if curation_preview is not None:
             payload["curation_preview"] = curation_preview
+        if learning_preview is not None:
+            payload["learning_preview"] = learning_preview
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         blocks: list[str] = []
         if recorded_signal is not None:
+            signal_source = recorded_signal.get("source")
+            source_event_id = (
+                signal_source.get("source_event_id")
+                if isinstance(signal_source, dict)
+                else None
+            )
             blocks.append(
                 "Recorded signal: "
                 f"{recorded_signal.get('signal_kind')} "
-                f"{((recorded_signal.get('source') or {}) if isinstance(recorded_signal.get('source'), dict) else {}).get('source_event_id')}"
+                f"{source_event_id}"
             )
         if recorded_comparison is not None:
             blocks.append(
@@ -279,6 +324,12 @@ def main() -> int:
             blocks.append(
                 "Curation preview written: "
                 f"{curation_preview_run_path or curation_preview_latest_path or 'n/a'}"
+            )
+        if learning_preview is not None:
+            blocks.append(format_learning_dataset_preview_report(learning_preview))
+            blocks.append(
+                "Learning preview written: "
+                f"{learning_preview_run_path or learning_preview_latest_path or 'n/a'}"
             )
         print("\n\n".join(blocks))
     return 0
