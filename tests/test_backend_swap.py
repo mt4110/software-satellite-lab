@@ -298,6 +298,32 @@ class BackendSwapTests(unittest.TestCase):
         self.assertIn("backend_invocation_failure_summary", outcome)
         self.assertIn("failed `Two failure sources`", outcome["backend_invocation_failure_summary"])
 
+    def test_successful_invocation_does_not_hide_verification_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            harness_run, _harness_path = run_backend_swap_harness(
+                root=root,
+                task_title="Verification failure summary",
+                goal="Keep failed verification text as the primary run summary.",
+                plan_steps=["Load config."],
+                verification_commands=[f"{sys.executable} -c \"import sys; sys.exit(6)\""],
+                timeout_seconds=10,
+            )
+            first_result = harness_run["backend_results"][0]
+            run_payload = json.loads(Path(first_result["run_artifact_path"]).read_text(encoding="utf-8"))
+            outcome = run_payload["outcome"]
+            event_log = read_event_log(Path(harness_run["index_summary"]["event_log_path"]))
+            first_event = next(
+                event
+                for event in event_log["events"]
+                if event["source_refs"]["artifact_ref"]["entry_id"] == first_result["run_id"]
+            )
+
+        self.assertEqual(outcome["failure_summary"], "Command exited with status 6.")
+        self.assertEqual(outcome["result_summary"], "Command exited with status 6.")
+        self.assertIn("completed `Verification failure summary`", outcome["backend_output_text"])
+        self.assertEqual(first_event["content"]["output_text"], "Command exited with status 6.")
+
     def test_cli_lists_backends_without_task_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

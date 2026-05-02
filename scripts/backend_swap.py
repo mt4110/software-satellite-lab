@@ -944,9 +944,11 @@ def run_backend_swap_harness(
             recorded_task,
             root=resolved_root,
             origin="backend_swap_harness",
-            result_summary=_clean_text(invocation.get("output_text")),
+            result_summary=None,
             timeout_seconds=timeout_seconds,
         )
+        if run.get("status") == "succeeded" and _clean_text(invocation.get("status")) == "ok":
+            run["outcome"]["result_summary"] = _clean_text(invocation.get("output_text"))
         run["backend"] = backend_ref
         run["compatibility"] = copy.deepcopy(compatibility)
         run["workflow"] = {
