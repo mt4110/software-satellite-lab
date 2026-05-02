@@ -429,20 +429,28 @@ def ensure_backend_config_files(
     existing = read_backend_configs(config_log)
     by_id = {str(config["backend_id"]): config for config in existing}
     ensured: list[dict[str, Any]] = []
+    ensured_by_id: dict[str, dict[str, Any]] = {}
 
     for path in paths:
         config = read_backend_config_file(Path(path))
         if config.get("workspace_id") != workspace_id:
             raise ValueError(f"Backend config `{path}` belongs to workspace `{config.get('workspace_id')}`.")
         backend_id = str(config["backend_id"])
+        ensured_config = ensured_by_id.get(backend_id)
+        if ensured_config is not None:
+            if _backend_config_equivalence_payload(ensured_config) != _backend_config_equivalence_payload(config):
+                raise ValueError(f"Backend config `{backend_id}` was provided more than once with different metadata.")
+            continue
         existing_config = by_id.get(backend_id)
         if existing_config is not None:
             if _backend_config_equivalence_payload(existing_config) != _backend_config_equivalence_payload(config):
                 raise ValueError(f"Backend config `{backend_id}` already exists with different metadata.")
+            ensured_by_id[backend_id] = existing_config
             ensured.append(existing_config)
             continue
         appended = append_backend_config(config_log, config, workspace_id=workspace_id)
         by_id[backend_id] = appended
+        ensured_by_id[backend_id] = appended
         ensured.append(appended)
     return ensured
 
@@ -668,8 +676,12 @@ def _apply_backend_invocation_outcome(run: dict[str, Any], invocation: Mapping[s
     if failure_summary is None:
         return
 
-    run["status"] = "failed"
     outcome = _mapping_dict(run.get("outcome"))
+    previous_run_status = _clean_text(run.get("status"))
+    previous_outcome_status = _clean_text(outcome.get("status"))
+    previous_failure_summary = _clean_text(outcome.get("failure_summary"))
+    previous_result_summary = _clean_text(outcome.get("result_summary"))
+    run["status"] = "failed"
     quality_checks = [
         dict(item)
         for item in outcome.get("quality_checks") or []
@@ -687,11 +699,16 @@ def _apply_backend_invocation_outcome(run: dict[str, Any], invocation: Mapping[s
             "status": "failed",
             "quality_status": "fail",
             "execution_status": "failed",
-            "failure_summary": failure_summary,
-            "result_summary": failure_summary,
+            "backend_invocation_failure_summary": failure_summary,
             "quality_checks": quality_checks,
         }
     )
+    if previous_outcome_status in {"succeeded", "passed", "pass", "ok"} or previous_run_status == "succeeded":
+        outcome["failure_summary"] = failure_summary
+        outcome["result_summary"] = failure_summary
+    else:
+        outcome["failure_summary"] = previous_failure_summary or failure_summary
+        outcome["result_summary"] = previous_result_summary or failure_summary
     run["outcome"] = outcome
     existing_tags = [
         tag

@@ -22,6 +22,8 @@ from backend_swap import (  # noqa: E402
     build_backend_config,
     check_backend_compatibility,
     ensure_default_backend_configs,
+    ensure_backend_config_files,
+    read_backend_configs,
     read_backend_harness_runs,
     run_backend_swap_harness,
 )
@@ -111,6 +113,33 @@ class BackendSwapTests(unittest.TestCase):
         self.assertEqual(len(second), 2)
         self.assertTrue(config_log_exists)
         self.assertEqual(first[0]["schema_name"], BACKEND_CONFIG_SCHEMA_NAME)
+
+    def test_file_backend_configs_are_returned_once_per_backend_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "duplicate-backend.json"
+            config = build_backend_config(
+                backend_id="local-duplicate-json",
+                display_name="Local Duplicate JSON",
+                adapter_kind="local",
+                model_id="local/duplicate-json-v1",
+                capabilities={
+                    "text_generation": {"supported": True},
+                    "agent_lane": {"supported": True},
+                    "verification_commands": {"supported": True},
+                    "file_first_artifacts": {"supported": True},
+                },
+            )
+            config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            ensured = ensure_backend_config_files(
+                [config_path, config_path],
+                root=root,
+                workspace_id="local-default",
+            )
+            logged = read_backend_configs(backend_config_log_path(root=root))
+
+        self.assertEqual([item["backend_id"] for item in ensured], ["local-duplicate-json"])
+        self.assertEqual([item["backend_id"] for item in logged], ["local-duplicate-json"])
 
     def test_cli_records_side_by_side_json_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -226,6 +255,48 @@ class BackendSwapTests(unittest.TestCase):
         self.assertEqual(by_backend["mock-failing-local"]["run_status"], "failed")
         self.assertEqual(harness_run["evaluation_counts"]["test_pass"], 1)
         self.assertEqual(harness_run["evaluation_counts"]["test_fail"], 1)
+
+    def test_backend_invocation_failure_preserves_verification_failure_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failing_config = build_backend_config(
+                backend_id="mock-failing-with-test-failure",
+                display_name="Mock Failing With Test Failure",
+                adapter_kind="mock",
+                model_id="mock/failing-with-test-failure-v1",
+                capabilities={
+                    "text_generation": {"supported": True},
+                    "agent_lane": {"supported": True},
+                    "verification_commands": {"supported": True},
+                    "file_first_artifacts": {"supported": True},
+                },
+                adapter_options={"force_status": "failed"},
+            )
+            append_backend_config(
+                backend_config_log_path(root=root),
+                failing_config,
+                workspace_id="local-default",
+            )
+            harness_run, _harness_path = run_backend_swap_harness(
+                root=root,
+                task_title="Two failure sources",
+                goal="Preserve both backend invocation and verification failure evidence.",
+                plan_steps=["Load config."],
+                verification_commands=[f"{sys.executable} -c \"import sys; sys.exit(9)\""],
+                backend_ids=["mock-fast-local", "mock-failing-with-test-failure"],
+                timeout_seconds=10,
+            )
+            failing_result = next(
+                result
+                for result in harness_run["backend_results"]
+                if result["backend_id"] == "mock-failing-with-test-failure"
+            )
+            run_payload = json.loads(Path(failing_result["run_artifact_path"]).read_text(encoding="utf-8"))
+            outcome = run_payload["outcome"]
+
+        self.assertEqual(outcome["failure_summary"], "Command exited with status 9.")
+        self.assertIn("backend_invocation_failure_summary", outcome)
+        self.assertIn("failed `Two failure sources`", outcome["backend_invocation_failure_summary"])
 
     def test_cli_lists_backends_without_task_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
