@@ -349,7 +349,7 @@ Current baseline:
 - curation export preview writes `artifacts/evaluation/<workspace>/curation/preview-latest.json` and run artifacts as `preview_only`, listing candidate decisions, filters, adoption checklist state, and required next steps without writing downstream training data
 - `scripts/run_evaluation_loop.py` writes the same reusable snapshot that the Local UI Evaluation tab displays; both paths support curation filters for state, export decision, and reason
 - the Local UI Evaluation tab can record minimal `review_resolved` / `review_unresolved` signals against selected curation candidates
-- broader M4 work still remains open for richer multi-backend comparison UX and final export policy definition
+- richer multi-backend comparison UX and final export policy definition are intentionally deferred to M6 / M7 rather than reopened inside M4
 
 ### M5. Agent Lane for Software Tasks
 
@@ -368,6 +368,15 @@ Validation:
 
 - the lab can execute at least a narrow patch-plan-verify loop
 - failures are recorded as first-class outcomes
+
+Current baseline:
+
+- `scripts/agent_lane.py` defines a file-first task/run schema under `artifacts/agent_lane/<workspace>/`
+- agent tasks preserve bounded scope, plan steps, verification commands, acceptance criteria, and pass definition
+- agent runs capture plan-step traces and verification command traces with stdout/stderr excerpts, duration, exit status, timeout state, and result summary
+- `scripts/run_agent_lane.py` records a narrow patch-plan-verify task, runs verification without a shell, writes a run artifact, and rebuilds the software-work event index by default
+- agent runs are normalized into `agent_task_run` software-work events, so successful verification derives `test_pass` and failed verification derives `test_fail` in the M4 evaluation snapshot
+- failed verification is kept as a first-class outcome through `quality_status=fail`, `execution_status=failed`, quality checks, and pending-failure curation state
 
 ### M6. Backend Swap Harness
 

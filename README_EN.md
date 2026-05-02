@@ -87,6 +87,10 @@ These are treated as baseline assets for the redesign, not as throwaway work.
   - foundation for acceptance, rejection, review-resolution, test-pass, test-fail signals, comparisons, curation filters, adoption checklists, preview-only export, and evaluation snapshots
 - `scripts/run_evaluation_loop.py`
   - CLI for writing evaluation snapshots and optional explicit signals, comparisons, and curation previews
+- `scripts/agent_lane.py`
+  - M5 foundation for file-first bounded software task/run schemas, tool traces, and verification outcomes
+- `scripts/run_agent_lane.py`
+  - CLI for recording patch-plan-verify tasks and connecting verification traces to software-work events and the evaluation loop
 
 ## Setup
 
@@ -111,6 +115,7 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind acceptance --source-event-id <event-id>
 .venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind review_resolved --source-event-id <event-id> --review-id <review-id> --resolution-summary "Review thread closed." --curation-preview
 .venv/bin/python scripts/run_evaluation_loop.py --curation-preview --curation-state ready --curation-reason review_resolved --curation-limit 10
+.venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

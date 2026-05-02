@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from gemma_runtime import repo_root
 from software_work_events import (
+    iter_agent_lane_events,
     iter_capability_matrix_events,
     iter_workspace_events,
     write_event_log,
@@ -440,8 +441,14 @@ def rebuild_memory_index(
         workspace_id=workspace_id,
         errors=capability_matrix_errors,
     )
+    agent_lane_errors: list[dict[str, str]] = []
+    agent_lane_events = iter_agent_lane_events(
+        root=resolved_root,
+        workspace_id=workspace_id,
+        errors=agent_lane_errors,
+    )
     events = sorted(
-        [*workspace_events, *matrix_events],
+        [*workspace_events, *matrix_events, *agent_lane_events],
         key=lambda item: (
             str(item.get("recorded_at_utc") or ""),
             str(item.get("event_id") or ""),
@@ -462,6 +469,9 @@ def rebuild_memory_index(
         "capability_event_count": len(matrix_events),
         "capability_matrix_error_count": len(capability_matrix_errors),
         "capability_matrix_errors": capability_matrix_errors,
+        "agent_lane_event_count": len(agent_lane_events),
+        "agent_lane_error_count": len(agent_lane_errors),
+        "agent_lane_errors": agent_lane_errors,
         "event_count": len(events),
         "indexed_count": indexed_count,
         "event_log_path": log_payload["path"],
