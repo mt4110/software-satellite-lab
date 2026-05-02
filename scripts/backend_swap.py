@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
 from uuid import uuid4
@@ -730,7 +731,7 @@ def _comparison_decision(results: list[dict[str, Any]]) -> tuple[str, str | None
         return "winner_selected", winner, "Only one backend completed the workflow successfully."
     if len(successful) == len(results) and len(successful) >= 2:
         return "tie", None, "All selected backends completed the same workflow successfully."
-    return "needs_follow_up", None, "One or more selected backends needs follow-up before adoption."
+    return "needs_follow_up", None, "One or more selected backends need follow-up before adoption."
 
 
 def _load_selected_backend_configs(
@@ -744,7 +745,8 @@ def _load_selected_backend_configs(
     selected_ids = _string_list(backend_ids)
     if not selected_ids:
         selected_ids = ["mock-fast-local", "mock-careful-local"]
-    duplicate_ids = sorted({backend_id for backend_id in selected_ids if selected_ids.count(backend_id) > 1})
+    selected_counts = Counter(selected_ids)
+    duplicate_ids = sorted(backend_id for backend_id, count in selected_counts.items() if count > 1)
     if duplicate_ids:
         raise ValueError("Backend swap side-by-side runs require distinct backend ids: " + ", ".join(duplicate_ids))
     missing = [backend_id for backend_id in selected_ids if backend_id not in by_id]
