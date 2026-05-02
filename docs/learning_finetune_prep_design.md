@@ -143,6 +143,9 @@ M7.1 の最小実装では、learning preview に `review_queue` を持たせる
 - `next_action`
 - `blocked_reason`
 - `lifecycle_summary`
+  - `test_state` / `review_state` / `selection_state` は curation reason だけでなく trace evidence を優先する
+  - reason 上は `test_pass` / `review_resolved` / selected でも、対応する trace が辿れない場合は `missing_trace` として扱う
+  - latest trace が `test_fail` / `review_unresolved` / `rejection` の場合は、その negative trace を lifecycle に反映する
 - `eligible_for_supervised_candidate`
 - `excluded_by`
 

@@ -1796,19 +1796,31 @@ def _learning_lifecycle_summary(
     reasons = set(_string_list(candidate.get("reasons")))
     exclusions = set(_string_list(list(excluded_by)))
     outcome = _mapping_dict(event.get("outcome")) if event is not None else {}
-    if "test_fail" in reasons or "failed" in reasons:
+    if "test_fail_trace" in exclusions:
+        test_state = "failed"
+    elif "missing_test_pass_trace" in exclusions:
+        test_state = "missing_trace"
+    elif "test_fail" in reasons or "failed" in reasons:
         test_state = "failed"
     elif "test_pass" in reasons:
         test_state = "passed"
     else:
         test_state = "missing"
-    if "review_unresolved" in reasons:
+    if "review_unresolved_trace" in exclusions:
+        review_state = "unresolved"
+    elif "missing_selection_trace" in exclusions and "review_resolved" in reasons:
+        review_state = "missing_trace"
+    elif "review_unresolved" in reasons:
         review_state = "unresolved"
     elif "review_resolved" in reasons:
         review_state = "resolved"
     else:
         review_state = "not_recorded"
-    if reasons & LEARNING_SELECTION_REASONS:
+    if "rejected_trace" in exclusions:
+        selection_state = "rejected"
+    elif "missing_selection_trace" in exclusions:
+        selection_state = "missing_trace"
+    elif reasons & LEARNING_SELECTION_REASONS:
         selection_state = "selected"
     else:
         selection_state = "missing"
@@ -1855,18 +1867,26 @@ def _learning_review_queue_item(
         if event_id is not None and event is not None
         else {"source_event_id": event_id}
     )
-    fallback_key = json.dumps(dict(candidate), ensure_ascii=False, sort_keys=True, default=str)
+    fallback_key = (
+        None
+        if event_id is not None
+        else json.dumps(dict(candidate), ensure_ascii=False, sort_keys=True, default=str)
+    )
+    queue_item_id = _stable_learning_review_queue_item_id(
+        workspace_id=workspace_id,
+        event_id=event_id,
+        fallback_key=fallback_key,
+    )
     return {
         "schema_name": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME,
         "schema_version": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
-        "queue_item_id": _stable_learning_review_queue_item_id(
-            workspace_id=workspace_id,
-            event_id=event_id,
-            fallback_key=fallback_key,
-        ),
+        "queue_item_id": queue_item_id,
         "workspace_id": workspace_id,
         "event_id": event_id,
-        "label": _preview_excerpt(_clean_text(candidate.get("label")) or event_id, limit=240),
+        "label": _preview_excerpt(
+            _clean_text(candidate.get("label")) or event_id or queue_item_id,
+            limit=240,
+        ) or queue_item_id,
         "queue_state": queue_state,
         "queue_priority": _learning_queue_priority(queue_state),
         "next_action": _learning_next_action(
@@ -1935,13 +1955,21 @@ def _learning_traceability_exclusions(
     signals: Iterable[Mapping[str, Any]],
     comparisons: Iterable[Mapping[str, Any]],
 ) -> list[str]:
-    signal_kinds = {
-        _clean_text(signal.get("signal_kind"))
+    signal_list = [
+        dict(signal)
         for signal in signals
         if isinstance(signal, Mapping)
-    }
-    has_test_pass = "test_pass" in signal_kinds
-    has_selection_signal = bool(signal_kinds & {"acceptance", "review_resolved"})
+    ]
+    latest_test_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"test_pass", "test_fail"},
+    )
+    latest_selection_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"acceptance", "rejection", "review_resolved", "review_unresolved"},
+    )
+    has_test_pass = latest_test_signal == "test_pass"
+    has_selection_signal = latest_selection_signal in {"acceptance", "review_resolved"}
     has_comparison_winner = any(
         _clean_text(comparison.get("role")) == "winner"
         and _clean_text(comparison.get("outcome")) == "winner_selected"
@@ -1956,23 +1984,34 @@ def _learning_traceability_exclusions(
     return exclusions
 
 
-def _learning_latest_review_signal_kind_from_traces(signals: Iterable[Mapping[str, Any]]) -> str | None:
-    review_signals = [
+def _learning_latest_signal_kind_from_traces(
+    signals: Iterable[Mapping[str, Any]],
+    *,
+    signal_kinds: set[str],
+) -> str | None:
+    matching_signals = [
         dict(signal)
         for signal in signals
         if isinstance(signal, Mapping)
-        if _clean_text(signal.get("signal_kind")) in {"review_resolved", "review_unresolved"}
+        if _clean_text(signal.get("signal_kind")) in signal_kinds
     ]
-    review_signals.sort(
+    matching_signals.sort(
         key=lambda signal: (
             _timestamp_sort_key(signal.get("recorded_at_utc")),
             str(signal.get("signal_id") or ""),
         ),
         reverse=True,
     )
-    if not review_signals:
+    if not matching_signals:
         return None
-    return _clean_text(review_signals[0].get("signal_kind"))
+    return _clean_text(matching_signals[0].get("signal_kind"))
+
+
+def _learning_latest_review_signal_kind_from_traces(signals: Iterable[Mapping[str, Any]]) -> str | None:
+    return _learning_latest_signal_kind_from_traces(
+        signals,
+        signal_kinds={"review_resolved", "review_unresolved"},
+    )
 
 
 def _learning_blocking_trace_exclusions(*, signals: Iterable[Mapping[str, Any]]) -> list[str]:
@@ -1981,16 +2020,20 @@ def _learning_blocking_trace_exclusions(*, signals: Iterable[Mapping[str, Any]])
         for signal in signals
         if isinstance(signal, Mapping)
     ]
-    signal_kinds = {
-        _clean_text(signal.get("signal_kind"))
-        for signal in signal_list
-    }
+    latest_selection_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"acceptance", "rejection"},
+    )
+    latest_test_signal = _learning_latest_signal_kind_from_traces(
+        signal_list,
+        signal_kinds={"test_pass", "test_fail"},
+    )
     exclusions: list[str] = []
-    if "rejection" in signal_kinds:
+    if latest_selection_signal == "rejection":
         exclusions.append("rejected_trace")
     if _learning_latest_review_signal_kind_from_traces(signal_list) == "review_unresolved":
         exclusions.append("review_unresolved_trace")
-    if "test_fail" in signal_kinds:
+    if latest_test_signal == "test_fail":
         exclusions.append("test_fail_trace")
     return exclusions
 
