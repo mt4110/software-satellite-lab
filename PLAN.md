@@ -395,6 +395,21 @@ Validation:
 
 - at least two backend configurations can run through the same outer workflow with bounded special casing
 
+Current baseline:
+
+- `scripts/backend_swap.py` defines the first file-first backend config, capability metadata, compatibility report, and side-by-side harness schemas under `artifacts/backend_swap/<workspace>/`
+- default `mock-fast-local` and `mock-careful-local` configs exercise backend replacement without expanding production model integrations
+- external backend config JSON files can be loaded into the workspace config log through `scripts/run_backend_swap.py --backend-config-json`
+- compatibility checks require text generation, agent-lane support, verification commands, and file-first artifact support before a backend enters the shared workflow
+- `scripts/run_backend_swap.py` runs the same M5 patch-plan-verify path across at least two backend configs, records backend metadata on the agent-lane run, rebuilds the memory index, and appends an M4 comparison record
+- backend swap results flow into software-work events, SQLite memory search, evaluation snapshots, and curation candidates through the existing M4 / M5 path
+
+M6 checkpoint scope:
+
+- prove the adapter boundary and comparison path locally before adding broader live model integrations
+- keep optional tool-call formatting and embeddings as metadata, not required contract surface
+- avoid coupling workflow, memory, or evaluation logic to one backend's prompt quirks
+
 ### M7. Learning and Fine-Tune Prep
 
 Goal:

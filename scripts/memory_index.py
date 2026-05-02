@@ -93,6 +93,9 @@ def _event_row(event: dict[str, Any]) -> dict[str, Any]:
         _clean_text(options.get("validation_mode")),
         _clean_text(options.get("validation_command")),
         _clean_text(options.get("claim_scope")),
+        _clean_text(options.get("backend_id")),
+        _clean_text(options.get("backend_adapter_kind")),
+        _clean_text(options.get("backend_compatibility_status")),
     ]
     evaluation_terms.extend(_quality_check_terms(options.get("quality_checks")))
     return {

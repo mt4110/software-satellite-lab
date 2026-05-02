@@ -363,6 +363,18 @@ def _agent_run_event_id(*, workspace_id: str, run_id: str) -> str:
     return f"{workspace_id}:agent-lane-run:{safe_run_id[:64]}:{run_id_digest}"
 
 
+def _deduplicated_notes(*values: str | None) -> list[str]:
+    notes: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_text(value)
+        if text is None or text in seen:
+            continue
+        seen.add(text)
+        notes.append(text)
+    return notes
+
+
 def build_event_from_agent_run(
     *,
     root: Path | None,
@@ -374,6 +386,8 @@ def build_event_from_agent_run(
     task = run.get("task_snapshot") if isinstance(run.get("task_snapshot"), dict) else {}
     outcome = run.get("outcome") if isinstance(run.get("outcome"), dict) else {}
     paths = run.get("paths") if isinstance(run.get("paths"), dict) else {}
+    backend = run.get("backend") if isinstance(run.get("backend"), dict) else {}
+    compatibility = run.get("compatibility") if isinstance(run.get("compatibility"), dict) else {}
     verification = task.get("verification") if isinstance(task.get("verification"), dict) else {}
     commands = [
         command.get("command")
@@ -396,12 +410,16 @@ def build_event_from_agent_run(
     }
     task_id = _clean_text(run.get("task_id")) or _clean_text(task.get("task_id")) or run_id
     task_kind = _clean_text(task.get("task_kind")) or "patch_plan_verify"
+    backend_id = _clean_text(backend.get("backend_id")) or _clean_text(outcome.get("backend_id"))
+    adapter_kind = _clean_text(backend.get("adapter_kind"))
+    model_id = _clean_text(backend.get("model_id")) or _clean_text(outcome.get("model_id"))
+    backend_capabilities = backend.get("capabilities") if isinstance(backend.get("capabilities"), dict) else {}
     session_record = {
         "session_id": task_id,
         "surface": "agent_lane",
         "mode": task_kind,
         "title": _clean_text(task.get("title")),
-        "selected_model_id": None,
+        "selected_model_id": model_id,
         "session_manifest_path": None,
     }
     options = {
@@ -416,11 +434,17 @@ def build_event_from_agent_run(
         "agent_task_id": task_id,
         "agent_run_id": run_id,
         "tool_trace_count": len(run.get("tool_traces") or []),
+        "backend_id": backend_id,
+        "backend_adapter_kind": adapter_kind,
+        "backend_display_name": _clean_text(backend.get("display_name")),
+        "model_id": model_id,
+        "backend_capabilities": copy.deepcopy(backend_capabilities),
+        "backend_compatibility_status": _clean_text(compatibility.get("status")),
     }
     if event_status == "failed":
-        notes = [item for item in (failure_summary, result_summary) if item]
+        notes = _deduplicated_notes(failure_summary, result_summary)
     else:
-        notes = [item for item in (result_summary, failure_summary) if item]
+        notes = _deduplicated_notes(result_summary, failure_summary)
     source_refs = {
         "artifact_ref": {
             "entry_id": run_id,
@@ -440,15 +464,28 @@ def build_event_from_agent_run(
             "task_kind": task_kind,
         },
     }
+    if backend_id is not None or model_id is not None:
+        source_refs["backend_ref"] = {
+            "backend_id": backend_id,
+            "adapter_kind": adapter_kind,
+            "model_id": model_id,
+            "capabilities": copy.deepcopy(backend_capabilities),
+            "compatibility_status": _clean_text(compatibility.get("status")),
+        }
     tags = [
         tag
         for tag in (
             "agent_lane",
             "m5",
+            "m6" if backend_id is not None else None,
+            "backend_swap" if backend_id is not None else None,
             task_kind,
             run_status,
             _clean_text(outcome.get("quality_status")),
             _clean_text(outcome.get("execution_status")),
+            backend_id,
+            adapter_kind,
+            model_id,
         )
         if isinstance(tag, str) and tag
     ]
@@ -462,6 +499,8 @@ def build_event_from_agent_run(
             "status": event_status,
             "quality_status": _clean_text(outcome.get("quality_status")),
             "execution_status": _clean_text(outcome.get("execution_status")),
+            "backend_id": backend_id,
+            "model_id": model_id,
         },
         content={
             "prompt": _clean_text(task.get("goal")),

@@ -91,6 +91,10 @@ These are treated as baseline assets for the redesign, not as throwaway work.
   - M5 foundation for file-first bounded software task/run schemas, tool traces, and verification outcomes
 - `scripts/run_agent_lane.py`
   - CLI for recording patch-plan-verify tasks and connecting verification traces to software-work events and the evaluation loop
+- `scripts/backend_swap.py`
+  - M6 foundation for file-first backend adapter configs, capability metadata, compatibility checks, and side-by-side harness runs
+- `scripts/run_backend_swap.py`
+  - CLI for running two or more backend configs through the same agent-lane workflow and connecting results to the memory index and evaluation comparisons
 
 ## Setup
 
@@ -116,6 +120,8 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind review_resolved --source-event-id <event-id> --review-id <review-id> --resolution-summary "Review thread closed." --curation-preview
 .venv/bin/python scripts/run_evaluation_loop.py --curation-preview --curation-state ready --curation-reason review_resolved --curation-limit 10
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
+.venv/bin/python scripts/run_backend_swap.py --list-backends
+.venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```
