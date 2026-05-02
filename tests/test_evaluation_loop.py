@@ -540,6 +540,18 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(queue_by_event["missing-event"]["next_action"], "restore_source_event")
         self.assertEqual(queue_by_event["missing-event"]["blocked_reason"], "missing_source_event")
         self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["test_state"],
+            "missing_trace",
+        )
+        self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["review_state"],
+            "unknown",
+        )
+        self.assertEqual(
+            queue_by_event["missing-event"]["lifecycle_summary"]["selection_state"],
+            "missing_trace",
+        )
+        self.assertEqual(
             queue_by_event["event-without-response"]["queue_state"],
             "missing_supervised_text",
         )
@@ -588,8 +600,32 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(preview["counts"]["review_queue_count"], 2)
         self.assertEqual(len(queue_ids), 2)
         self.assertTrue(all(item["event_id"] is None for item in preview["review_queue"]))
+        self.assertEqual({item["source_index"] for item in preview["review_queue"]}, {0, 1})
         self.assertIn("[preview truncated]", preview["review_queue"][0]["label"])
         self.assertLess(len(preview["review_queue"][0]["label"]), len(long_label))
+
+    def test_learning_review_queue_ids_stay_unique_for_duplicate_missing_event_rows(self) -> None:
+        duplicate_candidate = {
+            "state": "ready",
+            "label": "Duplicate malformed candidate",
+            "reasons": ["accepted", "test_pass"],
+            "blocked_by": [],
+            "export_decision": "include_when_approved",
+            "ready_for_policy": True,
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {"candidates": [duplicate_candidate, dict(duplicate_candidate)]},
+            events_by_id={},
+            explicit_signals=[],
+            comparisons=[],
+        )
+        queue_ids = [item["queue_item_id"] for item in preview["review_queue"]]
+
+        self.assertEqual(len(queue_ids), 2)
+        self.assertEqual(len(set(queue_ids)), 2)
+        self.assertEqual([item["source_index"] for item in preview["review_queue"]], [0, 1])
 
     def test_learning_review_queue_label_falls_back_without_label_or_event(self) -> None:
         preview = build_learning_dataset_preview(
@@ -652,6 +688,35 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "failed")
         self.assertEqual(preview["excluded_candidates"][0]["next_action"], "repair_or_follow_up_failure")
         self.assertEqual(preview["review_queue"][0]["lifecycle_summary"]["test_state"], "failed")
+
+    def test_curation_preview_treats_failed_reason_as_blocking(self) -> None:
+        preview = build_curation_export_preview(
+            {
+                "workspace_id": "local-default",
+                "paths": {},
+                "curation": {
+                    "candidate_count": 1,
+                    "candidates": [
+                        {
+                            "event_id": "failed-candidate",
+                            "state": "ready",
+                            "label": "Failed lifecycle candidate",
+                            "reasons": ["accepted", "test_pass", "failed"],
+                        }
+                    ],
+                },
+            }
+        )
+        candidate = preview["candidates"][0]
+
+        self.assertEqual(candidate["blocked_by"], ["failed"])
+        self.assertEqual(candidate["export_decision"], "exclude_until_repaired")
+        self.assertFalse(candidate["ready_for_policy"])
+        self.assertIn("repair_or_follow_up_failure", candidate["required_next_steps"])
+        self.assertEqual(
+            preview["adoption_checklist_counts"]["no_blocking_signal"]["blocked"],
+            1,
+        )
 
     def test_learning_preview_requires_traceable_test_and_selection_evidence(self) -> None:
         event = {
