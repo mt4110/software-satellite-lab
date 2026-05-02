@@ -132,6 +132,8 @@ class BackendSwapTests(unittest.TestCase):
         self.assertEqual(candidate["backend_metadata"]["backend_id"], selected_result["backend_id"])
         self.assertEqual(candidate["backend_metadata"]["model_id"], selected_result["model_id"])
         self.assertEqual(candidate["backend_metadata"]["compatibility_status"], "compatible")
+        self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
+        self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
         self.assertIn("latency_profile", candidate["backend_metadata"]["metadata"])
         self.assertEqual(
             candidate["backend_metadata"]["metadata_source_artifact_path"],
