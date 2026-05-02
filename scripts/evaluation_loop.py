@@ -1833,6 +1833,8 @@ def _learning_lifecycle_summary(
         selection_state = "missing_trace"
     elif "rejected_trace" in exclusions:
         selection_state = "rejected"
+    elif "rejected" in reasons:
+        selection_state = "rejected"
     elif "missing_selection_trace" in exclusions:
         selection_state = "missing_trace"
     elif reasons & LEARNING_SELECTION_REASONS:

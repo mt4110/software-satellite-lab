@@ -718,6 +718,48 @@ class EvaluationLoopTests(unittest.TestCase):
             1,
         )
 
+    def test_learning_lifecycle_marks_curation_rejection_as_rejected(self) -> None:
+        event = {
+            "event_id": "rejected-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "This candidate was rejected during review.",
+                "output_text": "The preview should keep the rejection visible.",
+                "options": {},
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "rejected-candidate",
+                        "state": "ready",
+                        "label": "Rejected candidate",
+                        "reasons": ["rejected", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"rejected-candidate": event},
+            explicit_signals=[],
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "rejected")
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
+            "rejected",
+        )
+
     def test_learning_preview_requires_traceable_test_and_selection_evidence(self) -> None:
         event = {
             "event_id": "stale-ready-candidate",
