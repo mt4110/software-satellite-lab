@@ -1474,7 +1474,9 @@ def _learning_backend_metadata(event: Mapping[str, Any]) -> dict[str, Any]:
     source_refs = _mapping_dict(event.get("source_refs"))
     backend_ref = _mapping_dict(source_refs.get("backend_ref"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
-    artifact_payload = _read_json_object(_path_from_text(artifact_ref.get("artifact_path")))
+    artifact_payload: dict[str, Any] = {}
+    if _clean_text(artifact_ref.get("artifact_kind")) == "agent_run":
+        artifact_payload = _read_json_object(_path_from_text(artifact_ref.get("artifact_path")))
     run_backend = _mapping_dict(artifact_payload.get("backend"))
     run_compatibility = _mapping_dict(artifact_payload.get("compatibility"))
 
@@ -1778,8 +1780,8 @@ def build_learning_dataset_preview(
     for candidate in source_candidates:
         event_id = _clean_text(candidate.get("event_id"))
         exclusions = _learning_candidate_exclusions(candidate)
-        event = resolved_events_by_id.get(event_id or "")
-        if event is None:
+        event = resolved_events_by_id.get(event_id) if event_id is not None else None
+        if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
             supervised_example = _learning_supervised_example(event)
@@ -1790,15 +1792,6 @@ def build_learning_dataset_preview(
 
         if exclusions:
             excluded_candidates.append(_learning_excluded_candidate(candidate, excluded_by=exclusions))
-            continue
-
-        if event_id is None or event is None:
-            excluded_candidates.append(
-                _learning_excluded_candidate(
-                    candidate,
-                    excluded_by=["missing_source_event"],
-                )
-            )
             continue
 
         signal_traces = _learning_signals_for_event(

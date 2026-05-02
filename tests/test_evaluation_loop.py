@@ -361,12 +361,14 @@ class EvaluationLoopTests(unittest.TestCase):
                 root=root,
                 snapshot=snapshot,
             )
-            learning_preview, learning_latest_path, learning_run_path = record_learning_dataset_preview(
-                root=root,
-                snapshot=snapshot,
-                curation_preview=curation_preview,
-            )
-            direct_preview = build_learning_dataset_preview(snapshot, curation_preview)
+            with patch("evaluation_loop._read_json_object") as read_json_mock:
+                learning_preview, learning_latest_path, learning_run_path = record_learning_dataset_preview(
+                    root=root,
+                    snapshot=snapshot,
+                    curation_preview=curation_preview,
+                )
+                direct_preview = build_learning_dataset_preview(snapshot, curation_preview)
+                read_json_called = read_json_mock.called
             report = format_learning_dataset_preview_report(learning_preview)
             candidate = learning_preview["supervised_example_candidates"][0]
             learning_latest_exists = learning_latest_path.exists()
@@ -390,6 +392,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(learning_preview["counts"]["previewed_candidate_count"], 1)
         self.assertEqual(learning_preview["counts"]["excluded_candidate_count"], 1)
         self.assertEqual(direct_preview["counts"]["eligible_candidate_count"], 1)
+        self.assertFalse(read_json_called)
         self.assertEqual(candidate["event_id"], pass_event_id)
         self.assertEqual(candidate["source_event"]["source_event_id"], pass_event_id)
         self.assertEqual(candidate["supervised_example"]["format"], "instruction_response")
