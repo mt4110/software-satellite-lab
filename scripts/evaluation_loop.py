@@ -1940,11 +1940,22 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
                 for signal in evidence.get("signals") or []
                 if isinstance(signal, Mapping)
             ]
-            label = _clean_text(source.get("prompt_excerpt")) or _clean_text(item.get("event_id")) or "candidate"
+            label = _single_line_report_label(
+                _clean_text(source.get("prompt_excerpt"))
+                or _clean_text(item.get("event_id"))
+                or "candidate"
+            )
             backend_label = _clean_text(backend.get("backend_id")) or _clean_text(backend.get("model_id")) or "n/a"
             signal_label = ",".join(item for item in signals if item) or "n/a"
             lines.append(f"- {label} (backend={backend_label}; signals={signal_label})")
     return "\n".join(lines)
+
+
+def _single_line_report_label(value: str, *, limit: int = 180) -> str:
+    label = " ".join(value.split())
+    if len(label) <= limit:
+        return label
+    return label[: max(limit - 20, 0)].rstrip() + " [truncated]"
 
 
 def format_curation_export_preview_report(preview: Mapping[str, Any]) -> str:

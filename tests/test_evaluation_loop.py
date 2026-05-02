@@ -369,6 +369,9 @@ class EvaluationLoopTests(unittest.TestCase):
                 )
                 direct_preview = build_learning_dataset_preview(snapshot, curation_preview)
                 read_json_called = read_json_mock.called
+            learning_preview["supervised_example_candidates"][0]["source_event"]["prompt_excerpt"] = (
+                "accepted patch\nkeeps the loop green"
+            )
             report = format_learning_dataset_preview_report(learning_preview)
             candidate = learning_preview["supervised_example_candidates"][0]
             learning_latest_exists = learning_latest_path.exists()
@@ -404,6 +407,8 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("signal_log_path", candidate["source_paths"])
         self.assertIn("comparison_log_path", candidate["source_paths"])
         self.assertIn("Learning dataset preview: preview_only", report)
+        self.assertIn("- accepted patch keeps the loop green", report)
+        self.assertNotIn("- accepted patch\nkeeps the loop green", report)
         self.assertIn("blocking_or_noisy_signal", learning_preview["counts"]["exclusion_reasons"])
 
     def test_learning_preview_excludes_test_pass_without_selection_signal(self) -> None:
