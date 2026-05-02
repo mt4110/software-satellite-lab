@@ -69,6 +69,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `PLAN.md`: redesign blueprint and milestones
 - `docs/recall_context_builder_design.md`: first implementation design for Recall / Context Builder
 - `docs/recall_hit_quality_loop.md`: hit-quality visualization and lightweight evaluation loop for Recall
+- `docs/learning_finetune_prep_design.md`: M7 preview-only dataset candidate design for Learning and Fine-Tune Prep
 
 ## Git Rules
 
@@ -84,9 +85,9 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `scripts/rebuild_memory_index.py`
   - rebuild command for the event log and memory index
 - `scripts/evaluation_loop.py`
-  - foundation for acceptance, rejection, review-resolution, test-pass, test-fail signals, comparisons, curation filters, adoption checklists, preview-only export, and evaluation snapshots
+  - foundation for evaluation signals, comparisons, curation filters, learning dataset previews, and evaluation snapshots
 - `scripts/run_evaluation_loop.py`
-  - CLI for writing evaluation snapshots and optional explicit signals, comparisons, and curation previews
+  - CLI for writing evaluation snapshots and preview-only artifacts
 - `scripts/agent_lane.py`
   - M5 foundation for file-first bounded software task/run schemas, tool traces, and verification outcomes
 - `scripts/run_agent_lane.py`
@@ -119,6 +120,7 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind acceptance --source-event-id <event-id>
 .venv/bin/python scripts/run_evaluation_loop.py --record-signal --signal-kind review_resolved --source-event-id <event-id> --review-id <review-id> --resolution-summary "Review thread closed." --curation-preview
 .venv/bin/python scripts/run_evaluation_loop.py --curation-preview --curation-state ready --curation-reason review_resolved --curation-limit 10
+.venv/bin/python scripts/run_evaluation_loop.py --curation-preview --learning-preview --learning-limit 10
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_backend_swap.py --list-backends
 .venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"

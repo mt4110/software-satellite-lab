@@ -23,11 +23,14 @@ from evaluation_loop import (  # noqa: E402
     evaluation_comparison_log_path,
     evaluation_signal_log_path,
     build_curation_export_preview,
+    build_learning_dataset_preview,
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
+    format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_review_resolution_signal,
     record_evaluation_snapshot,
+    record_learning_dataset_preview,
 )
 from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
 from run_evaluation_loop import main as evaluation_main  # noqa: E402
@@ -313,6 +316,159 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("Review resolved: 1", report)
         self.assertIn("Curation export preview: preview_only", preview_report)
         self.assertIn("Adoption checklist:", preview_report)
+
+    def test_learning_preview_builds_traceable_supervised_candidates_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            pass_event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            fail_event_id = "local-default:capability-matrix:matrix:row-2:vision"
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=pass_event_id,
+                rationale="The passing result is selected for learning preview.",
+            )
+            rejected_signal = build_evaluation_signal(
+                signal_kind="rejection",
+                source_event_id=fail_event_id,
+                rationale="The failing result should not become training material.",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                accepted_signal,
+                workspace_id="local-default",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                rejected_signal,
+                workspace_id="local-default",
+            )
+            comparison = build_evaluation_comparison(
+                candidate_event_ids=[pass_event_id, fail_event_id],
+                winner_event_id=pass_event_id,
+                task_label="choose learning candidate",
+                criteria=["accepted", "passing check"],
+                rationale="Only the accepted passing event should become a candidate.",
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(root=root),
+                comparison,
+                workspace_id="local-default",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            with patch("evaluation_loop._read_json_object") as read_json_mock:
+                learning_preview, learning_latest_path, learning_run_path = record_learning_dataset_preview(
+                    root=root,
+                    snapshot=snapshot,
+                    curation_preview=curation_preview,
+                )
+                direct_preview = build_learning_dataset_preview(snapshot, curation_preview)
+                read_json_called = read_json_mock.called
+            learning_preview["supervised_example_candidates"][0]["source_event"]["prompt_excerpt"] = (
+                "accepted patch\nkeeps the loop green"
+            )
+            report = format_learning_dataset_preview_report(learning_preview)
+            candidate = learning_preview["supervised_example_candidates"][0]
+            learning_latest_exists = learning_latest_path.exists()
+            learning_run_exists = learning_run_path.exists()
+            signal_kinds = {
+                signal["signal_kind"]
+                for signal in candidate["evidence"]["signals"]
+            }
+            comparison_roles = {
+                item["role"]
+                for item in candidate["evidence"]["comparisons"]
+            }
+
+        self.assertTrue(learning_latest_exists)
+        self.assertTrue(learning_run_exists)
+        self.assertEqual(learning_preview["export_mode"], "preview_only")
+        self.assertFalse(learning_preview["training_export_ready"])
+        self.assertTrue(learning_preview["human_gate_required"])
+        self.assertEqual(learning_preview["counts"]["source_candidate_count"], 2)
+        self.assertEqual(learning_preview["counts"]["eligible_candidate_count"], 1)
+        self.assertEqual(learning_preview["counts"]["previewed_candidate_count"], 1)
+        self.assertEqual(learning_preview["counts"]["excluded_candidate_count"], 1)
+        self.assertEqual(direct_preview["counts"]["eligible_candidate_count"], 1)
+        self.assertFalse(read_json_called)
+        self.assertEqual(candidate["event_id"], pass_event_id)
+        self.assertEqual(candidate["source_event"]["source_event_id"], pass_event_id)
+        self.assertEqual(candidate["supervised_example"]["format"], "instruction_response")
+        self.assertIn("acceptance", signal_kinds)
+        self.assertIn("test_pass", signal_kinds)
+        self.assertIn("winner", comparison_roles)
+        self.assertEqual(candidate["backend_metadata"]["model_id"], "backend-a")
+        self.assertIn("event_log_path", candidate["source_paths"])
+        self.assertIn("signal_log_path", candidate["source_paths"])
+        self.assertIn("comparison_log_path", candidate["source_paths"])
+        self.assertIn("Learning dataset preview: preview_only", report)
+        self.assertIn("- accepted patch keeps the loop green", report)
+        self.assertNotIn("- accepted patch\nkeeps the loop green", report)
+        self.assertIn("blocking_or_noisy_signal", learning_preview["counts"]["exclusion_reasons"])
+
+    def test_learning_preview_excludes_test_pass_without_selection_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            excluded_by_event = {
+                item["event_id"]: set(item["excluded_by"])
+                for item in learning_preview["excluded_candidates"]
+            }
+
+        self.assertEqual(learning_preview["counts"]["source_candidate_count"], 2)
+        self.assertEqual(learning_preview["counts"]["eligible_candidate_count"], 0)
+        self.assertEqual(learning_preview["supervised_example_candidates"], [])
+        self.assertIn(
+            "missing_human_or_comparison_selection",
+            excluded_by_event["local-default:capability-matrix:matrix:row-1:chat"],
+        )
+        self.assertIn(
+            "blocking_or_noisy_signal",
+            excluded_by_event["local-default:capability-matrix:matrix:row-2:vision"],
+        )
+
+    def test_learning_preview_persists_supplied_in_memory_curation_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview = build_curation_export_preview(snapshot)
+            self.assertNotIn("paths", curation_preview)
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            curation_preview_path = Path(str(learning_preview["source_curation_preview_path"]))
+            persisted_preview = json.loads(curation_preview_path.read_text(encoding="utf-8"))
+            curation_preview_exists = curation_preview_path.exists()
+
+        self.assertTrue(curation_preview_exists)
+        self.assertEqual(
+            learning_preview["paths"]["source_curation_preview_path"],
+            str(curation_preview_path),
+        )
+        self.assertEqual(
+            persisted_preview["paths"]["curation_preview_run_path"],
+            str(curation_preview_path),
+        )
 
     def test_record_review_resolution_signal_helper_writes_local_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -631,6 +787,44 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(payload["curation_preview"]["filters"]["states"], ["ready"])
         self.assertEqual(payload["curation_preview"]["counts"]["previewed_candidate_count"], 1)
         self.assertTrue(preview_latest_exists)
+
+    def test_cli_writes_learning_preview_without_training_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--record-signal",
+                    "--signal-kind",
+                    "acceptance",
+                    "--source-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                    "--learning-preview",
+                    "--learning-limit",
+                    "1",
+                    "--format",
+                    "json",
+                ],
+            ), redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+            preview_latest_exists = Path(payload["learning_preview"]["paths"]["learning_preview_latest_path"]).exists()
+            source_curation_exists = Path(payload["learning_preview"]["source_curation_preview_path"]).exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["learning_preview"]["export_mode"], "preview_only")
+        self.assertFalse(payload["learning_preview"]["training_export_ready"])
+        self.assertEqual(payload["learning_preview"]["counts"]["previewed_candidate_count"], 1)
+        self.assertFalse(
+            payload["learning_preview"]["supervised_example_candidates"][0]["policy"]["training_job_allowed"]
+        )
+        self.assertTrue(preview_latest_exists)
+        self.assertTrue(source_curation_exists)
 
     def test_cli_records_comparison_and_prints_json_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
