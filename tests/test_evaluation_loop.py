@@ -443,6 +443,33 @@ class EvaluationLoopTests(unittest.TestCase):
             excluded_by_event["local-default:capability-matrix:matrix:row-2:vision"],
         )
 
+    def test_learning_preview_persists_supplied_in_memory_curation_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview = build_curation_export_preview(snapshot)
+            self.assertNotIn("paths", curation_preview)
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            curation_preview_path = Path(str(learning_preview["source_curation_preview_path"]))
+            persisted_preview = json.loads(curation_preview_path.read_text(encoding="utf-8"))
+            curation_preview_exists = curation_preview_path.exists()
+
+        self.assertTrue(curation_preview_exists)
+        self.assertEqual(
+            learning_preview["paths"]["source_curation_preview_path"],
+            str(curation_preview_path),
+        )
+        self.assertEqual(
+            persisted_preview["paths"]["curation_preview_run_path"],
+            str(curation_preview_path),
+        )
+
     def test_record_review_resolution_signal_helper_writes_local_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

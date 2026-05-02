@@ -1887,6 +1887,12 @@ def record_learning_dataset_preview(
             snapshot=source_snapshot,
             filters=curation_filters,
         )
+    elif _curation_preview_artifact_path(source_curation_preview) is None:
+        source_curation_preview = _record_supplied_curation_preview(
+            source_curation_preview,
+            root=resolved_root,
+            workspace_id=workspace_id,
+        )
     preview = build_learning_dataset_preview(
         source_snapshot,
         source_curation_preview,
@@ -1904,6 +1910,33 @@ def record_learning_dataset_preview(
     write_json(run_path, preview)
     write_json(latest_path, preview)
     return preview, latest_path, run_path
+
+
+def _curation_preview_artifact_path(preview: Mapping[str, Any]) -> str | None:
+    paths = _mapping_dict(preview.get("paths"))
+    return (
+        _clean_text(paths.get("curation_preview_run_path"))
+        or _clean_text(paths.get("curation_preview_latest_path"))
+    )
+
+
+def _record_supplied_curation_preview(
+    preview: Mapping[str, Any],
+    *,
+    root: Path,
+    workspace_id: str,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(preview))
+    latest_path = curation_export_preview_latest_path(workspace_id=workspace_id, root=root)
+    run_path = curation_export_preview_run_path(workspace_id=workspace_id, root=root)
+    payload["paths"] = {
+        "curation_preview_latest_path": str(latest_path),
+        "curation_preview_run_path": str(run_path),
+        "source_snapshot_path": _clean_text(payload.get("source_snapshot_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload
 
 
 def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
