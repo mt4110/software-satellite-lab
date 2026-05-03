@@ -9,12 +9,15 @@ from evaluation_loop import (
     COMPARISON_OUTCOMES,
     CURATION_EXPORT_DECISIONS,
     CURATION_STATES,
+    EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND,
     RELATION_KINDS,
     SIGNAL_KINDS,
     append_evaluation_comparison,
     append_evaluation_signal,
     build_evaluation_comparison,
     build_evaluation_signal,
+    build_export_policy_confirmation_evidence,
+    build_export_policy_confirmation_signal,
     evaluation_comparison_log_path,
     evaluation_signal_log_path,
     format_curation_export_preview_report,
@@ -59,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--record-signal",
         action="store_true",
         help="Append one explicit evaluation signal before writing the snapshot.",
+    )
+    parser.add_argument(
+        "--confirm-export-policy",
+        action="store_true",
+        help="Append one explicit preview-only export policy confirmation signal before writing the snapshot.",
     )
     parser.add_argument(
         "--record-comparison",
@@ -181,6 +189,32 @@ def main() -> int:
     index_summary: dict[str, object] | None = None
 
     try:
+        if args.record_signal and args.confirm_export_policy:
+            parser.error("--record-signal and --confirm-export-policy cannot be used together.")
+        if args.confirm_export_policy:
+            source_event_id = args.source_event_id.strip()
+            if not source_event_id:
+                parser.error("--confirm-export-policy requires --source-event-id.")
+            if events_by_id is None:
+                events_by_id, index_summary = _events_by_id_and_index_summary(
+                    root=root,
+                    workspace_id=args.workspace_id,
+                )
+            source_event = events_by_id.get(source_event_id)
+            if source_event is None:
+                raise ValueError(f"Unknown export-policy confirmation source_event_id `{source_event_id}`.")
+            recorded_signal = build_export_policy_confirmation_signal(
+                workspace_id=args.workspace_id,
+                source_event_id=source_event_id,
+                source_event=source_event,
+                rationale=args.rationale.strip() or None,
+                origin="cli",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(workspace_id=args.workspace_id, root=root),
+                recorded_signal,
+                workspace_id=args.workspace_id,
+            )
         if args.record_signal:
             if args.signal_kind is None:
                 parser.error("--record-signal requires --signal-kind.")
@@ -207,6 +241,8 @@ def main() -> int:
                 }.items()
                 if value is not None
             }
+            if args.signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+                evidence = build_export_policy_confirmation_evidence(evidence)
             recorded_signal = build_evaluation_signal(
                 workspace_id=args.workspace_id,
                 signal_kind=args.signal_kind,

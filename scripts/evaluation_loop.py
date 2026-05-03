@@ -35,8 +35,17 @@ SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_NAME = "software-satellite-supervised-exampl
 SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_VERSION = 1
 LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME = "software-satellite-learning-review-queue-item"
 LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = 1
+EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND = "export_policy_confirmed"
 
-SIGNAL_KINDS = ("acceptance", "rejection", "test_pass", "test_fail", "review_resolved", "review_unresolved")
+SIGNAL_KINDS = (
+    "acceptance",
+    "rejection",
+    "test_pass",
+    "test_fail",
+    "review_resolved",
+    "review_unresolved",
+    EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND,
+)
 POSITIVE_SIGNAL_KINDS = {"acceptance", "test_pass", "review_resolved"}
 NEGATIVE_SIGNAL_KINDS = {"rejection", "test_fail", "review_unresolved"}
 RELATION_KINDS = ("repairs", "follow_up_for")
@@ -251,11 +260,20 @@ def _validate_evaluation_signal(signal: Mapping[str, Any], *, path: Path | None 
     source["source_event_id"] = source_event_id
     payload["source"] = source
 
+    if payload["signal_kind"] == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+        payload["evidence"] = build_export_policy_confirmation_evidence(
+            _mapping_dict(payload.get("evidence"))
+        )
+
     relation = _mapping_dict(payload.get("relation"))
     relation_kind = _clean_text(relation.get("relation_kind"))
+    target_event_id = _clean_text(relation.get("target_event_id")) or _clean_text(payload.get("target_event_id"))
+    if payload["signal_kind"] == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND and (
+        relation_kind is not None or target_event_id is not None
+    ):
+        raise ValueError(f"Export-policy confirmation signals cannot define relation links{location}.")
     if relation_kind is not None:
         relation["relation_kind"] = _normalize_relation_kind(relation_kind)
-        target_event_id = _clean_text(relation.get("target_event_id"))
         if target_event_id is None:
             raise ValueError(f"Evaluation relation signal is missing relation.target_event_id{location}.")
         relation["target_event_id"] = target_event_id
@@ -455,6 +473,10 @@ def build_evaluation_signal(
         raise ValueError("Evaluation relation signals require a target_event_id.")
 
     normalized_evidence = _compact_evidence(evidence)
+    if normalized_signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+        if normalized_relation_kind is not None or _clean_text(target_event_id) is not None:
+            raise ValueError("Export-policy confirmation signals cannot define relation links.")
+        normalized_evidence = build_export_policy_confirmation_evidence(normalized_evidence)
     if rationale:
         normalized_evidence["rationale"] = rationale
 
@@ -475,6 +497,54 @@ def build_evaluation_signal(
         "evidence": copy.deepcopy(normalized_evidence),
         "tags": _string_list(list(tags or [])),
     }
+
+
+def build_export_policy_confirmation_evidence(evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    payload = _compact_evidence(evidence)
+    payload["confirmation_scope"] = (
+        _clean_text(payload.get("confirmation_scope"))
+        or "learning_dataset_preview_candidate"
+    )
+    payload["policy_version"] = _clean_text(payload.get("policy_version")) or "m7-preview-only-v1"
+    payload["export_mode"] = "preview_only"
+    payload["training_export_ready"] = False
+    payload["human_gate_required"] = True
+    payload["training_job_allowed"] = False
+    payload["raw_log_export_allowed"] = False
+    payload["downstream_export_requires_separate_approval"] = True
+    return payload
+
+
+def build_export_policy_confirmation_signal(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    source_event_id: str,
+    recorded_at_utc: str | None = None,
+    signal_id: str | None = None,
+    source_event: Mapping[str, Any] | None = None,
+    rationale: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    origin: str = "manual",
+    tags: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    signal_tags = [
+        "learning-export-policy",
+        "preview-only",
+        "human-gated",
+        *list(tags or []),
+    ]
+    return build_evaluation_signal(
+        workspace_id=workspace_id,
+        signal_kind=EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND,
+        source_event_id=source_event_id,
+        recorded_at_utc=recorded_at_utc,
+        signal_id=signal_id,
+        source_event=source_event,
+        rationale=rationale,
+        evidence=build_export_policy_confirmation_evidence(evidence),
+        origin=origin,
+        tags=signal_tags,
+    )
 
 
 def _signal_log_header(*, workspace_id: str) -> dict[str, Any]:
@@ -704,6 +774,16 @@ def _signal_summary(signal: Mapping[str, Any]) -> dict[str, Any]:
         "review_id": _clean_text(evidence.get("review_id")),
         "review_url": _clean_text(evidence.get("review_url")),
         "resolution_summary": _clean_text(evidence.get("resolution_summary")),
+        "confirmation_scope": _clean_text(evidence.get("confirmation_scope")),
+        "policy_version": _clean_text(evidence.get("policy_version")),
+        "export_mode": _clean_text(evidence.get("export_mode")),
+        "training_export_ready": evidence.get("training_export_ready"),
+        "human_gate_required": evidence.get("human_gate_required"),
+        "training_job_allowed": evidence.get("training_job_allowed"),
+        "raw_log_export_allowed": evidence.get("raw_log_export_allowed"),
+        "downstream_export_requires_separate_approval": evidence.get(
+            "downstream_export_requires_separate_approval"
+        ),
     }
 
 
@@ -829,13 +909,28 @@ def build_curation_candidates(
         if signal.get("signal_kind") == "test_fail"
         if (event_id := _clean_text(signal.get("source_event_id"))) is not None
     }
+    policy_confirmed = {
+        event_id
+        for signal in signal_summary_list
+        if signal.get("signal_kind") == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND
+        if (event_id := _clean_text(signal.get("source_event_id"))) is not None
+    }
     winners = {
         event_id
         for comparison in comparison_summary_list
         if comparison.get("outcome") == "winner_selected"
         if (event_id := _clean_text(comparison.get("winner_event_id"))) is not None
     }
-    candidate_ids = sorted(accepted | review_resolved | rejected | review_unresolved | passed | failed | winners)
+    candidate_ids = sorted(
+        accepted
+        | review_resolved
+        | rejected
+        | review_unresolved
+        | passed
+        | failed
+        | winners
+        | policy_confirmed
+    )
     candidates: list[dict[str, Any]] = []
     for event_id in candidate_ids:
         reasons: list[str] = []
@@ -853,6 +948,8 @@ def build_curation_candidates(
             reasons.append("review_unresolved")
         if event_id in failed:
             reasons.append("test_fail")
+        if event_id in policy_confirmed:
+            reasons.append(EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND)
 
         if event_id in rejected or event_id in review_unresolved or event_id in failed:
             state = "blocked"
@@ -1009,6 +1106,7 @@ def build_evaluation_snapshot(
                 if review_signal_count
                 else None
             ),
+            "export_policy_confirmed": int(counts.get(EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND, 0)),
             "test_pass": int(counts.get("test_pass", 0)),
             "test_fail": int(counts.get("test_fail", 0)),
             "repair_links": _relation_link_count(signal_summaries, relation_kind="repairs"),
@@ -1105,6 +1203,38 @@ def record_review_resolution_signal(
     )
 
 
+def record_export_policy_confirmation_signal(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    source_event_id: str,
+    rationale: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    origin: str = "manual",
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    event_id = _clean_text(source_event_id)
+    if event_id is None:
+        raise ValueError("Export-policy confirmation signals require a source_event_id.")
+    events_by_id = software_work_events_by_id(root=resolved_root, workspace_id=workspace_id)
+    source_event = events_by_id.get(event_id)
+    if source_event is None:
+        raise ValueError(f"Unknown export-policy confirmation source_event_id `{event_id}`.")
+    signal = build_export_policy_confirmation_signal(
+        workspace_id=workspace_id,
+        source_event_id=event_id,
+        source_event=source_event,
+        rationale=rationale,
+        evidence=evidence,
+        origin=origin,
+    )
+    return append_evaluation_signal(
+        evaluation_signal_log_path(workspace_id=workspace_id, root=resolved_root),
+        signal,
+        workspace_id=workspace_id,
+    )
+
+
 def _curation_export_decision(candidate: Mapping[str, Any]) -> str:
     state = _clean_text(candidate.get("state"))
     reasons = set(_string_list(candidate.get("reasons")))
@@ -1125,6 +1255,7 @@ def _curation_candidate_adoption_checklist(candidate: Mapping[str, Any]) -> list
         if reason in CURATION_BLOCKING_REASONS
     }
     human_selected = bool(reasons & {"accepted", "review_resolved", "comparison_winner"})
+    export_policy_confirmed = EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND in reasons
     items = [
         {
             "key": "test_pass_recorded",
@@ -1148,7 +1279,7 @@ def _curation_candidate_adoption_checklist(candidate: Mapping[str, Any]) -> list
         {
             "key": "export_policy_confirmed",
             "label": "Export policy confirmed",
-            "status": "pending",
+            "status": "done" if export_policy_confirmed else "pending",
             "required": True,
         },
     ]
@@ -1169,6 +1300,8 @@ def _curation_required_next_steps(candidate: Mapping[str, Any]) -> list[str]:
     reasons = set(_string_list(candidate.get("reasons")))
     blocked_by = reasons & CURATION_BLOCKING_REASONS
     if not blocked_by and (state == "ready" or _curation_candidate_ready_for_policy(candidate)):
+        if EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND in reasons:
+            return ["review_downstream_export_policy"]
         return ["confirm_export_policy"]
     steps: list[str] = []
     if "needs_test_signal" in reasons:
@@ -1591,17 +1724,52 @@ def _learning_supervised_example(event: Mapping[str, Any]) -> dict[str, Any]:
 def _learning_signal_trace(signal: Mapping[str, Any]) -> dict[str, Any]:
     source = _mapping_dict(signal.get("source"))
     relation = _mapping_dict(signal.get("relation"))
+    signal_kind = _clean_text(signal.get("signal_kind"))
+    evidence = _mapping_dict(signal.get("evidence"))
+    if signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+        evidence = build_export_policy_confirmation_evidence(evidence)
     return {
         "signal_id": _clean_text(signal.get("signal_id")),
-        "signal_kind": _clean_text(signal.get("signal_kind")),
+        "signal_kind": signal_kind,
         "polarity": _clean_text(signal.get("polarity")),
         "origin": _clean_text(signal.get("origin")),
         "recorded_at_utc": _clean_text(signal.get("recorded_at_utc")),
         "source_event_id": _clean_text(source.get("source_event_id")),
         "relation_kind": _clean_text(relation.get("relation_kind")),
         "target_event_id": _clean_text(relation.get("target_event_id")),
-        "evidence": copy.deepcopy(_mapping_dict(signal.get("evidence"))),
+        "evidence": copy.deepcopy(evidence),
         "tags": _string_list(signal.get("tags")),
+    }
+
+
+def _learning_policy_confirmation_trace(signals: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    confirmations = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+        if _clean_text(signal.get("signal_kind")) == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND
+    ]
+    confirmations.sort(
+        key=lambda signal: (
+            _timestamp_sort_key(signal.get("recorded_at_utc")),
+            str(signal.get("signal_id") or ""),
+        ),
+        reverse=True,
+    )
+    if not confirmations:
+        return {
+            "confirmed": False,
+            "latest_signal_id": None,
+            "recorded_at_utc": None,
+            "origin": None,
+        }
+    latest = confirmations[0]
+    return {
+        "confirmed": True,
+        "latest_signal_id": _clean_text(latest.get("signal_id")),
+        "recorded_at_utc": _clean_text(latest.get("recorded_at_utc")),
+        "origin": _clean_text(latest.get("origin")),
+        "evidence": copy.deepcopy(_mapping_dict(latest.get("evidence"))),
     }
 
 
@@ -1737,7 +1905,7 @@ def _learning_queue_state(
     return "needs_review"
 
 
-def _learning_queue_priority(queue_state: str) -> dict[str, Any]:
+def _learning_queue_priority(queue_state: str, *, policy_confirmation: Mapping[str, Any]) -> dict[str, Any]:
     if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
         return {
             "rank": 1,
@@ -1745,16 +1913,48 @@ def _learning_queue_priority(queue_state: str) -> dict[str, Any]:
             "reason": "Resolve blocking or missing-source evidence before supervised review.",
         }
     if queue_state == "ready":
+        if bool(_mapping_dict(policy_confirmation).get("confirmed")):
+            return {
+                "rank": 3,
+                "bucket": "ready_policy_confirmed",
+                "reason": "Policy confirmation is recorded; downstream export still requires separate approval.",
+            }
         return {
             "rank": 2,
             "bucket": "ready_policy_unconfirmed",
             "reason": "Confirm export policy before any downstream dataset work.",
         }
     return {
-        "rank": 3,
+        "rank": 4,
         "bucket": "needs_review",
         "reason": "Record missing test or human-selection evidence before supervised review.",
     }
+
+
+def _learning_effective_curation_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    policy_confirmation: Mapping[str, Any],
+) -> dict[str, Any]:
+    effective = copy.deepcopy(dict(candidate))
+    reasons = [
+        reason
+        for reason in _string_list(candidate.get("reasons"))
+        if reason != EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND
+    ]
+    if bool(_mapping_dict(policy_confirmation).get("confirmed")):
+        reasons.append(EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND)
+    effective["reasons"] = reasons
+    effective["blocked_by"] = [
+        reason
+        for reason in reasons
+        if reason in CURATION_BLOCKING_REASONS
+    ]
+    effective["export_decision"] = _curation_export_decision(effective)
+    effective["ready_for_policy"] = _curation_candidate_ready_for_policy(effective)
+    effective["adoption_checklist"] = _curation_candidate_adoption_checklist(effective)
+    effective["required_next_steps"] = _curation_required_next_steps(effective)
+    return effective
 
 
 def _learning_next_action(
@@ -1762,10 +1962,12 @@ def _learning_next_action(
     *,
     excluded_by: Iterable[str],
     blocked_reasons: Iterable[str],
+    policy_confirmation: Mapping[str, Any],
 ) -> str:
     reasons = set(_string_list(candidate.get("reasons")))
     exclusions = set(_string_list(list(excluded_by)))
     blocked = set(_string_list(list(blocked_reasons)))
+    policy_confirmed = bool(_mapping_dict(policy_confirmation).get("confirmed"))
     if "missing_source_event" in exclusions:
         return "restore_source_event"
     if "missing_supervised_text" in exclusions:
@@ -1779,6 +1981,8 @@ def _learning_next_action(
     if blocked & {"noisy", "unresolved", "blocking_or_noisy_signal", "state_blocked"}:
         return "review_blocking_evidence"
     if not exclusions:
+        if policy_confirmed:
+            return "review_downstream_export_policy"
         return "confirm_export_policy"
     if "missing_test_pass" in exclusions or "missing_test_pass_trace" in exclusions:
         return "record_test_pass"
@@ -1801,9 +2005,11 @@ def _learning_lifecycle_summary(
     *,
     event: Mapping[str, Any] | None,
     excluded_by: Iterable[str],
+    policy_confirmation: Mapping[str, Any],
 ) -> dict[str, Any]:
     reasons = set(_string_list(candidate.get("reasons")))
     exclusions = set(_string_list(list(excluded_by)))
+    policy_confirmed = bool(_mapping_dict(policy_confirmation).get("confirmed"))
     outcome = _mapping_dict(event.get("outcome")) if event is not None else {}
     if "missing_source_event" in exclusions:
         test_state = "missing_trace"
@@ -1841,7 +2047,13 @@ def _learning_lifecycle_summary(
         selection_state = "selected"
     else:
         selection_state = "missing"
-    if bool(candidate.get("ready_for_policy")):
+    if policy_confirmed and bool(candidate.get("ready_for_policy")):
+        policy_state = "confirmed"
+    elif policy_confirmed:
+        policy_state = "confirmed_but_not_ready"
+    elif EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND in reasons:
+        policy_state = "missing_trace"
+    elif bool(candidate.get("ready_for_policy")):
         policy_state = "pending_confirmation"
     else:
         policy_state = "not_ready"
@@ -1870,6 +2082,7 @@ def _learning_review_queue_item(
     candidate: Mapping[str, Any],
     event: Mapping[str, Any] | None,
     excluded_by: Iterable[str],
+    policy_confirmation: Mapping[str, Any],
     source_index: int,
 ) -> dict[str, Any]:
     event_id = _clean_text(candidate.get("event_id"))
@@ -1896,6 +2109,10 @@ def _learning_review_queue_item(
         fallback_key=fallback_key,
         source_index=source_index,
     )
+    effective_curation = _learning_effective_curation_candidate(
+        candidate,
+        policy_confirmation=policy_confirmation,
+    )
     return {
         "schema_name": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME,
         "schema_version": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
@@ -1908,11 +2125,15 @@ def _learning_review_queue_item(
             limit=240,
         ) or queue_item_id,
         "queue_state": queue_state,
-        "queue_priority": _learning_queue_priority(queue_state),
+        "queue_priority": _learning_queue_priority(
+            queue_state,
+            policy_confirmation=policy_confirmation,
+        ),
         "next_action": _learning_next_action(
             candidate,
             excluded_by=exclusions,
             blocked_reasons=blocked_reasons,
+            policy_confirmation=policy_confirmation,
         ),
         "blocked_reason": blocked_reasons[0] if blocked_reasons else None,
         "blocked_reasons": blocked_reasons,
@@ -1922,15 +2143,18 @@ def _learning_review_queue_item(
             candidate,
             event=event,
             excluded_by=exclusions,
+            policy_confirmation=policy_confirmation,
         ),
+        "export_policy_confirmation": copy.deepcopy(_mapping_dict(policy_confirmation)),
         "source_event": source_event,
         "curation": {
-            "state": _clean_text(candidate.get("state")) or "needs_review",
-            "reasons": _string_list(candidate.get("reasons")),
-            "blocked_by": _string_list(candidate.get("blocked_by")),
-            "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
-            "ready_for_policy": bool(candidate.get("ready_for_policy")),
-            "required_next_steps": _string_list(candidate.get("required_next_steps")),
+            "state": _clean_text(effective_curation.get("state")) or "needs_review",
+            "reasons": _string_list(effective_curation.get("reasons")),
+            "blocked_by": _string_list(effective_curation.get("blocked_by")),
+            "export_decision": _clean_text(effective_curation.get("export_decision")) or "hold_for_review",
+            "ready_for_policy": bool(effective_curation.get("ready_for_policy")),
+            "adoption_checklist": copy.deepcopy(list(effective_curation.get("adoption_checklist") or [])),
+            "required_next_steps": _string_list(effective_curation.get("required_next_steps")),
         },
     }
 
@@ -1946,6 +2170,7 @@ def _learning_review_queue_summary(item: Mapping[str, Any]) -> dict[str, Any]:
         "eligible_for_supervised_candidate": bool(item.get("eligible_for_supervised_candidate")),
         "excluded_by": _string_list(item.get("excluded_by")),
         "lifecycle_summary": copy.deepcopy(_mapping_dict(item.get("lifecycle_summary"))),
+        "export_policy_confirmation": copy.deepcopy(_mapping_dict(item.get("export_policy_confirmation"))),
     }
 
 
@@ -2065,12 +2290,13 @@ def _learning_excluded_candidate(
     queue_item: Mapping[str, Any],
 ) -> dict[str, Any]:
     queue_summary = _learning_review_queue_summary(queue_item)
+    curation = _mapping_dict(queue_item.get("curation"))
     return {
         "event_id": _clean_text(candidate.get("event_id")),
-        "state": _clean_text(candidate.get("state")) or "needs_review",
-        "reasons": _string_list(candidate.get("reasons")),
-        "blocked_by": _string_list(candidate.get("blocked_by")),
-        "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
+        "state": _clean_text(curation.get("state")) or "needs_review",
+        "reasons": _string_list(curation.get("reasons")),
+        "blocked_by": _string_list(curation.get("blocked_by")),
+        "export_decision": _clean_text(curation.get("export_decision")) or "hold_for_review",
         "excluded_by": _string_list(excluded_by),
         "queue_state": queue_summary["queue_state"],
         "queue_priority": queue_summary["queue_priority"],
@@ -2079,6 +2305,7 @@ def _learning_excluded_candidate(
         "blocked_reasons": queue_summary["blocked_reasons"],
         "eligible_for_supervised_candidate": queue_summary["eligible_for_supervised_candidate"],
         "lifecycle_summary": queue_summary["lifecycle_summary"],
+        "export_policy_confirmation": queue_summary["export_policy_confirmation"],
     }
 
 
@@ -2097,6 +2324,9 @@ def _build_supervised_example_candidate(
         raise ValueError("Learning candidates require an event_id.")
     source_refs = _mapping_dict(event.get("source_refs"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    queue_summary = _learning_review_queue_summary(queue_item)
+    export_policy_confirmation = _mapping_dict(queue_summary.get("export_policy_confirmation"))
+    effective_curation = _mapping_dict(queue_item.get("curation"))
     return {
         "schema_name": SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_NAME,
         "schema_version": SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_VERSION,
@@ -2107,18 +2337,19 @@ def _build_supervised_example_candidate(
         "source_event": _learning_source_event_record(event, event_id=event_id),
         "supervised_example": _learning_supervised_example(event),
         "curation": {
-            "state": _clean_text(candidate.get("state")),
-            "reasons": _string_list(candidate.get("reasons")),
-            "export_decision": _clean_text(candidate.get("export_decision")),
-            "ready_for_policy": bool(candidate.get("ready_for_policy")),
-            "adoption_checklist": copy.deepcopy(list(candidate.get("adoption_checklist") or [])),
+            "state": _clean_text(effective_curation.get("state")),
+            "reasons": _string_list(effective_curation.get("reasons")),
+            "export_decision": _clean_text(effective_curation.get("export_decision")),
+            "ready_for_policy": bool(effective_curation.get("ready_for_policy")),
+            "adoption_checklist": copy.deepcopy(list(effective_curation.get("adoption_checklist") or [])),
+            "required_next_steps": _string_list(effective_curation.get("required_next_steps")),
         },
         "evidence": {
             "signals": list(signals),
             "comparisons": list(comparisons),
         },
         "backend_metadata": _learning_backend_metadata(event),
-        "review_queue": _learning_review_queue_summary(queue_item),
+        "review_queue": queue_summary,
         "source_paths": {
             **copy.deepcopy(dict(source_paths)),
             "source_artifact_path": _clean_text(artifact_ref.get("artifact_path")),
@@ -2131,6 +2362,8 @@ def _build_supervised_example_candidate(
             "human_gate_required": True,
             "training_job_allowed": False,
             "raw_log_export_allowed": False,
+            "export_policy_confirmed": bool(export_policy_confirmation.get("confirmed")),
+            "confirmation_signal_id": _clean_text(export_policy_confirmation.get("latest_signal_id")),
         },
     }
 
@@ -2183,6 +2416,7 @@ def build_learning_dataset_preview(
         event = resolved_events_by_id.get(event_id) if event_id is not None else None
         signal_traces: list[dict[str, Any]] = []
         comparison_traces: list[dict[str, Any]] = []
+        policy_confirmation: dict[str, Any] = _learning_policy_confirmation_trace([])
         if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
@@ -2201,6 +2435,7 @@ def build_learning_dataset_preview(
                 event_id=event_id,
                 comparisons=resolved_comparisons,
             )
+            policy_confirmation = _learning_policy_confirmation_trace(signal_traces)
             exclusions.extend(_learning_blocking_trace_exclusions(signals=signal_traces))
             if not exclusions:
                 exclusions.extend(
@@ -2215,6 +2450,7 @@ def build_learning_dataset_preview(
             candidate=candidate,
             event=event,
             excluded_by=exclusions,
+            policy_confirmation=policy_confirmation,
             source_index=source_index,
         )
         review_queue.append(queue_item)
@@ -2260,6 +2496,16 @@ def build_learning_dataset_preview(
         str(_mapping_dict(item.get("queue_priority")).get("bucket") or "unknown")
         for item in review_queue
     )
+    policy_confirmed_candidate_count = sum(
+        1
+        for item in review_queue
+        if bool(_mapping_dict(item.get("export_policy_confirmation")).get("confirmed"))
+    )
+    policy_pending_candidate_count = sum(
+        1
+        for item in review_queue
+        if _mapping_dict(item.get("lifecycle_summary")).get("policy_state") == "pending_confirmation"
+    )
     return {
         "schema_name": LEARNING_DATASET_PREVIEW_SCHEMA_NAME,
         "schema_version": LEARNING_DATASET_PREVIEW_SCHEMA_VERSION,
@@ -2289,6 +2535,8 @@ def build_learning_dataset_preview(
                 key: int(value)
                 for key, value in sorted(review_queue_priority_counts.items())
             },
+            "policy_confirmed_candidate_count": policy_confirmed_candidate_count,
+            "policy_pending_candidate_count": policy_pending_candidate_count,
         },
         "truncated": len(eligible_candidates) > len(preview_candidates),
         "review_queue": review_queue,
@@ -2299,6 +2547,8 @@ def build_learning_dataset_preview(
             "human_gate_required": True,
             "training_job_allowed": False,
             "requires_explicit_export_policy": True,
+            "confirmation_signal_kind": EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND,
+            "confirmed_candidate_count": policy_confirmed_candidate_count,
             "default_exclusions": sorted(LEARNING_BLOCKING_REASONS),
             "required_positive_evidence": [
                 "test_pass",
@@ -2397,6 +2647,7 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
         f"Eligible: {int(counts.get('eligible_candidate_count') or 0)}",
         f"Previewed: {int(counts.get('previewed_candidate_count') or 0)}",
         f"Excluded: {int(counts.get('excluded_candidate_count') or 0)}",
+        f"Policy confirmed: {int(counts.get('policy_confirmed_candidate_count') or 0)}",
         "Training export ready: no",
         "Human gate: required",
     ]
@@ -2538,6 +2789,7 @@ def format_evaluation_snapshot_report(snapshot: Mapping[str, Any]) -> str:
         f"Rejection: {int(counts.get('rejection') or 0)}",
         f"Review resolved: {int(counts.get('review_resolved') or 0)}",
         f"Review unresolved: {int(counts.get('review_unresolved') or 0)}",
+        f"Export policy confirmed: {int(counts.get('export_policy_confirmed') or 0)}",
         f"Test pass: {int(counts.get('test_pass') or 0)}",
         f"Test fail: {int(counts.get('test_fail') or 0)}",
         f"Repair links: {int(counts.get('repair_links') or 0)}",
