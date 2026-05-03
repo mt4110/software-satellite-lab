@@ -267,9 +267,13 @@ def _validate_evaluation_signal(signal: Mapping[str, Any], *, path: Path | None 
 
     relation = _mapping_dict(payload.get("relation"))
     relation_kind = _clean_text(relation.get("relation_kind"))
+    target_event_id = _clean_text(relation.get("target_event_id")) or _clean_text(payload.get("target_event_id"))
+    if payload["signal_kind"] == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND and (
+        relation_kind is not None or target_event_id is not None
+    ):
+        raise ValueError(f"Export-policy confirmation signals cannot define relation links{location}.")
     if relation_kind is not None:
         relation["relation_kind"] = _normalize_relation_kind(relation_kind)
-        target_event_id = _clean_text(relation.get("target_event_id"))
         if target_event_id is None:
             raise ValueError(f"Evaluation relation signal is missing relation.target_event_id{location}.")
         relation["target_event_id"] = target_event_id
@@ -470,6 +474,8 @@ def build_evaluation_signal(
 
     normalized_evidence = _compact_evidence(evidence)
     if normalized_signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+        if normalized_relation_kind is not None or _clean_text(target_event_id) is not None:
+            raise ValueError("Export-policy confirmation signals cannot define relation links.")
         normalized_evidence = build_export_policy_confirmation_evidence(normalized_evidence)
     if rationale:
         normalized_evidence["rationale"] = rationale
@@ -1909,7 +1915,7 @@ def _learning_queue_priority(queue_state: str, *, policy_confirmation: Mapping[s
     if queue_state == "ready":
         if bool(_mapping_dict(policy_confirmation).get("confirmed")):
             return {
-                "rank": 2,
+                "rank": 3,
                 "bucket": "ready_policy_confirmed",
                 "reason": "Policy confirmation is recorded; downstream export still requires separate approval.",
             }
@@ -1919,10 +1925,36 @@ def _learning_queue_priority(queue_state: str, *, policy_confirmation: Mapping[s
             "reason": "Confirm export policy before any downstream dataset work.",
         }
     return {
-        "rank": 3,
+        "rank": 4,
         "bucket": "needs_review",
         "reason": "Record missing test or human-selection evidence before supervised review.",
     }
+
+
+def _learning_effective_curation_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    policy_confirmation: Mapping[str, Any],
+) -> dict[str, Any]:
+    effective = copy.deepcopy(dict(candidate))
+    reasons = [
+        reason
+        for reason in _string_list(candidate.get("reasons"))
+        if reason != EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND
+    ]
+    if bool(_mapping_dict(policy_confirmation).get("confirmed")):
+        reasons.append(EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND)
+    effective["reasons"] = reasons
+    effective["blocked_by"] = [
+        reason
+        for reason in reasons
+        if reason in CURATION_BLOCKING_REASONS
+    ]
+    effective["export_decision"] = _curation_export_decision(effective)
+    effective["ready_for_policy"] = _curation_candidate_ready_for_policy(effective)
+    effective["adoption_checklist"] = _curation_candidate_adoption_checklist(effective)
+    effective["required_next_steps"] = _curation_required_next_steps(effective)
+    return effective
 
 
 def _learning_next_action(
@@ -2077,6 +2109,10 @@ def _learning_review_queue_item(
         fallback_key=fallback_key,
         source_index=source_index,
     )
+    effective_curation = _learning_effective_curation_candidate(
+        candidate,
+        policy_confirmation=policy_confirmation,
+    )
     return {
         "schema_name": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME,
         "schema_version": LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
@@ -2112,12 +2148,13 @@ def _learning_review_queue_item(
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(policy_confirmation)),
         "source_event": source_event,
         "curation": {
-            "state": _clean_text(candidate.get("state")) or "needs_review",
-            "reasons": _string_list(candidate.get("reasons")),
-            "blocked_by": _string_list(candidate.get("blocked_by")),
-            "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
-            "ready_for_policy": bool(candidate.get("ready_for_policy")),
-            "required_next_steps": _string_list(candidate.get("required_next_steps")),
+            "state": _clean_text(effective_curation.get("state")) or "needs_review",
+            "reasons": _string_list(effective_curation.get("reasons")),
+            "blocked_by": _string_list(effective_curation.get("blocked_by")),
+            "export_decision": _clean_text(effective_curation.get("export_decision")) or "hold_for_review",
+            "ready_for_policy": bool(effective_curation.get("ready_for_policy")),
+            "adoption_checklist": copy.deepcopy(list(effective_curation.get("adoption_checklist") or [])),
+            "required_next_steps": _string_list(effective_curation.get("required_next_steps")),
         },
     }
 
@@ -2253,12 +2290,13 @@ def _learning_excluded_candidate(
     queue_item: Mapping[str, Any],
 ) -> dict[str, Any]:
     queue_summary = _learning_review_queue_summary(queue_item)
+    curation = _mapping_dict(queue_item.get("curation"))
     return {
         "event_id": _clean_text(candidate.get("event_id")),
-        "state": _clean_text(candidate.get("state")) or "needs_review",
-        "reasons": _string_list(candidate.get("reasons")),
-        "blocked_by": _string_list(candidate.get("blocked_by")),
-        "export_decision": _clean_text(candidate.get("export_decision")) or "hold_for_review",
+        "state": _clean_text(curation.get("state")) or "needs_review",
+        "reasons": _string_list(curation.get("reasons")),
+        "blocked_by": _string_list(curation.get("blocked_by")),
+        "export_decision": _clean_text(curation.get("export_decision")) or "hold_for_review",
         "excluded_by": _string_list(excluded_by),
         "queue_state": queue_summary["queue_state"],
         "queue_priority": queue_summary["queue_priority"],
@@ -2288,6 +2326,7 @@ def _build_supervised_example_candidate(
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
     queue_summary = _learning_review_queue_summary(queue_item)
     export_policy_confirmation = _mapping_dict(queue_summary.get("export_policy_confirmation"))
+    effective_curation = _mapping_dict(queue_item.get("curation"))
     return {
         "schema_name": SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_NAME,
         "schema_version": SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_VERSION,
@@ -2298,11 +2337,12 @@ def _build_supervised_example_candidate(
         "source_event": _learning_source_event_record(event, event_id=event_id),
         "supervised_example": _learning_supervised_example(event),
         "curation": {
-            "state": _clean_text(candidate.get("state")),
-            "reasons": _string_list(candidate.get("reasons")),
-            "export_decision": _clean_text(candidate.get("export_decision")),
-            "ready_for_policy": bool(candidate.get("ready_for_policy")),
-            "adoption_checklist": copy.deepcopy(list(candidate.get("adoption_checklist") or [])),
+            "state": _clean_text(effective_curation.get("state")),
+            "reasons": _string_list(effective_curation.get("reasons")),
+            "export_decision": _clean_text(effective_curation.get("export_decision")),
+            "ready_for_policy": bool(effective_curation.get("ready_for_policy")),
+            "adoption_checklist": copy.deepcopy(list(effective_curation.get("adoption_checklist") or [])),
+            "required_next_steps": _string_list(effective_curation.get("required_next_steps")),
         },
         "evidence": {
             "signals": list(signals),

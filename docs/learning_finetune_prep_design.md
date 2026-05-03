@@ -318,6 +318,8 @@ ready candidate に対して人間が preview-only policy を確認した eviden
 
 review queue では `policy_state = confirmed` として読めるようにし、
 priority bucket は `ready_policy_confirmed` に移す。
+ただし inspection queue では、未確認の ready candidate を先に見るため、
+`ready_policy_unconfirmed` は rank 2、`ready_policy_confirmed` は rank 3 とする。
 次 action は downstream export の別判断に留める。
 policy confirmation は「学習に進める許可」ではなく、
 「preview-only 境界を人間が確認した証跡」です。
@@ -387,7 +389,8 @@ M7 の次に進むなら、次を小さく足す。
 - blocked reason と next action の明示 field
 - review queue priority
   - blocked first
-  - ready policy-confirmed / policy-unconfirmed second
-  - needs human selection third
+  - ready but policy-unconfirmed second
+  - ready policy-confirmed third
+  - needs human selection fourth
 
 ただし、外部 training job 統合は M8 以降に置く。
