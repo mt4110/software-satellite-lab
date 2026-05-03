@@ -22,15 +22,18 @@ from evaluation_loop import (  # noqa: E402
     append_evaluation_signal,
     build_evaluation_comparison,
     build_evaluation_signal,
+    build_human_selected_candidate_list,
     evaluation_comparison_log_path,
     evaluation_signal_log_path,
     build_curation_export_preview,
     build_learning_dataset_preview,
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
+    format_human_selected_candidate_list_report,
     format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_export_policy_confirmation_signal,
+    record_human_selected_candidate_list,
     record_review_resolution_signal,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
@@ -514,6 +517,159 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["policy"]["confirmation_signal_id"], policy_signal["signal_id"])
         self.assertFalse(candidate["policy"]["training_job_allowed"])
         self.assertFalse(candidate["policy"]["raw_log_export_allowed"])
+
+    def test_human_selected_candidate_list_records_explicit_selection_without_training_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            pass_event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            fail_event_id = "local-default:capability-matrix:matrix:row-2:vision"
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=pass_event_id,
+                rationale="The passing candidate is explicitly accepted.",
+            )
+            rejected_signal = build_evaluation_signal(
+                signal_kind="rejection",
+                source_event_id=fail_event_id,
+                rationale="The failing candidate should remain blocked.",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                accepted_signal,
+                workspace_id="local-default",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                rejected_signal,
+                workspace_id="local-default",
+            )
+            policy_signal = record_export_policy_confirmation_signal(
+                root=root,
+                source_event_id=pass_event_id,
+                rationale="Human confirmed the preview-only policy before shortlist inspection.",
+                origin="test",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            selection, selection_latest_path, selection_run_path = record_human_selected_candidate_list(
+                root=root,
+                learning_preview=learning_preview,
+                selected_event_ids=[pass_event_id, fail_event_id],
+                rationale="Human-selected M7.3 shortlist.",
+                origin="test",
+            )
+            selected_by_event = {
+                item["event_id"]: item
+                for item in selection["selected_candidates"]
+            }
+            report = format_human_selected_candidate_list_report(selection)
+            selection_latest_exists = selection_latest_path.exists()
+            selection_run_exists = selection_run_path.exists()
+
+        self.assertTrue(selection_latest_exists)
+        self.assertTrue(selection_run_exists)
+        self.assertEqual(selection["schema_name"], "software-satellite-human-selected-candidate-list")
+        self.assertEqual(selection["export_mode"], "preview_only")
+        self.assertFalse(selection["training_export_ready"])
+        self.assertTrue(selection["human_gate_required"])
+        self.assertFalse(selection["export_policy"]["training_job_allowed"])
+        self.assertFalse(selection["export_policy"]["raw_log_export_allowed"])
+        self.assertFalse(selection["export_policy"]["jsonl_training_export_allowed"])
+        self.assertTrue(selection["export_policy"]["selection_does_not_promote_candidate"])
+        self.assertEqual(selection["counts"]["requested_candidate_count"], 2)
+        self.assertEqual(selection["counts"]["matched_candidate_count"], 2)
+        self.assertEqual(selection["counts"]["selected_supervised_candidate_count"], 1)
+        self.assertEqual(selection["counts"]["selected_not_supervised_candidate_count"], 1)
+        self.assertEqual(selection["counts"]["policy_confirmed_selected_count"], 1)
+        self.assertEqual(selection["selection"]["selection_mode"], "explicit_human_candidate_list")
+        self.assertEqual(selection["selection"]["rationale"], "Human-selected M7.3 shortlist.")
+        self.assertNotIn("supervised_example", selected_by_event[pass_event_id])
+        self.assertEqual(selected_by_event[pass_event_id]["label"], pass_event_id)
+        self.assertNotIn("prompt_excerpt", selected_by_event[pass_event_id]["source_event"])
+        self.assertNotIn("output_excerpt", selected_by_event[pass_event_id]["source_event"])
+        self.assertTrue(selected_by_event[pass_event_id]["eligible_for_supervised_candidate"])
+        self.assertTrue(selected_by_event[pass_event_id]["preview_membership"]["in_supervised_example_candidates"])
+        self.assertTrue(selected_by_event[pass_event_id]["policy"]["export_policy_confirmed"])
+        self.assertFalse(selected_by_event[pass_event_id]["policy"]["training_export_ready"])
+        self.assertIn(accepted_signal["signal_id"], selected_by_event[pass_event_id]["evidence_summary"]["signal_ids"])
+        self.assertIn(policy_signal["signal_id"], selected_by_event[pass_event_id]["evidence_summary"]["signal_ids"])
+        self.assertEqual(
+            selected_by_event[pass_event_id]["evidence_summary"]["export_policy_confirmation_signal_id"],
+            policy_signal["signal_id"],
+        )
+        self.assertTrue(selected_by_event[pass_event_id]["evidence_summary"]["traceability"]["accepted"])
+        self.assertTrue(selected_by_event[pass_event_id]["evidence_summary"]["traceability"]["test_pass"])
+        self.assertTrue(
+            selected_by_event[pass_event_id]["evidence_summary"]["traceability"]["export_policy_confirmed"]
+        )
+        self.assertFalse(selected_by_event[fail_event_id]["eligible_for_supervised_candidate"])
+        self.assertTrue(selected_by_event[fail_event_id]["preview_membership"]["in_excluded_candidates"])
+        self.assertEqual(selected_by_event[fail_event_id]["blocked_reason"], "test_fail")
+        self.assertEqual(selected_by_event[fail_event_id]["next_action"], "repair_or_follow_up_failure")
+        self.assertIn(rejected_signal["signal_id"], selected_by_event[fail_event_id]["evidence_summary"]["signal_ids"])
+        self.assertIn("test_fail", selected_by_event[fail_event_id]["evidence_summary"]["signal_kinds"])
+        self.assertFalse(selected_by_event[fail_event_id]["evidence_summary"]["traceability"]["test_pass"])
+        self.assertIn("Human-selected candidate list: preview_only", report)
+        self.assertIn("Training export ready: no", report)
+        self.assertIn("supervised=yes", report)
+        self.assertIn("supervised=no", report)
+
+    def test_human_selected_candidate_list_keeps_missing_ids_as_inspection_items(self) -> None:
+        preview = build_human_selected_candidate_list(
+            {
+                "workspace_id": "local-default",
+                "paths": {},
+                "review_queue": [],
+                "supervised_example_candidates": [],
+                "excluded_candidates": [],
+            },
+            selected_event_ids=["local-default:missing-selection"],
+            rationale="Keep missing selections visible.",
+            origin="test",
+        )
+        selected = preview["selected_candidates"][0]
+
+        self.assertEqual(preview["counts"]["missing_candidate_count"], 1)
+        self.assertEqual(selected["queue_state"], "missing_from_learning_preview")
+        self.assertEqual(selected["blocked_reason"], "missing_learning_preview_candidate")
+        self.assertFalse(selected["eligible_for_supervised_candidate"])
+        self.assertIn("missing_learning_preview_candidate", selected["excluded_by"])
+        self.assertFalse(preview["training_export_ready"])
+
+    def test_human_selected_candidate_list_persists_unreadable_supplied_learning_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            supplied_preview = {
+                "workspace_id": "local-default",
+                "paths": {
+                    "learning_preview_run_path": str(root / "missing-learning-preview.json"),
+                },
+                "review_queue": [],
+                "supervised_example_candidates": [],
+                "excluded_candidates": [],
+            }
+            selection, _latest_path, _run_path = record_human_selected_candidate_list(
+                root=root,
+                learning_preview=supplied_preview,
+                selected_event_ids=["local-default:missing-selection"],
+                origin="test",
+            )
+            source_learning_preview_path = Path(str(selection["source_learning_preview_path"]))
+            source_learning_preview_exists = source_learning_preview_path.exists()
+
+        self.assertTrue(source_learning_preview_exists)
+        self.assertNotEqual(source_learning_preview_path.name, "missing-learning-preview.json")
+        self.assertFalse(selection["training_export_ready"])
 
     def test_export_policy_confirmation_rejects_relation_links(self) -> None:
         with self.assertRaises(ValueError) as raised:
@@ -1808,6 +1964,81 @@ class EvaluationLoopTests(unittest.TestCase):
         )
         self.assertTrue(preview_latest_exists)
         self.assertTrue(source_curation_exists)
+
+    def test_cli_writes_human_selected_candidates_from_learning_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                build_evaluation_signal(
+                    signal_kind="acceptance",
+                    source_event_id=event_id,
+                    rationale="Accepted before explicit shortlist selection.",
+                ),
+                workspace_id="local-default",
+            )
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--human-selected-candidates",
+                    "--select-candidate-event-id",
+                    event_id,
+                    "--rationale",
+                    "Select for M7.3 preview inspection.",
+                    "--format",
+                    "json",
+                ],
+            ), redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+            selection = payload["human_selected_candidates"]
+            selection_latest_exists = Path(selection["paths"]["human_selected_latest_path"]).exists()
+            source_learning_exists = Path(selection["source_learning_preview_path"]).exists()
+            selected = selection["selected_candidates"][0]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(selection["export_mode"], "preview_only")
+        self.assertFalse(selection["training_export_ready"])
+        self.assertTrue(selection["human_gate_required"])
+        self.assertEqual(selection["counts"]["matched_candidate_count"], 1)
+        self.assertEqual(selection["counts"]["selected_supervised_candidate_count"], 1)
+        self.assertEqual(selection["selection"]["origin"], "cli")
+        self.assertEqual(selection["selection"]["rationale"], "Select for M7.3 preview inspection.")
+        self.assertTrue(selection_latest_exists)
+        self.assertTrue(source_learning_exists)
+        self.assertNotIn("supervised_example", selected)
+        self.assertTrue(selected["evidence_summary"]["traceability"]["accepted"])
+        self.assertTrue(selected["evidence_summary"]["traceability"]["test_pass"])
+        self.assertFalse(selected["policy"]["training_job_allowed"])
+        self.assertFalse(selected["policy"]["raw_log_export_allowed"])
+
+    def test_cli_rejects_selected_candidate_without_human_selected_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stderr = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--select-candidate-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                ],
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    evaluation_main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--select-candidate-event-id requires --human-selected-candidates.", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_cli_confirms_export_policy_without_unlocking_training_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

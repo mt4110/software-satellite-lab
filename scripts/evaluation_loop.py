@@ -35,6 +35,10 @@ SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_NAME = "software-satellite-supervised-exampl
 SUPERVISED_EXAMPLE_CANDIDATE_SCHEMA_VERSION = 1
 LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_NAME = "software-satellite-learning-review-queue-item"
 LEARNING_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = 1
+HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME = "software-satellite-human-selected-candidate-list"
+HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_VERSION = 1
+HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_NAME = "software-satellite-human-selected-candidate"
+HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_VERSION = 1
 EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND = "export_policy_confirmed"
 
 SIGNAL_KINDS = (
@@ -145,6 +149,27 @@ def learning_dataset_preview_run_path(
         / "learning"
         / "runs"
         / f"{timestamp_slug()}-learning-preview.json"
+    )
+
+
+def human_selected_candidates_latest_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return evaluation_root(workspace_id=workspace_id, root=root) / "learning" / "human-selected-latest.json"
+
+
+def human_selected_candidates_run_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return (
+        evaluation_root(workspace_id=workspace_id, root=root)
+        / "learning"
+        / "runs"
+        / f"{timestamp_slug()}-human-selected-candidates.json"
     )
 
 
@@ -2611,6 +2636,592 @@ def record_learning_dataset_preview(
     return preview, latest_path, run_path
 
 
+def _learning_preview_artifact_path(preview: Mapping[str, Any]) -> str | None:
+    paths = _mapping_dict(preview.get("paths"))
+    return (
+        _clean_text(paths.get("learning_preview_run_path"))
+        or _clean_text(paths.get("learning_preview_latest_path"))
+    )
+
+
+def _learning_preview_artifact_is_readable(preview: Mapping[str, Any]) -> bool:
+    artifact_path = _path_from_text(_learning_preview_artifact_path(preview))
+    return artifact_path is not None and artifact_path.exists()
+
+
+def _record_supplied_learning_preview(
+    preview: Mapping[str, Any],
+    *,
+    root: Path,
+    workspace_id: str,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(preview))
+    latest_path = learning_dataset_preview_latest_path(workspace_id=workspace_id, root=root)
+    run_path = learning_dataset_preview_run_path(workspace_id=workspace_id, root=root)
+    payload["paths"] = {
+        "learning_preview_latest_path": str(latest_path),
+        "learning_preview_run_path": str(run_path),
+        "source_snapshot_path": _clean_text(payload.get("source_snapshot_path")),
+        "source_curation_preview_path": _clean_text(payload.get("source_curation_preview_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload
+
+
+def _normalize_human_selected_event_ids(event_ids: Iterable[str]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in event_ids:
+        event_id = _clean_text(item)
+        if event_id is None or event_id in seen:
+            continue
+        seen.add(event_id)
+        selected.append(event_id)
+    if not selected:
+        raise ValueError("Human-selected candidate lists require at least one selected event id.")
+    return selected
+
+
+def _stable_human_selected_candidate_id(*, workspace_id: str, event_id: str) -> str:
+    digest = hashlib.sha256(f"{workspace_id}\nhuman-selected\n{event_id}".encode("utf-8")).hexdigest()[:12]
+    return f"{workspace_id}:human-selected-candidate:{digest}"
+
+
+def _human_selected_preview_source_path(learning_preview: Mapping[str, Any]) -> str | None:
+    paths = _mapping_dict(learning_preview.get("paths"))
+    return (
+        _clean_text(paths.get("learning_preview_run_path"))
+        or _clean_text(paths.get("learning_preview_latest_path"))
+    )
+
+
+def _items_by_event_id(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    by_event_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        event_id = _clean_text(item.get("event_id"))
+        if event_id is None or event_id in by_event_id:
+            continue
+        by_event_id[event_id] = dict(item)
+    return by_event_id
+
+
+def _human_selected_events_by_id_from_learning_preview(preview: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    source_paths = _mapping_dict(preview.get("source_paths"))
+    event_log_path = _path_from_text(source_paths.get("event_log_path"))
+    if event_log_path is None:
+        return {}
+    try:
+        event_log = read_event_log(event_log_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return {
+        str(event.get("event_id")): dict(event)
+        for event in event_log.get("events") or []
+        if isinstance(event, Mapping)
+        if _clean_text(event.get("event_id")) is not None
+    }
+
+
+def _human_selected_signals_from_learning_preview(preview: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source_paths = _mapping_dict(preview.get("source_paths"))
+    signal_log_path = _path_from_text(source_paths.get("signal_log_path"))
+    if signal_log_path is None:
+        return []
+    try:
+        return read_evaluation_signals(signal_log_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+
+def _human_selected_comparisons_from_learning_preview(preview: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source_paths = _mapping_dict(preview.get("source_paths"))
+    comparison_log_path = _path_from_text(source_paths.get("comparison_log_path"))
+    if comparison_log_path is None:
+        return []
+    try:
+        return read_evaluation_comparisons(comparison_log_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+
+def _human_selected_signal_traces_for_event(
+    *,
+    workspace_id: str,
+    event_id: str,
+    event: Mapping[str, Any] | None,
+    explicit_signals: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if event is not None:
+        return _learning_signals_for_event(
+            event_id=event_id,
+            event=event,
+            explicit_signals=explicit_signals,
+            workspace_id=workspace_id,
+        )
+    signals = [
+        dict(signal)
+        for signal in explicit_signals
+        if isinstance(signal, Mapping)
+        if _source_event_id(signal) == event_id
+    ]
+    deduped: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        signal_id = _clean_text(signal.get("signal_id")) or f"{event_id}:signal:{len(deduped)}"
+        deduped[signal_id] = signal
+    return [
+        _learning_signal_trace(signal)
+        for signal in _sort_signals(deduped.values())
+    ]
+
+
+def _human_selected_source_event_record(
+    *,
+    queue_item: Mapping[str, Any] | None,
+    supervised_candidate: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if queue_item is not None:
+        source_event = _mapping_dict(queue_item.get("source_event"))
+    elif supervised_candidate is not None:
+        source_event = _mapping_dict(supervised_candidate.get("source_event"))
+    else:
+        source_event = {}
+    source_record = copy.deepcopy(dict(source_event))
+    source_record.pop("prompt_excerpt", None)
+    source_record.pop("output_excerpt", None)
+    return source_record
+
+
+def _human_selected_evidence_summary(
+    *,
+    queue_item: Mapping[str, Any] | None,
+    supervised_candidate: Mapping[str, Any] | None,
+    excluded_candidate: Mapping[str, Any] | None,
+    signal_traces: Iterable[Mapping[str, Any]],
+    comparison_traces: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    curation = _mapping_dict(queue_item.get("curation")) if queue_item is not None else {}
+    if not curation and supervised_candidate is not None:
+        curation = _mapping_dict(supervised_candidate.get("curation"))
+    if not curation and excluded_candidate is not None:
+        curation = {
+            "state": _clean_text(excluded_candidate.get("state")),
+            "reasons": _string_list(excluded_candidate.get("reasons")),
+            "blocked_by": _string_list(excluded_candidate.get("blocked_by")),
+            "export_decision": _clean_text(excluded_candidate.get("export_decision")),
+        }
+    reasons = set(_string_list(curation.get("reasons")))
+    evidence = _mapping_dict(supervised_candidate.get("evidence")) if supervised_candidate is not None else {}
+    signal_items = [
+        signal
+        for signal in evidence.get("signals") or []
+        if isinstance(signal, Mapping)
+    ]
+    signal_items.extend(
+        signal
+        for signal in signal_traces
+        if isinstance(signal, Mapping)
+    )
+    signals_by_id: dict[str, dict[str, Any]] = {}
+    for index, signal in enumerate(signal_items):
+        signal_id = _clean_text(signal.get("signal_id")) or f"signal:{index}"
+        signals_by_id[signal_id] = dict(signal)
+    signals = list(signals_by_id.values())
+    comparison_items = [
+        comparison
+        for comparison in evidence.get("comparisons") or []
+        if isinstance(comparison, Mapping)
+    ]
+    comparison_items.extend(
+        comparison
+        for comparison in comparison_traces
+        if isinstance(comparison, Mapping)
+    )
+    comparisons_by_id: dict[str, dict[str, Any]] = {}
+    for index, comparison in enumerate(comparison_items):
+        comparison_id = _clean_text(comparison.get("comparison_id")) or f"comparison:{index}"
+        comparisons_by_id[comparison_id] = dict(comparison)
+    comparisons = list(comparisons_by_id.values())
+    signal_kinds = [
+        signal_kind
+        for signal in signals
+        if (signal_kind := _clean_text(signal.get("signal_kind"))) is not None
+    ]
+    signal_ids = [
+        signal_id
+        for signal in signals
+        if (signal_id := _clean_text(signal.get("signal_id"))) is not None
+    ]
+    comparison_roles = [
+        role
+        for comparison in comparisons
+        if (role := _clean_text(comparison.get("role"))) is not None
+    ]
+    comparison_ids = [
+        comparison_id
+        for comparison in comparisons
+        if (comparison_id := _clean_text(comparison.get("comparison_id"))) is not None
+    ]
+    has_winner_trace = any(
+        _clean_text(comparison.get("role")) == "winner"
+        and _clean_text(comparison.get("outcome")) == "winner_selected"
+        for comparison in comparisons
+    )
+    export_policy_confirmation = (
+        _mapping_dict(queue_item.get("export_policy_confirmation"))
+        if queue_item is not None
+        else _mapping_dict(_mapping_dict(supervised_candidate.get("review_queue")).get("export_policy_confirmation"))
+        if supervised_candidate is not None
+        else {}
+    )
+    return {
+        "curation_reasons": sorted(reasons),
+        "signal_kinds": signal_kinds,
+        "signal_ids": signal_ids,
+        "comparison_roles": comparison_roles,
+        "comparison_ids": comparison_ids,
+        "curation_reason_flags": {
+            "test_pass": "test_pass" in reasons,
+            "accepted": "accepted" in reasons,
+            "review_resolved": "review_resolved" in reasons,
+            "comparison_winner": "comparison_winner" in reasons,
+            "export_policy_confirmed": EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND in reasons,
+        },
+        "export_policy_confirmation_signal_id": _clean_text(export_policy_confirmation.get("latest_signal_id")),
+        "traceability": {
+            "test_pass": "test_pass" in signal_kinds,
+            "accepted": "acceptance" in signal_kinds,
+            "review_resolved": "review_resolved" in signal_kinds,
+            "comparison_winner": has_winner_trace,
+            "export_policy_confirmed": bool(export_policy_confirmation.get("confirmed")),
+        },
+    }
+
+
+def _human_selected_policy(
+    *,
+    queue_summary: Mapping[str, Any],
+    supervised_candidate: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    supervised_policy = (
+        _mapping_dict(supervised_candidate.get("policy"))
+        if supervised_candidate is not None
+        else {}
+    )
+    export_policy_confirmation = _mapping_dict(queue_summary.get("export_policy_confirmation"))
+    return {
+        "export_mode": "preview_only",
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "training_job_allowed": False,
+        "raw_log_export_allowed": False,
+        "export_policy_confirmed": bool(
+            supervised_policy.get("export_policy_confirmed")
+            or export_policy_confirmation.get("confirmed")
+        ),
+        "confirmation_signal_id": (
+            _clean_text(supervised_policy.get("confirmation_signal_id"))
+            or _clean_text(export_policy_confirmation.get("latest_signal_id"))
+        ),
+        "downstream_export_requires_separate_approval": True,
+    }
+
+
+def _human_selected_candidate_record(
+    *,
+    workspace_id: str,
+    event_id: str,
+    source_index: int,
+    queue_item: Mapping[str, Any] | None,
+    supervised_candidate: Mapping[str, Any] | None,
+    excluded_candidate: Mapping[str, Any] | None,
+    generated_at_utc: str,
+    selection_origin: str,
+    selection_rationale: str | None,
+    source_learning_preview_path: str | None,
+    learning_source_paths: Mapping[str, Any],
+    signal_traces: Iterable[Mapping[str, Any]],
+    comparison_traces: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    queue_summary = (
+        _learning_review_queue_summary(queue_item)
+        if queue_item is not None
+        else {
+            "queue_item_id": None,
+            "queue_state": "missing_from_learning_preview",
+            "queue_priority": {
+                "rank": 99,
+                "bucket": "missing_from_learning_preview",
+                "reason": "Selected event id was not present in the source learning preview.",
+            },
+            "next_action": "refresh_learning_preview_or_check_event_id",
+            "blocked_reason": "missing_learning_preview_candidate",
+            "blocked_reasons": ["missing_learning_preview_candidate"],
+            "eligible_for_supervised_candidate": False,
+            "excluded_by": ["missing_learning_preview_candidate"],
+            "lifecycle_summary": {
+                "source_state": "missing_from_learning_preview",
+                "test_state": "missing_trace",
+                "review_state": "unknown",
+                "selection_state": "missing_trace",
+                "policy_state": "unknown",
+                "supervised_text_state": "unknown",
+            },
+            "export_policy_confirmation": {
+                "confirmed": False,
+                "latest_signal_id": None,
+                "recorded_at_utc": None,
+                "origin": None,
+            },
+        }
+    )
+    supervised_candidate_id = (
+        _clean_text(supervised_candidate.get("candidate_id"))
+        if supervised_candidate is not None
+        else None
+    )
+    return {
+        "schema_name": HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_NAME,
+        "schema_version": HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_VERSION,
+        "selection_id": _stable_human_selected_candidate_id(workspace_id=workspace_id, event_id=event_id),
+        "workspace_id": workspace_id,
+        "event_id": event_id,
+        "source_index": source_index,
+        "selected_at_utc": generated_at_utc,
+        "selection": {
+            "origin": selection_origin,
+            "rationale": selection_rationale,
+            "selection_mode": "explicit_human_candidate_list",
+        },
+        "label": event_id,
+        "preview_membership": {
+            "in_review_queue": queue_item is not None,
+            "in_supervised_example_candidates": supervised_candidate is not None,
+            "in_excluded_candidates": excluded_candidate is not None,
+        },
+        "supervised_example_candidate_id": supervised_candidate_id,
+        "eligible_for_supervised_candidate": bool(queue_summary.get("eligible_for_supervised_candidate")),
+        "queue_state": _clean_text(queue_summary.get("queue_state")),
+        "queue_priority": copy.deepcopy(_mapping_dict(queue_summary.get("queue_priority"))),
+        "next_action": _clean_text(queue_summary.get("next_action")),
+        "blocked_reason": _clean_text(queue_summary.get("blocked_reason")),
+        "blocked_reasons": _string_list(queue_summary.get("blocked_reasons")),
+        "excluded_by": _string_list(queue_summary.get("excluded_by")),
+        "lifecycle_summary": copy.deepcopy(_mapping_dict(queue_summary.get("lifecycle_summary"))),
+        "export_policy_confirmation": copy.deepcopy(_mapping_dict(queue_summary.get("export_policy_confirmation"))),
+        "evidence_summary": _human_selected_evidence_summary(
+            queue_item=queue_item,
+            supervised_candidate=supervised_candidate,
+            excluded_candidate=excluded_candidate,
+            signal_traces=signal_traces,
+            comparison_traces=comparison_traces,
+        ),
+        "source_event": _human_selected_source_event_record(
+            queue_item=queue_item,
+            supervised_candidate=supervised_candidate,
+        ),
+        "source_paths": {
+            **copy.deepcopy(dict(learning_source_paths)),
+            "source_learning_preview_path": source_learning_preview_path,
+            **copy.deepcopy(_mapping_dict(supervised_candidate.get("source_paths")) if supervised_candidate is not None else {}),
+        },
+        "policy": _human_selected_policy(
+            queue_summary=queue_summary,
+            supervised_candidate=supervised_candidate,
+        ),
+    }
+
+
+def build_human_selected_candidate_list(
+    learning_preview: Mapping[str, Any],
+    *,
+    selected_event_ids: Iterable[str],
+    workspace_id: str | None = None,
+    rationale: str | None = None,
+    origin: str = "manual",
+    events_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    explicit_signals: Iterable[Mapping[str, Any]] | None = None,
+    comparisons: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    selected_ids = _normalize_human_selected_event_ids(selected_event_ids)
+    resolved_workspace_id = (
+        _clean_text(workspace_id)
+        or _clean_text(learning_preview.get("workspace_id"))
+        or DEFAULT_WORKSPACE_ID
+    )
+    generated_at_utc = timestamp_utc()
+    source_learning_preview_path = _human_selected_preview_source_path(learning_preview)
+    queue_by_event = _items_by_event_id(learning_preview.get("review_queue") or [])
+    supervised_by_event = _items_by_event_id(learning_preview.get("supervised_example_candidates") or [])
+    excluded_by_event = _items_by_event_id(learning_preview.get("excluded_candidates") or [])
+    source_paths = _mapping_dict(learning_preview.get("source_paths"))
+    resolved_events_by_id = (
+        {str(key): dict(value) for key, value in events_by_id.items()}
+        if events_by_id is not None
+        else {}
+    )
+    resolved_signals = (
+        [dict(signal) for signal in explicit_signals if isinstance(signal, Mapping)]
+        if explicit_signals is not None
+        else []
+    )
+    resolved_comparisons = (
+        [dict(comparison) for comparison in comparisons if isinstance(comparison, Mapping)]
+        if comparisons is not None
+        else []
+    )
+    selected_candidates = [
+        _human_selected_candidate_record(
+            workspace_id=resolved_workspace_id,
+            event_id=event_id,
+            source_index=index,
+            queue_item=queue_by_event.get(event_id),
+            supervised_candidate=supervised_by_event.get(event_id),
+            excluded_candidate=excluded_by_event.get(event_id),
+            generated_at_utc=generated_at_utc,
+            selection_origin=_clean_text(origin) or "manual",
+            selection_rationale=_clean_text(rationale),
+            source_learning_preview_path=source_learning_preview_path,
+            learning_source_paths=source_paths,
+            signal_traces=_human_selected_signal_traces_for_event(
+                workspace_id=resolved_workspace_id,
+                event_id=event_id,
+                event=resolved_events_by_id.get(event_id),
+                explicit_signals=resolved_signals,
+            ),
+            comparison_traces=_learning_comparisons_for_event(
+                event_id=event_id,
+                comparisons=resolved_comparisons,
+            ),
+        )
+        for index, event_id in enumerate(selected_ids)
+    ]
+    matched_candidates = [
+        candidate
+        for candidate in selected_candidates
+        if _mapping_dict(candidate.get("preview_membership")).get("in_review_queue")
+    ]
+    supervised_selected = [
+        candidate
+        for candidate in selected_candidates
+        if _mapping_dict(candidate.get("preview_membership")).get("in_supervised_example_candidates")
+    ]
+    missing_candidates = [
+        candidate
+        for candidate in selected_candidates
+        if not _mapping_dict(candidate.get("preview_membership")).get("in_review_queue")
+    ]
+    policy_confirmed_selected_count = sum(
+        1
+        for candidate in selected_candidates
+        if bool(_mapping_dict(candidate.get("policy")).get("export_policy_confirmed"))
+    )
+    preview_paths = _mapping_dict(learning_preview.get("paths"))
+    return {
+        "schema_name": HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME,
+        "schema_version": HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_VERSION,
+        "workspace_id": resolved_workspace_id,
+        "generated_at_utc": generated_at_utc,
+        "export_mode": "preview_only",
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "source_learning_preview_path": source_learning_preview_path,
+        "source_paths": {
+            **copy.deepcopy(dict(source_paths)),
+            "source_learning_preview_path": source_learning_preview_path,
+            "learning_preview_latest_path": _clean_text(preview_paths.get("learning_preview_latest_path")),
+            "learning_preview_run_path": _clean_text(preview_paths.get("learning_preview_run_path")),
+        },
+        "selection": {
+            "origin": _clean_text(origin) or "manual",
+            "rationale": _clean_text(rationale),
+            "selected_event_ids": selected_ids,
+            "selection_mode": "explicit_human_candidate_list",
+        },
+        "counts": {
+            "requested_candidate_count": len(selected_ids),
+            "selected_candidate_count": len(selected_candidates),
+            "matched_candidate_count": len(matched_candidates),
+            "missing_candidate_count": len(missing_candidates),
+            "selected_supervised_candidate_count": len(supervised_selected),
+            "selected_review_queue_count": len(matched_candidates),
+            "selected_not_supervised_candidate_count": len(selected_candidates) - len(supervised_selected),
+            "policy_confirmed_selected_count": policy_confirmed_selected_count,
+        },
+        "selected_candidates": selected_candidates,
+        "missing_candidates": missing_candidates,
+        "export_policy": {
+            "mode": "preview_only",
+            "human_gate_required": True,
+            "training_export_ready": False,
+            "training_job_allowed": False,
+            "raw_log_export_allowed": False,
+            "jsonl_training_export_allowed": False,
+            "selection_does_not_promote_candidate": True,
+            "downstream_export_requires_separate_approval": True,
+        },
+        "notes": [
+            "Human selection is recorded as an inspection artifact only.",
+            "This artifact does not create a trainable dataset or promote unready candidates.",
+            "Raw logs and supervised example text are not copied into the selected-candidate list.",
+        ],
+    }
+
+
+def record_human_selected_candidate_list(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    selected_event_ids: Iterable[str],
+    learning_preview: Mapping[str, Any] | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+    curation_preview: Mapping[str, Any] | None = None,
+    curation_filters: Mapping[str, Any] | None = None,
+    learning_limit: int | None = None,
+    rationale: str | None = None,
+    origin: str = "manual",
+) -> tuple[dict[str, Any], Path, Path]:
+    resolved_root = _resolve_root(root)
+    source_learning_preview = learning_preview
+    if source_learning_preview is None:
+        source_learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+            root=resolved_root,
+            workspace_id=workspace_id,
+            snapshot=snapshot,
+            curation_preview=curation_preview,
+            curation_filters=curation_filters,
+            limit=learning_limit,
+        )
+    elif not _learning_preview_artifact_is_readable(source_learning_preview):
+        source_learning_preview = _record_supplied_learning_preview(
+            source_learning_preview,
+            root=resolved_root,
+            workspace_id=workspace_id,
+        )
+    payload = build_human_selected_candidate_list(
+        source_learning_preview,
+        workspace_id=workspace_id,
+        selected_event_ids=selected_event_ids,
+        rationale=rationale,
+        origin=origin,
+        events_by_id=_human_selected_events_by_id_from_learning_preview(source_learning_preview),
+        explicit_signals=_human_selected_signals_from_learning_preview(source_learning_preview),
+        comparisons=_human_selected_comparisons_from_learning_preview(source_learning_preview),
+    )
+    latest_path = human_selected_candidates_latest_path(workspace_id=workspace_id, root=resolved_root)
+    run_path = human_selected_candidates_run_path(workspace_id=workspace_id, root=resolved_root)
+    payload["paths"] = {
+        "human_selected_latest_path": str(latest_path),
+        "human_selected_run_path": str(run_path),
+        "source_learning_preview_path": _clean_text(payload.get("source_learning_preview_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload, latest_path, run_path
+
+
 def _curation_preview_artifact_path(preview: Mapping[str, Any]) -> str | None:
     paths = _mapping_dict(preview.get("paths"))
     return (
@@ -2636,6 +3247,46 @@ def _record_supplied_curation_preview(
     write_json(run_path, payload)
     write_json(latest_path, payload)
     return payload
+
+
+def format_human_selected_candidate_list_report(selection: Mapping[str, Any]) -> str:
+    counts = _mapping_dict(selection.get("counts"))
+    paths = _mapping_dict(selection.get("paths"))
+    lines = [
+        "Human-selected candidate list: preview_only",
+        f"Requested: {int(counts.get('requested_candidate_count') or 0)}",
+        f"Matched: {int(counts.get('matched_candidate_count') or 0)}",
+        f"Selected supervised: {int(counts.get('selected_supervised_candidate_count') or 0)}",
+        f"Missing: {int(counts.get('missing_candidate_count') or 0)}",
+        f"Policy confirmed: {int(counts.get('policy_confirmed_selected_count') or 0)}",
+        "Training export ready: no",
+        "Human gate: required",
+    ]
+    if paths.get("human_selected_latest_path"):
+        lines.append(f"Selection: {paths['human_selected_latest_path']}")
+    candidates = [
+        item
+        for item in selection.get("selected_candidates") or []
+        if isinstance(item, Mapping)
+    ]
+    if candidates:
+        lines.extend(("", "Selected candidates:"))
+        for item in candidates[:5]:
+            label = _single_line_report_label(
+                _clean_text(item.get("label"))
+                or _clean_text(item.get("event_id"))
+                or "candidate"
+            )
+            state = _clean_text(item.get("queue_state")) or "missing_from_learning_preview"
+            next_action = _clean_text(item.get("next_action")) or "review_candidate"
+            supervised = "yes" if _clean_text(item.get("supervised_example_candidate_id")) else "no"
+            policy = _mapping_dict(item.get("policy"))
+            policy_state = "confirmed" if policy.get("export_policy_confirmed") else "pending"
+            lines.append(
+                f"- {state}: {label} "
+                f"(supervised={supervised}; policy={policy_state}; next={next_action})"
+            )
+    return "\n".join(lines)
 
 
 def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
