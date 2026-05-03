@@ -16,6 +16,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
 from evaluation_loop import (  # noqa: E402
+    EVALUATION_SIGNAL_SCHEMA_NAME,
+    EVALUATION_SIGNAL_SCHEMA_VERSION,
     append_evaluation_comparison,
     append_evaluation_signal,
     build_evaluation_comparison,
@@ -28,6 +30,7 @@ from evaluation_loop import (  # noqa: E402
     format_evaluation_snapshot_report,
     format_learning_dataset_preview_report,
     record_curation_export_preview,
+    record_export_policy_confirmation_signal,
     record_review_resolution_signal,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
@@ -434,6 +437,249 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("Learning review queue:", report)
         self.assertIn("next=confirm_export_policy", report)
         self.assertIn("blocking_or_noisy_signal", learning_preview["counts"]["exclusion_reasons"])
+
+    def test_export_policy_confirmation_signal_marks_preview_without_training_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                rationale="The passing result is accepted for preview inspection.",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                accepted_signal,
+                workspace_id="local-default",
+            )
+            policy_signal = record_export_policy_confirmation_signal(
+                root=root,
+                source_event_id=event_id,
+                rationale="Human confirmed the preview-only export policy.",
+                origin="test",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            curation_candidate = [
+                item
+                for item in curation_preview["candidates"]
+                if item["event_id"] == event_id
+            ][0]
+            checklist_by_key = {
+                item["key"]: item
+                for item in curation_candidate["adoption_checklist"]
+            }
+            candidate = learning_preview["supervised_example_candidates"][0]
+            signal_kinds = {
+                signal["signal_kind"]
+                for signal in candidate["evidence"]["signals"]
+            }
+
+        self.assertEqual(policy_signal["signal_kind"], "export_policy_confirmed")
+        self.assertEqual(policy_signal["origin"], "test")
+        self.assertEqual(policy_signal["evidence"]["export_mode"], "preview_only")
+        self.assertFalse(policy_signal["evidence"]["training_export_ready"])
+        self.assertTrue(policy_signal["evidence"]["human_gate_required"])
+        self.assertFalse(policy_signal["evidence"]["training_job_allowed"])
+        self.assertFalse(policy_signal["evidence"]["raw_log_export_allowed"])
+        self.assertEqual(snapshot["counts"]["export_policy_confirmed"], 1)
+        self.assertIn("Export policy confirmed: 1", format_evaluation_snapshot_report(snapshot))
+        self.assertIn("export_policy_confirmed", curation_candidate["reasons"])
+        self.assertEqual(checklist_by_key["export_policy_confirmed"]["status"], "done")
+        self.assertEqual(
+            curation_preview["adoption_checklist_counts"]["export_policy_confirmed"]["done"],
+            1,
+        )
+        self.assertEqual(curation_candidate["required_next_steps"], ["review_downstream_export_policy"])
+        self.assertEqual(learning_preview["export_mode"], "preview_only")
+        self.assertFalse(learning_preview["training_export_ready"])
+        self.assertTrue(learning_preview["human_gate_required"])
+        self.assertEqual(learning_preview["counts"]["policy_confirmed_candidate_count"], 1)
+        self.assertIn("export_policy_confirmed", signal_kinds)
+        self.assertEqual(candidate["review_queue"]["next_action"], "review_downstream_export_policy")
+        self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_confirmed")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["policy_state"], "confirmed")
+        self.assertTrue(candidate["review_queue"]["export_policy_confirmation"]["confirmed"])
+        self.assertTrue(candidate["policy"]["export_policy_confirmed"])
+        self.assertEqual(candidate["policy"]["confirmation_signal_id"], policy_signal["signal_id"])
+        self.assertFalse(candidate["policy"]["training_job_allowed"])
+        self.assertFalse(candidate["policy"]["raw_log_export_allowed"])
+
+    def test_export_policy_confirmation_alone_does_not_create_supervised_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            policy_signal = record_export_policy_confirmation_signal(
+                root=root,
+                source_event_id=event_id,
+                rationale="Policy was confirmed before selection evidence existed.",
+                origin="test",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            curation_candidate = [
+                item
+                for item in curation_preview["candidates"]
+                if item["event_id"] == event_id
+            ][0]
+            excluded = [
+                item
+                for item in learning_preview["excluded_candidates"]
+                if item["event_id"] == event_id
+            ][0]
+
+        self.assertEqual(policy_signal["signal_kind"], "export_policy_confirmed")
+        self.assertEqual(curation_candidate["state"], "needs_review")
+        self.assertIn("export_policy_confirmed", curation_candidate["reasons"])
+        self.assertIn("needs_human_selection", curation_candidate["reasons"])
+        self.assertEqual(learning_preview["supervised_example_candidates"], [])
+        self.assertIn("state_not_ready", excluded["excluded_by"])
+        self.assertIn("missing_human_or_comparison_selection", excluded["excluded_by"])
+        self.assertEqual(excluded["lifecycle_summary"]["policy_state"], "confirmed_but_not_ready")
+        self.assertFalse(learning_preview["training_export_ready"])
+
+    def test_export_policy_confirmation_evidence_is_canonicalized_for_direct_signals(self) -> None:
+        event = {
+            "event_id": "unsafe-policy-evidence-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep policy confirmation safe.",
+                "output_text": "The policy evidence remains preview-only.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_policy",
+                    "pass_definition": "Policy confirmation does not permit training export.",
+                },
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="unsafe-policy-evidence-candidate",
+            source_event=event,
+        )
+        unsafe_policy_signal = {
+            "schema_name": EVALUATION_SIGNAL_SCHEMA_NAME,
+            "schema_version": EVALUATION_SIGNAL_SCHEMA_VERSION,
+            "signal_id": "local-default:eval:unsafe-policy",
+            "workspace_id": "local-default",
+            "signal_kind": "export_policy_confirmed",
+            "polarity": "neutral",
+            "recorded_at_utc": "2026-04-01T00:02:00+00:00",
+            "origin": "test",
+            "source": {"source_event_id": "unsafe-policy-evidence-candidate"},
+            "relation": {},
+            "evidence": {
+                "export_mode": "training_jsonl",
+                "training_export_ready": True,
+                "human_gate_required": False,
+                "training_job_allowed": True,
+                "raw_log_export_allowed": True,
+            },
+            "tags": [],
+        }
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "unsafe-policy-evidence-candidate",
+                        "state": "ready",
+                        "label": "Unsafe policy evidence candidate",
+                        "reasons": ["accepted", "test_pass", "export_policy_confirmed"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"unsafe-policy-evidence-candidate": event},
+            explicit_signals=[accepted_signal, unsafe_policy_signal],
+            comparisons=[],
+        )
+        candidate = preview["supervised_example_candidates"][0]
+        policy_evidence = candidate["review_queue"]["export_policy_confirmation"]["evidence"]
+
+        self.assertEqual(policy_evidence["export_mode"], "preview_only")
+        self.assertFalse(policy_evidence["training_export_ready"])
+        self.assertTrue(policy_evidence["human_gate_required"])
+        self.assertFalse(policy_evidence["training_job_allowed"])
+        self.assertFalse(policy_evidence["raw_log_export_allowed"])
+        self.assertFalse(candidate["policy"]["training_job_allowed"])
+
+    def test_learning_preview_does_not_trust_stale_policy_confirmation_reason(self) -> None:
+        event = {
+            "event_id": "stale-policy-reason-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep stale policy reasons traceable.",
+                "output_text": "Missing policy signal should not become a silent confirmation.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_policy_trace",
+                    "pass_definition": "Derived test pass remains traceable.",
+                },
+            },
+            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+        }
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="stale-policy-reason-candidate",
+            source_event=event,
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "stale-policy-reason-candidate",
+                        "state": "ready",
+                        "label": "Stale policy reason candidate",
+                        "reasons": ["accepted", "test_pass", "export_policy_confirmed"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"stale-policy-reason-candidate": event},
+            explicit_signals=[accepted_signal],
+            comparisons=[],
+        )
+        candidate = preview["supervised_example_candidates"][0]
+
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["policy_state"], "missing_trace")
+        self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
+        self.assertFalse(candidate["review_queue"]["export_policy_confirmation"]["confirmed"])
+        self.assertFalse(candidate["policy"]["export_policy_confirmed"])
 
     def test_learning_preview_excludes_test_pass_without_selection_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1389,6 +1635,84 @@ class EvaluationLoopTests(unittest.TestCase):
         )
         self.assertTrue(preview_latest_exists)
         self.assertTrue(source_curation_exists)
+
+    def test_cli_confirms_export_policy_without_unlocking_training_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                build_evaluation_signal(
+                    signal_kind="acceptance",
+                    source_event_id=event_id,
+                    rationale="Accepted before policy confirmation.",
+                ),
+                workspace_id="local-default",
+            )
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--confirm-export-policy",
+                    "--source-event-id",
+                    event_id,
+                    "--rationale",
+                    "Operator confirmed preview-only policy.",
+                    "--learning-preview",
+                    "--format",
+                    "json",
+                ],
+            ), redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+            candidate = payload["learning_preview"]["supervised_example_candidates"][0]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["recorded_signal"]["signal_kind"], "export_policy_confirmed")
+        self.assertEqual(payload["recorded_signal"]["evidence"]["export_mode"], "preview_only")
+        self.assertFalse(payload["recorded_signal"]["evidence"]["training_job_allowed"])
+        self.assertEqual(payload["snapshot"]["counts"]["export_policy_confirmed"], 1)
+        self.assertFalse(payload["learning_preview"]["training_export_ready"])
+        self.assertTrue(payload["learning_preview"]["human_gate_required"])
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["policy_state"], "confirmed")
+        self.assertEqual(candidate["review_queue"]["next_action"], "review_downstream_export_policy")
+        self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_confirmed")
+
+    def test_cli_record_signal_export_policy_uses_preview_only_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--record-signal",
+                    "--signal-kind",
+                    "export_policy_confirmed",
+                    "--source-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                    "--format",
+                    "json",
+                ],
+            ), redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+            evidence = payload["recorded_signal"]["evidence"]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["recorded_signal"]["signal_kind"], "export_policy_confirmed")
+        self.assertEqual(evidence["export_mode"], "preview_only")
+        self.assertFalse(evidence["training_export_ready"])
+        self.assertTrue(evidence["human_gate_required"])
+        self.assertFalse(evidence["training_job_allowed"])
+        self.assertFalse(evidence["raw_log_export_allowed"])
 
     def test_cli_records_comparison_and_prints_json_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

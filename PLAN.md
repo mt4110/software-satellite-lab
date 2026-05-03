@@ -432,6 +432,7 @@ Current baseline:
 
 - learning dataset preview remains `preview_only`, human-gated, and downstream of evaluation/curation evidence
 - `review_queue` records every source curation candidate as a typed inspection item with queue state, priority, next action, blocked reason, and lifecycle summary
+- `export_policy_confirmed` records human export-policy confirmation as explicit file-first evidence without enabling trainable export
 - supervised candidates are still limited to test-passing work with accepted, review-resolved, or comparison-winner evidence
 - rejected, unresolved, noisy, failed, missing-source, and missing-text candidates stay out of supervised examples while preserving exclusion reasons for review
 
