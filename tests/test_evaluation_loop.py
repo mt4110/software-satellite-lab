@@ -646,7 +646,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("missing_learning_preview_candidate", selected["excluded_by"])
         self.assertFalse(preview["training_export_ready"])
 
-    def test_human_selected_candidate_list_persists_unreadable_supplied_learning_preview(self) -> None:
+    def test_human_selected_candidate_list_persists_missing_supplied_learning_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             supplied_preview = {
@@ -669,6 +669,61 @@ class EvaluationLoopTests(unittest.TestCase):
 
         self.assertTrue(source_learning_preview_exists)
         self.assertNotEqual(source_learning_preview_path.name, "missing-learning-preview.json")
+        self.assertFalse(selection["training_export_ready"])
+
+    def test_human_selected_candidate_list_persists_unreadable_supplied_learning_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unreadable_path = root / "unreadable-learning-preview.json"
+            unreadable_path.write_text("{}", encoding="utf-8")
+            supplied_preview = {
+                "workspace_id": "local-default",
+                "paths": {
+                    "learning_preview_run_path": str(unreadable_path),
+                },
+                "review_queue": [],
+                "supervised_example_candidates": [],
+                "excluded_candidates": [],
+            }
+            with patch.object(Path, "is_file", side_effect=OSError("permission denied")):
+                selection, _latest_path, _run_path = record_human_selected_candidate_list(
+                    root=root,
+                    learning_preview=supplied_preview,
+                    selected_event_ids=["local-default:missing-selection"],
+                    origin="test",
+                )
+            source_learning_preview_path = Path(str(selection["source_learning_preview_path"]))
+            source_learning_preview_exists = source_learning_preview_path.exists()
+
+        self.assertTrue(source_learning_preview_exists)
+        self.assertNotEqual(source_learning_preview_path.name, "unreadable-learning-preview.json")
+        self.assertFalse(selection["training_export_ready"])
+
+    def test_human_selected_candidate_list_persists_invalid_supplied_learning_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            invalid_path = root / "invalid-learning-preview.json"
+            invalid_path.write_text("{not-json", encoding="utf-8")
+            supplied_preview = {
+                "workspace_id": "local-default",
+                "paths": {
+                    "learning_preview_run_path": str(invalid_path),
+                },
+                "review_queue": [],
+                "supervised_example_candidates": [],
+                "excluded_candidates": [],
+            }
+            selection, _latest_path, _run_path = record_human_selected_candidate_list(
+                root=root,
+                learning_preview=supplied_preview,
+                selected_event_ids=["local-default:missing-selection"],
+                origin="test",
+            )
+            source_learning_preview_path = Path(str(selection["source_learning_preview_path"]))
+            source_learning_preview_exists = source_learning_preview_path.exists()
+
+        self.assertTrue(source_learning_preview_exists)
+        self.assertNotEqual(source_learning_preview_path.name, "invalid-learning-preview.json")
         self.assertFalse(selection["training_export_ready"])
 
     def test_export_policy_confirmation_rejects_relation_links(self) -> None:

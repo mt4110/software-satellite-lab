@@ -2646,7 +2646,20 @@ def _learning_preview_artifact_path(preview: Mapping[str, Any]) -> str | None:
 
 def _learning_preview_artifact_is_readable(preview: Mapping[str, Any]) -> bool:
     artifact_path = _path_from_text(_learning_preview_artifact_path(preview))
-    return artifact_path is not None and artifact_path.exists()
+    if artifact_path is None:
+        return False
+    try:
+        if not artifact_path.is_file():
+            return False
+        with artifact_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("schema_name") == LEARNING_DATASET_PREVIEW_SCHEMA_NAME
+        and payload.get("schema_version") == LEARNING_DATASET_PREVIEW_SCHEMA_VERSION
+    )
 
 
 def _record_supplied_learning_preview(
@@ -2689,11 +2702,7 @@ def _stable_human_selected_candidate_id(*, workspace_id: str, event_id: str) -> 
 
 
 def _human_selected_preview_source_path(learning_preview: Mapping[str, Any]) -> str | None:
-    paths = _mapping_dict(learning_preview.get("paths"))
-    return (
-        _clean_text(paths.get("learning_preview_run_path"))
-        or _clean_text(paths.get("learning_preview_latest_path"))
-    )
+    return _learning_preview_artifact_path(learning_preview)
 
 
 def _items_by_event_id(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
