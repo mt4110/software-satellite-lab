@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
 from memory_index import rebuild_memory_index
-from software_work_events import read_event_log
+from software_work_events import build_event_contract_check, build_event_contract_report, read_event_log
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
@@ -81,6 +81,13 @@ CURATION_BLOCKING_REASONS = {"rejected", "review_unresolved", "test_fail", "fail
 LEARNING_BLOCKING_REASONS = CURATION_BLOCKING_REASONS | {"noisy", "unresolved"}
 LEARNING_SELECTION_REASONS = {"accepted", "review_resolved", "comparison_winner"}
 LEARNING_REVIEW_QUEUE_STATES = ("blocked", "missing_source", "missing_supervised_text", "ready", "needs_review")
+LEARNING_MISSING_SOURCE_EXCLUSIONS = {
+    "missing_source_event",
+    "missing_source_artifact_path",
+    "missing_source_artifact",
+    "unreadable_source_artifact",
+    "source_artifact_not_durable",
+}
 
 PASS_QUALITY_STATUSES = {"pass", "passed", "quality_pass"}
 FAIL_QUALITY_STATUSES = {"fail", "failed", "quality_fail"}
@@ -1089,6 +1096,7 @@ def build_evaluation_snapshot(
     event_log_path = Path(resolved_index_summary["event_log_path"])
     event_log = read_event_log(event_log_path)
     events = [dict(event) for event in event_log.get("events") or [] if isinstance(event, Mapping)]
+    event_contract = build_event_contract_report(events, root=resolved_root)
     events_by_id = {
         str(event.get("event_id")): event
         for event in events
@@ -1188,6 +1196,10 @@ def build_evaluation_snapshot(
             "curation_ready": int(curation_state_counts.get("ready", 0)),
             "curation_needs_review": int(curation_state_counts.get("needs_review", 0)),
             "curation_blocked": int(curation_state_counts.get("blocked", 0)),
+            "event_contract_failed": int(event_contract.get("failed_event_count") or 0),
+            "event_contract_missing_source": int(
+                _mapping_dict(event_contract.get("source_status_counts")).get("missing_source") or 0
+            ),
         },
         "recent_signals": signal_summaries[:12],
         "comparisons": comparison_summaries[:12],
@@ -1202,6 +1214,7 @@ def build_evaluation_snapshot(
             "candidates": curation_candidates,
         },
         "index_summary": resolved_index_summary,
+        "event_contract": event_contract,
     }
 
 
@@ -1644,6 +1657,22 @@ def _learning_source_paths(
     }
 
 
+def _learning_contract_root(source_paths: Mapping[str, Any]) -> Path | None:
+    event_log_path = _path_from_text(source_paths.get("event_log_path"))
+    if (
+        event_log_path is not None
+        and event_log_path.parent.name == "event_logs"
+        and event_log_path.parent.parent.name == "artifacts"
+    ):
+        return event_log_path.parent.parent.parent
+    source_snapshot_path = _path_from_text(source_paths.get("source_snapshot_path"))
+    if source_snapshot_path is not None:
+        for parent in source_snapshot_path.parents:
+            if parent.name == "artifacts":
+                return parent.parent
+    return None
+
+
 def _read_events_by_id_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     paths = _mapping_dict(snapshot.get("paths"))
     event_log_path = _path_from_text(paths.get("event_log_path"))
@@ -1939,6 +1968,11 @@ def _learning_candidate_blocked_reasons(
     ordered_reasons: list[str] = []
     for reason in (
         "missing_source_event",
+        "missing_source_artifact_path",
+        "source_artifact_not_durable",
+        "missing_source_artifact",
+        "unreadable_source_artifact",
+        "invalid_event_contract",
         "missing_supervised_text",
         "review_unresolved",
         "test_fail",
@@ -1971,7 +2005,7 @@ def _learning_queue_state(
     blocked_reasons: Iterable[str],
 ) -> str:
     exclusions = set(_string_list(list(excluded_by)))
-    if "missing_source_event" in exclusions:
+    if exclusions & LEARNING_MISSING_SOURCE_EXCLUSIONS:
         return "missing_source"
     if "missing_supervised_text" in exclusions:
         return "missing_supervised_text"
@@ -2047,6 +2081,14 @@ def _learning_next_action(
     policy_confirmed = bool(_mapping_dict(policy_confirmation).get("confirmed"))
     if "missing_source_event" in exclusions:
         return "restore_source_event"
+    if "missing_source_artifact_path" in exclusions:
+        return "record_source_artifact_path"
+    if exclusions & {"missing_source_artifact", "source_artifact_not_durable"}:
+        return "restore_source_artifact"
+    if "unreadable_source_artifact" in exclusions:
+        return "restore_readable_source_artifact"
+    if "invalid_event_contract" in exclusions:
+        return "repair_event_contract"
     if "missing_supervised_text" in exclusions:
         return "restore_instruction_or_response_excerpt"
     if "review_unresolved" in blocked:
@@ -2083,12 +2125,17 @@ def _learning_lifecycle_summary(
     event: Mapping[str, Any] | None,
     excluded_by: Iterable[str],
     policy_confirmation: Mapping[str, Any],
+    source_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons = set(_string_list(candidate.get("reasons")))
     exclusions = set(_string_list(list(excluded_by)))
+    missing_source = bool(exclusions & LEARNING_MISSING_SOURCE_EXCLUSIONS)
+    missing_source_event = "missing_source_event" in exclusions
     policy_confirmed = bool(_mapping_dict(policy_confirmation).get("confirmed"))
     outcome = _mapping_dict(event.get("outcome")) if event is not None else {}
-    if "missing_source_event" in exclusions:
+    source_artifact = _mapping_dict(_mapping_dict(source_contract).get("source_artifact"))
+    source_artifact_state = _clean_text(source_artifact.get("source_status"))
+    if missing_source_event:
         test_state = "missing_trace"
     elif "test_fail_trace" in exclusions:
         test_state = "failed"
@@ -2100,7 +2147,7 @@ def _learning_lifecycle_summary(
         test_state = "passed"
     else:
         test_state = "missing"
-    if "missing_source_event" in exclusions:
+    if missing_source_event:
         review_state = "unknown"
     elif "review_unresolved_trace" in exclusions:
         review_state = "unresolved"
@@ -2112,7 +2159,7 @@ def _learning_lifecycle_summary(
         review_state = "resolved"
     else:
         review_state = "not_recorded"
-    if "missing_source_event" in exclusions:
+    if missing_source_event:
         selection_state = "missing_trace"
     elif "rejected_trace" in exclusions:
         selection_state = "rejected"
@@ -2142,7 +2189,14 @@ def _learning_lifecycle_summary(
         supervised_text_state = "unknown"
     return {
         "curation_state": _clean_text(candidate.get("state")) or "needs_review",
-        "source_state": "available" if event is not None else "missing",
+        "source_state": (
+            "missing_source"
+            if missing_source
+            else "available"
+            if event is not None
+            else "missing"
+        ),
+        "source_artifact_state": source_artifact_state,
         "test_state": test_state,
         "review_state": review_state,
         "selection_state": selection_state,
@@ -2160,6 +2214,7 @@ def _learning_review_queue_item(
     event: Mapping[str, Any] | None,
     excluded_by: Iterable[str],
     policy_confirmation: Mapping[str, Any],
+    source_contract: Mapping[str, Any] | None = None,
     source_index: int,
 ) -> dict[str, Any]:
     event_id = _clean_text(candidate.get("event_id"))
@@ -2221,8 +2276,10 @@ def _learning_review_queue_item(
             event=event,
             excluded_by=exclusions,
             policy_confirmation=policy_confirmation,
+            source_contract=source_contract,
         ),
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(policy_confirmation)),
+        "event_contract": copy.deepcopy(_mapping_dict(source_contract)),
         "source_event": source_event,
         "curation": {
             "state": _clean_text(effective_curation.get("state")) or "needs_review",
@@ -2248,6 +2305,7 @@ def _learning_review_queue_summary(item: Mapping[str, Any]) -> dict[str, Any]:
         "excluded_by": _string_list(item.get("excluded_by")),
         "lifecycle_summary": copy.deepcopy(_mapping_dict(item.get("lifecycle_summary"))),
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(item.get("export_policy_confirmation"))),
+        "event_contract": copy.deepcopy(_mapping_dict(item.get("event_contract"))),
     }
 
 
@@ -2270,6 +2328,30 @@ def _learning_candidate_exclusions(candidate: Mapping[str, Any]) -> list[str]:
     if not (reasons & LEARNING_SELECTION_REASONS):
         exclusions.append("missing_human_or_comparison_selection")
     return exclusions
+
+
+def _learning_source_contract_exclusions(source_contract: Mapping[str, Any]) -> list[str]:
+    contract_status = _clean_text(source_contract.get("contract_status"))
+    source_artifact = _mapping_dict(source_contract.get("source_artifact"))
+    source_reasons = set(_string_list(source_artifact.get("reasons")))
+    exclusions: list[str] = []
+    if "missing_source_artifact_path" in source_reasons:
+        exclusions.append("missing_source_artifact_path")
+    if "source_artifact_outside_workspace" in source_reasons:
+        exclusions.append("source_artifact_not_durable")
+    if "source_artifact_missing" in source_reasons:
+        exclusions.append("missing_source_artifact")
+    if source_reasons & {"source_artifact_not_file", "source_artifact_unreadable"}:
+        exclusions.append("unreadable_source_artifact")
+    if contract_status == "invalid_event_contract":
+        exclusions.append("invalid_event_contract")
+    return exclusions
+
+
+def _event_has_source_artifact_path(event: Mapping[str, Any]) -> bool:
+    source_refs = _mapping_dict(event.get("source_refs"))
+    artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    return _clean_text(artifact_ref.get("artifact_path")) is not None
 
 
 def _learning_traceability_exclusions(
@@ -2383,6 +2465,7 @@ def _learning_excluded_candidate(
         "eligible_for_supervised_candidate": queue_summary["eligible_for_supervised_candidate"],
         "lifecycle_summary": queue_summary["lifecycle_summary"],
         "export_policy_confirmation": queue_summary["export_policy_confirmation"],
+        "event_contract": queue_summary["event_contract"],
     }
 
 
@@ -2402,6 +2485,9 @@ def _build_supervised_example_candidate(
     source_refs = _mapping_dict(event.get("source_refs"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
     queue_summary = _learning_review_queue_summary(queue_item)
+    event_contract = _mapping_dict(queue_summary.get("event_contract"))
+    contract_source_artifact = _mapping_dict(event_contract.get("source_artifact"))
+    contract_source_artifact_reasons = _string_list(contract_source_artifact.get("reasons"))
     export_policy_confirmation = _mapping_dict(queue_summary.get("export_policy_confirmation"))
     effective_curation = _mapping_dict(queue_item.get("curation"))
     return {
@@ -2427,11 +2513,16 @@ def _build_supervised_example_candidate(
         },
         "backend_metadata": _learning_backend_metadata(event),
         "review_queue": queue_summary,
+        "event_contract": queue_summary["event_contract"],
         "source_paths": {
             **copy.deepcopy(dict(source_paths)),
             "source_artifact_path": _clean_text(artifact_ref.get("artifact_path")),
             "source_artifact_workspace_relative_path": _clean_text(
                 artifact_ref.get("artifact_workspace_relative_path")
+            ),
+            "source_artifact_state": _clean_text(contract_source_artifact.get("source_status")),
+            "source_artifact_reason": (
+                contract_source_artifact_reasons[0] if contract_source_artifact_reasons else None
             ),
         },
         "policy": {
@@ -2484,6 +2575,7 @@ def build_learning_dataset_preview(
         for candidate in curation_preview.get("candidates") or []
         if isinstance(candidate, Mapping)
     ]
+    contract_root = _learning_contract_root(source_paths)
     eligible_candidates: list[dict[str, Any]] = []
     excluded_candidates: list[dict[str, Any]] = []
     review_queue: list[dict[str, Any]] = []
@@ -2491,12 +2583,16 @@ def build_learning_dataset_preview(
         event_id = _clean_text(candidate.get("event_id"))
         exclusions = _learning_candidate_exclusions(candidate)
         event = resolved_events_by_id.get(event_id) if event_id is not None else None
+        source_contract: dict[str, Any] | None = None
         signal_traces: list[dict[str, Any]] = []
         comparison_traces: list[dict[str, Any]] = []
         policy_confirmation: dict[str, Any] = _learning_policy_confirmation_trace([])
         if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
+            if contract_root is not None or _event_has_source_artifact_path(event):
+                source_contract = build_event_contract_check(event, root=contract_root)
+                exclusions.extend(_learning_source_contract_exclusions(source_contract))
             supervised_example = _learning_supervised_example(event)
             missing_instruction = _clean_text(supervised_example.get("instruction")) is None
             missing_response = _clean_text(supervised_example.get("response")) is None
@@ -2528,6 +2624,7 @@ def build_learning_dataset_preview(
             event=event,
             excluded_by=exclusions,
             policy_confirmation=policy_confirmation,
+            source_contract=source_contract,
             source_index=source_index,
         )
         review_queue.append(queue_item)
@@ -4063,6 +4160,8 @@ def format_evaluation_snapshot_report(snapshot: Mapping[str, Any]) -> str:
         f"Follow-up links: {int(counts.get('follow_up_links') or 0)}",
         f"Comparisons: {int(counts.get('comparisons') or 0)}",
         f"Curation ready: {int(counts.get('curation_ready') or 0)}",
+        f"Event contract failed: {int(counts.get('event_contract_failed') or 0)}",
+        f"Event contract missing source: {int(counts.get('event_contract_missing_source') or 0)}",
         f"Addressed failures: {int(counts.get('addressed_failures') or 0)}",
         f"Pending failures: {int(counts.get('pending_failures') or 0)}",
     ]

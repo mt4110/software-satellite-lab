@@ -13,6 +13,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 from software_work_events import (  # noqa: E402
     EVENT_LOG_SCHEMA_NAME,
     EVENT_SCHEMA_NAME,
+    build_event_contract_check,
+    build_event_contract_report,
     iter_capability_matrix_events,
     iter_workspace_events,
     read_event_log,
@@ -189,6 +191,42 @@ class SoftwareWorkEventTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0]["path"], str(broken_path.resolve()))
         self.assertIn("JSONDecodeError", errors[0]["error"])
+
+    def test_event_contract_check_reports_missing_and_readable_source_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            readable_path = root / "artifacts" / "text" / "chat.json"
+            readable_path.parent.mkdir(parents=True, exist_ok=True)
+            readable_path.write_text("{}", encoding="utf-8")
+            readable_event = {
+                "event_id": "local-default:session:readable",
+                "event_kind": "chat_turn",
+                "outcome": {"status": "ok"},
+                "source_refs": {
+                    "artifact_ref": {"artifact_path": str(readable_path)}
+                },
+            }
+            missing_event = {
+                "event_id": "local-default:session:missing",
+                "event_kind": "chat_turn",
+                "outcome": {"status": "ok"},
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_path": str(root / "artifacts" / "text" / "missing.json")
+                    }
+                },
+            }
+
+            readable_check = build_event_contract_check(readable_event, root=root)
+            missing_check = build_event_contract_check(missing_event, root=root)
+            report = build_event_contract_report([readable_event, missing_event], root=root)
+
+        self.assertEqual(readable_check["contract_status"], "ok")
+        self.assertEqual(readable_check["source_artifact"]["source_status"], "readable")
+        self.assertEqual(missing_check["contract_status"], "missing_source")
+        self.assertIn("source_artifact_missing", missing_check["source_artifact"]["reasons"])
+        self.assertEqual(report["failed_event_count"], 1)
+        self.assertEqual(report["source_status_counts"]["missing_source"], 1)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from agent_lane import agent_run_log_path, read_agent_runs
 from artifact_schema import read_artifact
@@ -25,6 +25,10 @@ EVENT_SCHEMA_NAME = "software-satellite-event"
 EVENT_SCHEMA_VERSION = 1
 EVENT_LOG_SCHEMA_NAME = "software-satellite-event-log"
 EVENT_LOG_SCHEMA_VERSION = 1
+EVENT_CONTRACT_CHECK_SCHEMA_NAME = "software-satellite-event-contract-check"
+EVENT_CONTRACT_CHECK_SCHEMA_VERSION = 1
+EVENT_CONTRACT_REPORT_SCHEMA_NAME = "software-satellite-event-contract-report"
+EVENT_CONTRACT_REPORT_SCHEMA_VERSION = 1
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -97,6 +101,145 @@ def _workspace_relative_path(path: Path, *, root: Path) -> str | None:
         return str(path.resolve().relative_to(root))
     except ValueError:
         return None
+
+
+def _mapping_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _resolve_source_artifact_path(path_text: str, *, root: Path) -> Path:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def build_event_contract_check(
+    event: Mapping[str, Any],
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Check the minimum file-first contract for one software-work event."""
+    resolved_root = _resolve_root(root)
+    event_id = _clean_text(event.get("event_id"))
+    event_kind = _clean_text(event.get("event_kind"))
+    outcome = _mapping_dict(event.get("outcome"))
+    status = _clean_text(outcome.get("status"))
+    source_refs = _mapping_dict(event.get("source_refs"))
+    artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    artifact_path = _clean_text(artifact_ref.get("artifact_path"))
+    schema_issues: list[str] = []
+    source_reasons: list[str] = []
+    resolved_artifact_path: Path | None = None
+    workspace_relative_path: str | None = None
+    durability_status = "missing_path"
+    readability_status = "missing_path"
+
+    if event_id is None:
+        schema_issues.append("missing_event_id")
+    if event_kind is None:
+        schema_issues.append("missing_event_kind")
+    if status is None:
+        schema_issues.append("missing_status")
+
+    if artifact_path is None:
+        source_reasons.append("missing_source_artifact_path")
+    else:
+        resolved_artifact_path = _resolve_source_artifact_path(artifact_path, root=resolved_root)
+        workspace_relative_path = _workspace_relative_path(resolved_artifact_path, root=resolved_root)
+        if workspace_relative_path is None:
+            durability_status = "outside_workspace"
+            source_reasons.append("source_artifact_outside_workspace")
+        else:
+            durability_status = "durable"
+
+        if not resolved_artifact_path.exists():
+            readability_status = "missing"
+            source_reasons.append("source_artifact_missing")
+        elif not resolved_artifact_path.is_file():
+            readability_status = "unreadable"
+            source_reasons.append("source_artifact_not_file")
+        else:
+            try:
+                with resolved_artifact_path.open("rb") as handle:
+                    handle.read(1)
+            except OSError:
+                readability_status = "unreadable"
+                source_reasons.append("source_artifact_unreadable")
+            else:
+                readability_status = "readable"
+
+    source_status = "readable" if not source_reasons else "missing_source"
+    if source_status == "missing_source":
+        contract_status = "missing_source"
+    elif schema_issues:
+        contract_status = "invalid_event_contract"
+    else:
+        contract_status = "ok"
+
+    return {
+        "schema_name": EVENT_CONTRACT_CHECK_SCHEMA_NAME,
+        "schema_version": EVENT_CONTRACT_CHECK_SCHEMA_VERSION,
+        "event_id": event_id,
+        "event_kind": event_kind,
+        "status": status,
+        "contract_status": contract_status,
+        "schema_issues": schema_issues,
+        "source_artifact": {
+            "source_status": source_status,
+            "durability_status": durability_status,
+            "readability_status": readability_status,
+            "reasons": source_reasons,
+            "artifact_path": artifact_path,
+            "resolved_artifact_path": str(resolved_artifact_path) if resolved_artifact_path is not None else None,
+            "artifact_workspace_relative_path": workspace_relative_path,
+        },
+    }
+
+
+def build_event_contract_report(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    checks = [
+        build_event_contract_check(event, root=root)
+        for event in events
+        if isinstance(event, dict)
+    ]
+    status_counts: dict[str, int] = {}
+    source_status_counts: dict[str, int] = {}
+    issue_counts: dict[str, int] = {}
+    for check in checks:
+        contract_status = _clean_text(check.get("contract_status")) or "unknown"
+        status_counts[contract_status] = status_counts.get(contract_status, 0) + 1
+        source_artifact = _mapping_dict(check.get("source_artifact"))
+        source_status = _clean_text(source_artifact.get("source_status")) or "unknown"
+        source_status_counts[source_status] = source_status_counts.get(source_status, 0) + 1
+        for issue in [
+            *_clean_string_list(check.get("schema_issues")),
+            *_clean_string_list(source_artifact.get("reasons")),
+        ]:
+            issue_counts[issue] = issue_counts.get(issue, 0) + 1
+
+    failed_checks = [
+        check
+        for check in checks
+        if _clean_text(check.get("contract_status")) != "ok"
+    ]
+    return {
+        "schema_name": EVENT_CONTRACT_REPORT_SCHEMA_NAME,
+        "schema_version": EVENT_CONTRACT_REPORT_SCHEMA_VERSION,
+        "checked_event_count": len(checks),
+        "failed_event_count": len(failed_checks),
+        "status_counts": dict(sorted(status_counts.items())),
+        "source_status_counts": dict(sorted(source_status_counts.items())),
+        "issue_counts": dict(sorted(issue_counts.items())),
+        "failed_checks": failed_checks,
+    }
 
 
 def _capability_surface(result: dict[str, Any]) -> str:
