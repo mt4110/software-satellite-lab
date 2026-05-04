@@ -1678,6 +1678,31 @@ def _learning_contract_root(source_paths: Mapping[str, Any]) -> Path | None:
     return None
 
 
+def _artifact_root_from_path_text(path_text: Any) -> Path | None:
+    cleaned_path = _clean_text(path_text)
+    if cleaned_path is None:
+        return None
+    path = Path(cleaned_path).expanduser()
+    if not path.is_absolute():
+        return None
+    for parent in path.parents:
+        if parent.name == "artifacts":
+            return parent.parent
+    return None
+
+
+def _learning_event_contract_root(
+    event: Mapping[str, Any],
+    *,
+    fallback_root: Path | None,
+) -> Path | None:
+    if fallback_root is not None:
+        return fallback_root
+    source_refs = _mapping_dict(event.get("source_refs"))
+    artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    return _artifact_root_from_path_text(artifact_ref.get("artifact_path"))
+
+
 def _read_events_by_id_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     paths = _mapping_dict(snapshot.get("paths"))
     event_log_path = _path_from_text(paths.get("event_log_path"))
@@ -2589,7 +2614,10 @@ def build_learning_dataset_preview(
         if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
-            source_contract = build_event_contract_check(event, root=contract_root)
+            source_contract = build_event_contract_check(
+                event,
+                root=_learning_event_contract_root(event, fallback_root=contract_root),
+            )
             exclusions.extend(_learning_source_contract_exclusions(source_contract))
             supervised_example = _learning_supervised_example(event)
             missing_instruction = _clean_text(supervised_example.get("instruction")) is None

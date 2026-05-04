@@ -99,12 +99,17 @@ def _quality_check_verdict(value: bool) -> str:
 def _workspace_relative_path(path: Path, *, root: Path) -> str | None:
     try:
         return str(path.resolve().relative_to(root))
+    except (OSError, RuntimeError):
+        try:
+            return str(path.absolute().relative_to(root))
+        except ValueError:
+            return None
     except ValueError:
         return None
 
 
 def _mapping_dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _resolve_source_artifact_path(path_text: str, *, root: Path) -> Path:
@@ -113,7 +118,7 @@ def _resolve_source_artifact_path(path_text: str, *, root: Path) -> Path:
         path = root / path
     try:
         return path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return path.absolute()
 
 
@@ -209,7 +214,7 @@ def build_event_contract_report(
     checks = [
         build_event_contract_check(event, root=root)
         for event in events
-        if isinstance(event, dict)
+        if isinstance(event, Mapping)
     ]
     status_counts: dict[str, int] = {}
     source_status_counts: dict[str, int] = {}

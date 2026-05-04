@@ -1689,6 +1689,85 @@ class EvaluationLoopTests(unittest.TestCase):
             "missing_source",
         )
 
+    def test_learning_preview_infers_contract_root_from_direct_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_id = "event-direct-source-artifact"
+            event = {
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {
+                    "surface": "agent_lane",
+                    "mode": "patch_plan_verify",
+                    "title": "Direct source artifact check",
+                },
+                "outcome": {
+                    "status": "ok",
+                    "quality_status": "pass",
+                    "execution_status": "ok",
+                },
+                "content": {
+                    "prompt": "Keep direct in-memory preview artifacts traceable.",
+                    "output_text": "The source artifact remains readable.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_source",
+                        "pass_definition": "Source artifact remains inspectable.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+            }
+            candidate = {
+                "event_id": event_id,
+                "state": "ready",
+                "label": "Direct source artifact candidate",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+                "adoption_checklist": [],
+                "required_next_steps": ["confirm_export_policy"],
+            }
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            test_signal = build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id=event_id,
+                source_event=event,
+            )
+
+            preview = build_learning_dataset_preview(
+                {"workspace_id": "local-default", "paths": {}},
+                {"candidates": [candidate]},
+                events_by_id={event_id: event},
+                explicit_signals=[accepted_signal, test_signal],
+                comparisons=[],
+            )
+            supervised_candidate = preview["supervised_example_candidates"][0]
+
+        self.assertEqual(preview["counts"]["eligible_candidate_count"], 1)
+        self.assertEqual(preview["excluded_candidates"], [])
+        self.assertEqual(
+            supervised_candidate["event_contract"]["source_artifact"]["source_status"],
+            "readable",
+        )
+        self.assertEqual(
+            supervised_candidate["event_contract"]["source_artifact"]["artifact_workspace_relative_path"],
+            "artifacts/agent_lane/run.json",
+        )
+
     def test_learning_review_queue_uses_stable_ids_without_event_id(self) -> None:
         long_label = "Missing source candidate " + ("x" * 320)
         source_candidates = [

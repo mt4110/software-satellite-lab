@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -226,11 +227,30 @@ class SoftwareWorkEventTests(unittest.TestCase):
                     }
                 },
             }
+            loop_a = root / "artifacts" / "text" / "loop-a.json"
+            loop_b = root / "artifacts" / "text" / "loop-b.json"
+            try:
+                loop_a.symlink_to(loop_b)
+                loop_b.symlink_to(loop_a)
+            except OSError as exc:
+                self.skipTest(f"symlink loop setup unavailable: {exc}")
+            symlink_loop_event = {
+                "event_id": "local-default:session:symlink-loop",
+                "event_kind": "chat_turn",
+                "outcome": {"status": "ok"},
+                "source_refs": {
+                    "artifact_ref": {"artifact_path": str(loop_a)}
+                },
+            }
 
             readable_check = build_event_contract_check(readable_event, root=root)
             missing_check = build_event_contract_check(missing_event, root=root)
             outside_check = build_event_contract_check(outside_event, root=root)
-            report = build_event_contract_report([readable_event, missing_event], root=root)
+            symlink_loop_check = build_event_contract_check(symlink_loop_event, root=root)
+            report = build_event_contract_report(
+                [MappingProxyType(readable_event), MappingProxyType(missing_event)],
+                root=root,
+            )
 
         self.assertEqual(readable_check["contract_status"], "ok")
         self.assertEqual(readable_check["source_artifact"]["source_status"], "readable")
@@ -243,6 +263,13 @@ class SoftwareWorkEventTests(unittest.TestCase):
             outside_check["source_artifact"]["reasons"],
             ["source_artifact_outside_workspace"],
         )
+        self.assertEqual(symlink_loop_check["contract_status"], "missing_source")
+        self.assertIn(
+            symlink_loop_check["source_artifact"]["readability_status"],
+            {"missing", "unreadable"},
+        )
+        self.assertTrue(symlink_loop_check["source_artifact"]["reasons"])
+        self.assertEqual(report["checked_event_count"], 2)
         self.assertEqual(report["failed_event_count"], 1)
         self.assertEqual(report["source_status_counts"]["missing_source"], 1)
 
