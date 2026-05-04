@@ -2684,6 +2684,77 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(excluded["lifecycle_summary"]["selection_state"], "rejected")
         self.assertEqual(excluded["lifecycle_summary"]["review_state"], "unresolved")
 
+    def test_learning_preview_recomputes_consistency_when_trace_overrides_are_supplied(self) -> None:
+        event = {
+            "event_id": "override-consistency-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Current override traces should decide the preview.",
+                "output_text": "The stale snapshot consistency entry should not veto this candidate.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_override",
+                    "pass_definition": "Override traces are authoritative for this run.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        signals = [
+            build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id="override-consistency-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:01:00+00:00",
+                signal_id="local-default:eval:override:test-pass",
+            ),
+            build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id="override-consistency-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:02:00+00:00",
+                signal_id="local-default:eval:override:acceptance",
+            ),
+        ]
+
+        preview = build_learning_dataset_preview(
+            {
+                "workspace_id": "local-default",
+                "paths": {},
+                "evaluation_consistency": {
+                    "events": [
+                        {
+                            "event_id": "override-consistency-candidate",
+                            "stale_positive_signals": ["accepted", "test_pass"],
+                            "missing_traces": [],
+                        }
+                    ]
+                },
+            },
+            {
+                "candidates": [
+                    {
+                        "event_id": "override-consistency-candidate",
+                        "state": "ready",
+                        "label": "Override consistency candidate",
+                        "reasons": ["accepted", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"override-consistency-candidate": event},
+            explicit_signals=signals,
+            comparisons=[],
+        )
+
+        self.assertEqual(preview["excluded_candidates"], [])
+        self.assertEqual(len(preview["supervised_example_candidates"]), 1)
+        self.assertEqual(preview["review_queue"][0]["queue_state"], "ready")
+
     def test_learning_preview_explains_missing_comparison_winner_trace_without_snapshot_report(self) -> None:
         event = {
             "event_id": "missing-comparison-trace-candidate",
@@ -2733,7 +2804,6 @@ class EvaluationLoopTests(unittest.TestCase):
 
         self.assertEqual(preview["supervised_example_candidates"], [])
         self.assertIn("missing_comparison_winner_trace", excluded["excluded_by"])
-        self.assertIn("missing_selection_trace", excluded["excluded_by"])
         self.assertEqual(excluded["next_action"], "record_comparison_winner_trace")
 
     def test_cli_records_explicit_signal_and_prints_json_snapshot(self) -> None:

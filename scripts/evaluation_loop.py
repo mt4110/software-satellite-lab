@@ -1177,36 +1177,40 @@ def _consistency_signal_bucket(
     }
 
 
-def _comparison_references_for_event(
+def _comparison_references_by_event_id(
     comparisons: Iterable[Mapping[str, Any]],
-    *,
-    event_id: str,
-) -> list[dict[str, Any]]:
-    references: list[dict[str, Any]] = []
+) -> dict[str, list[dict[str, Any]]]:
+    references_by_event_id: dict[str, list[dict[str, Any]]] = {}
     for comparison in comparisons:
         if not isinstance(comparison, Mapping):
             continue
         candidate_event_ids = _string_list(comparison.get("candidate_event_ids"))
         winner_event_id = _clean_text(comparison.get("winner_event_id"))
-        if event_id != winner_event_id and event_id not in candidate_event_ids:
-            continue
-        references.append(
-            {
-                "comparison_id": _clean_text(comparison.get("comparison_id")),
-                "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
-                "outcome": _clean_text(comparison.get("outcome")),
-                "winner_event_id": winner_event_id,
-                "role": "winner" if event_id == winner_event_id else "candidate",
-            }
+        reference_event_ids = _deduplicate_strings(
+            [
+                *candidate_event_ids,
+                *([winner_event_id] if winner_event_id is not None else []),
+            ]
         )
-    references.sort(
-        key=lambda item: (
-            _timestamp_sort_key(item.get("recorded_at_utc")),
-            str(item.get("comparison_id") or ""),
-        ),
-        reverse=True,
-    )
-    return references
+        for event_id in reference_event_ids:
+            references_by_event_id.setdefault(event_id, []).append(
+                {
+                    "comparison_id": _clean_text(comparison.get("comparison_id")),
+                    "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
+                    "outcome": _clean_text(comparison.get("outcome")),
+                    "winner_event_id": winner_event_id,
+                    "role": "winner" if event_id == winner_event_id else "candidate",
+                }
+            )
+    for references in references_by_event_id.values():
+        references.sort(
+            key=lambda item: (
+                _timestamp_sort_key(item.get("recorded_at_utc")),
+                str(item.get("comparison_id") or ""),
+            ),
+            reverse=True,
+        )
+    return references_by_event_id
 
 
 def _consistency_source_trace(
@@ -1282,14 +1286,9 @@ def build_evaluation_consistency_report(
             continue
         signals_by_event_id.setdefault(event_id, []).append(signal)
 
-    comparison_event_ids: set[str] = set()
-    for comparison in comparison_summary_list:
-        comparison_event_ids.update(_string_list(comparison.get("candidate_event_ids")))
-        winner_event_id = _clean_text(comparison.get("winner_event_id"))
-        if winner_event_id is not None:
-            comparison_event_ids.add(winner_event_id)
+    comparison_references_by_event = _comparison_references_by_event_id(comparison_summary_list)
 
-    event_ids = sorted(set(signals_by_event_id) | set(curation_by_event_id) | comparison_event_ids)
+    event_ids = sorted(set(signals_by_event_id) | set(curation_by_event_id) | set(comparison_references_by_event))
     items: list[dict[str, Any]] = []
     issue_counts: Counter[str] = Counter()
     for event_id in event_ids:
@@ -1358,10 +1357,7 @@ def build_evaluation_consistency_report(
                         inconsistencies.append(stale_reason_key)
                         issue_counts[stale_reason_key] += 1
 
-        comparison_refs = _comparison_references_for_event(
-            comparison_summary_list,
-            event_id=event_id,
-        )
+        comparison_refs = comparison_references_by_event.get(event_id, [])
         has_winner_trace = any(
             item.get("role") == "winner" and item.get("outcome") == "winner_selected"
             for item in comparison_refs
@@ -2806,6 +2802,31 @@ def _evaluation_consistency_by_event_id(snapshot: Mapping[str, Any]) -> dict[str
     }
 
 
+def _fresh_learning_consistency_by_event_id(
+    *,
+    signal_traces: Iterable[Mapping[str, Any]],
+    comparison_traces: Iterable[Mapping[str, Any]],
+    curation_candidates: Iterable[Mapping[str, Any]],
+    events_by_id: Mapping[str, Mapping[str, Any]],
+    workspace_id: str,
+    root: Path | None,
+) -> dict[str, dict[str, Any]]:
+    report = build_evaluation_consistency_report(
+        signal_summaries=[_signal_summary(signal) for signal in signal_traces],
+        comparison_summaries=[_comparison_summary(comparison) for comparison in comparison_traces],
+        curation_candidates=curation_candidates,
+        events_by_id=events_by_id,
+        workspace_id=workspace_id,
+        root=root,
+    )
+    return {
+        event_id: dict(item)
+        for item in report.get("events") or []
+        if isinstance(item, Mapping)
+        if (event_id := _clean_text(item.get("event_id"))) is not None
+    }
+
+
 def _learning_consistency_exclusions(consistency_item: Mapping[str, Any] | None) -> list[str]:
     if not isinstance(consistency_item, Mapping):
         return []
@@ -3080,8 +3101,24 @@ def build_learning_dataset_preview(
         for candidate in curation_preview.get("candidates") or []
         if isinstance(candidate, Mapping)
     ]
-    consistency_by_event_id = _evaluation_consistency_by_event_id(snapshot)
     contract_root = _learning_contract_root(source_paths)
+    has_trace_overrides = (
+        explicit_signals is not None
+        or comparisons is not None
+        or events_by_id is not None
+    )
+    consistency_by_event_id = (
+        _fresh_learning_consistency_by_event_id(
+            signal_traces=resolved_signals,
+            comparison_traces=resolved_comparisons,
+            curation_candidates=source_candidates,
+            events_by_id=resolved_events_by_id,
+            workspace_id=resolved_workspace_id,
+            root=contract_root,
+        )
+        if has_trace_overrides
+        else _evaluation_consistency_by_event_id(snapshot)
+    )
     eligible_candidates: list[dict[str, Any]] = []
     excluded_candidates: list[dict[str, Any]] = []
     review_queue: list[dict[str, Any]] = []
