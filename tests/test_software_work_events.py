@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -247,6 +248,8 @@ class SoftwareWorkEventTests(unittest.TestCase):
             missing_check = build_event_contract_check(missing_event, root=root)
             outside_check = build_event_contract_check(outside_event, root=root)
             symlink_loop_check = build_event_contract_check(symlink_loop_event, root=root)
+            with patch.object(Path, "exists", side_effect=OSError("invalid artifact path")):
+                invalid_path_check = build_event_contract_check(readable_event, root=root)
             report = build_event_contract_report(
                 [MappingProxyType(readable_event), MappingProxyType(missing_event)],
                 root=root,
@@ -269,6 +272,12 @@ class SoftwareWorkEventTests(unittest.TestCase):
             {"missing", "unreadable"},
         )
         self.assertTrue(symlink_loop_check["source_artifact"]["reasons"])
+        self.assertEqual(invalid_path_check["contract_status"], "missing_source")
+        self.assertEqual(invalid_path_check["source_artifact"]["readability_status"], "unreadable")
+        self.assertEqual(
+            invalid_path_check["source_artifact"]["reasons"],
+            ["source_artifact_unreadable"],
+        )
         self.assertEqual(report["checked_event_count"], 2)
         self.assertEqual(report["failed_event_count"], 1)
         self.assertEqual(report["source_status_counts"]["missing_source"], 1)

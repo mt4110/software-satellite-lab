@@ -161,22 +161,28 @@ def build_event_contract_check(
             source_reasons.append("source_artifact_outside_workspace")
         else:
             durability_status = "durable"
-
-            if not resolved_artifact_path.exists():
-                readability_status = "missing"
-                source_reasons.append("source_artifact_missing")
-            elif not resolved_artifact_path.is_file():
+            try:
+                artifact_exists = resolved_artifact_path.exists()
+                artifact_is_file = resolved_artifact_path.is_file() if artifact_exists else False
+            except (OSError, RuntimeError):
                 readability_status = "unreadable"
-                source_reasons.append("source_artifact_not_file")
+                source_reasons.append("source_artifact_unreadable")
             else:
-                try:
-                    with resolved_artifact_path.open("rb") as handle:
-                        handle.read(1)
-                except OSError:
+                if not artifact_exists:
+                    readability_status = "missing"
+                    source_reasons.append("source_artifact_missing")
+                elif not artifact_is_file:
                     readability_status = "unreadable"
-                    source_reasons.append("source_artifact_unreadable")
+                    source_reasons.append("source_artifact_not_file")
                 else:
-                    readability_status = "readable"
+                    try:
+                        with resolved_artifact_path.open("rb") as handle:
+                            handle.read(1)
+                    except OSError:
+                        readability_status = "unreadable"
+                        source_reasons.append("source_artifact_unreadable")
+                    else:
+                        readability_status = "readable"
 
     source_status = "readable" if not source_reasons else "missing_source"
     if source_status == "missing_source":
