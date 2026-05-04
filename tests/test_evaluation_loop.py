@@ -46,8 +46,39 @@ from run_evaluation_loop import main as evaluation_main  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
+def readable_test_source_refs(*, artifact_kind: str = "agent_run") -> dict[str, object]:
+    return {
+        "artifact_ref": {
+            "artifact_kind": artifact_kind,
+            "artifact_path": str(Path(__file__).resolve()),
+        }
+    }
+
+
 def write_capability_matrix(root: Path) -> None:
     matrix_path = root / "artifacts" / "capability_matrix" / "matrix.json"
+    pass_artifact_path = root / "artifacts" / "text" / "pass.json"
+    fail_artifact_path = root / "artifacts" / "vision" / "fail.json"
+    write_artifact(
+        pass_artifact_path,
+        build_artifact_payload(
+            artifact_kind="text",
+            status="ok",
+            runtime=build_runtime_record(backend="backend-a", model_id="backend-a"),
+            prompts=build_prompt_record(prompt="accepted patch keeps the loop green"),
+            extra={"output_text": "All checks passed."},
+        ),
+    )
+    write_artifact(
+        fail_artifact_path,
+        build_artifact_payload(
+            artifact_kind="vision",
+            status="failed",
+            runtime=build_runtime_record(backend="backend-a", model_id="backend-a"),
+            prompts=build_prompt_record(prompt="failure records a repair target"),
+            extra={"output_text": "AssertionError: expected repair linkage."},
+        ),
+    )
     payload = build_artifact_payload(
         artifact_kind="capability_matrix",
         status="ok",
@@ -60,7 +91,7 @@ def write_capability_matrix(root: Path) -> None:
                     "phase": "m4",
                     "status": "ok",
                     "artifact_kind": "text",
-                    "artifact_path": str(root / "artifacts" / "text" / "pass.json"),
+                    "artifact_path": str(pass_artifact_path),
                     "validation_command": "python -m unittest tests.test_pass",
                     "claim_scope": "accepted patch keeps the loop green",
                     "output_preview": "All checks passed.",
@@ -78,7 +109,7 @@ def write_capability_matrix(root: Path) -> None:
                     "phase": "m4",
                     "status": "failed",
                     "artifact_kind": "vision",
-                    "artifact_path": str(root / "artifacts" / "vision" / "fail.json"),
+                    "artifact_path": str(fail_artifact_path),
                     "validation_command": "python -m unittest tests.test_fail",
                     "claim_scope": "failure records a repair target",
                     "output_preview": "AssertionError: expected repair linkage.",
@@ -774,7 +805,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Dry-run remains preview-only.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1212,7 +1243,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Policy confirmation does not permit training export.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1328,7 +1359,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Derived test pass remains traceable.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1379,7 +1410,7 @@ class EvaluationLoopTests(unittest.TestCase):
                         "pass_definition": "Queue ordering remains stable.",
                     },
                 },
-                "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+                "source_refs": readable_test_source_refs(),
             }
 
         confirmed_event = ready_event("a-confirmed-policy")
@@ -1470,72 +1501,82 @@ class EvaluationLoopTests(unittest.TestCase):
         )
 
     def test_learning_review_queue_marks_missing_source_and_missing_text(self) -> None:
-        event_without_response = {
-            "event_id": "event-without-response",
-            "event_kind": "agent_task_run",
-            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
-            "session": {
-                "surface": "agent_lane",
-                "mode": "patch_plan_verify",
-                "title": "Missing response check",
-            },
-            "outcome": {
-                "status": "ok",
-                "quality_status": "pass",
-                "execution_status": "ok",
-            },
-            "content": {
-                "prompt": "Keep the queue typed.",
-                "output_text": "",
-                "options": {
-                    "validation_mode": "agent_lane",
-                    "validation_command": "python -m unittest tests.test_queue",
-                    "pass_definition": "Queue stays typed.",
-                },
-            },
-            "source_refs": {
-                "artifact_ref": {
-                    "artifact_kind": "agent_run",
-                    "artifact_path": "/tmp/agent-run.json",
-                },
-            },
-        }
-        source_candidates = [
-            {
-                "event_id": "missing-event",
-                "state": "ready",
-                "label": "Missing source",
-                "reasons": ["accepted", "test_pass"],
-                "blocked_by": [],
-                "export_decision": "include_when_approved",
-                "ready_for_policy": True,
-                "adoption_checklist": [],
-                "required_next_steps": ["confirm_export_policy"],
-            },
-            {
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_without_response = {
                 "event_id": "event-without-response",
-                "state": "ready",
-                "label": "Missing supervised text",
-                "reasons": ["accepted", "test_pass"],
-                "blocked_by": [],
-                "export_decision": "include_when_approved",
-                "ready_for_policy": True,
-                "adoption_checklist": [],
-                "required_next_steps": ["confirm_export_policy"],
-            },
-        ]
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {
+                    "surface": "agent_lane",
+                    "mode": "patch_plan_verify",
+                    "title": "Missing response check",
+                },
+                "outcome": {
+                    "status": "ok",
+                    "quality_status": "pass",
+                    "execution_status": "ok",
+                },
+                "content": {
+                    "prompt": "Keep the queue typed.",
+                    "output_text": "",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_queue",
+                        "pass_definition": "Queue stays typed.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+            }
+            source_candidates = [
+                {
+                    "event_id": "missing-event",
+                    "state": "ready",
+                    "label": "Missing source",
+                    "reasons": ["accepted", "test_pass"],
+                    "blocked_by": [],
+                    "export_decision": "include_when_approved",
+                    "ready_for_policy": True,
+                    "adoption_checklist": [],
+                    "required_next_steps": ["confirm_export_policy"],
+                },
+                {
+                    "event_id": "event-without-response",
+                    "state": "ready",
+                    "label": "Missing supervised text",
+                    "reasons": ["accepted", "test_pass"],
+                    "blocked_by": [],
+                    "export_decision": "include_when_approved",
+                    "ready_for_policy": True,
+                    "adoption_checklist": [],
+                    "required_next_steps": ["confirm_export_policy"],
+                },
+            ]
 
-        preview = build_learning_dataset_preview(
-            {"workspace_id": "local-default", "paths": {}},
-            {"candidates": source_candidates},
-            events_by_id={"event-without-response": event_without_response},
-            explicit_signals=[],
-            comparisons=[],
-        )
-        queue_by_event = {
-            item["event_id"]: item
-            for item in preview["review_queue"]
-        }
+            preview = build_learning_dataset_preview(
+                {
+                    "workspace_id": "local-default",
+                    "paths": {
+                        "event_log_path": str(root / "artifacts" / "event_logs" / "local-default.jsonl")
+                    },
+                },
+                {"candidates": source_candidates},
+                events_by_id={"event-without-response": event_without_response},
+                explicit_signals=[],
+                comparisons=[],
+            )
+            queue_by_event = {
+                item["event_id"]: item
+                for item in preview["review_queue"]
+            }
 
         self.assertEqual(preview["counts"]["eligible_candidate_count"], 0)
         self.assertEqual(queue_by_event["missing-event"]["queue_state"], "missing_source")
@@ -1564,6 +1605,167 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(
             preview["counts"]["review_queue_states"],
             {"missing_source": 1, "missing_supervised_text": 1},
+        )
+
+    def test_learning_preview_blocks_ready_candidate_with_missing_source_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            missing_artifact_path = root / "artifacts" / "agent_lane" / "missing-run.json"
+            event_id = "event-missing-source-artifact"
+            event = {
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {
+                    "surface": "agent_lane",
+                    "mode": "patch_plan_verify",
+                    "title": "Missing artifact check",
+                },
+                "outcome": {
+                    "status": "ok",
+                    "quality_status": "pass",
+                    "execution_status": "ok",
+                },
+                "content": {
+                    "prompt": "Keep source artifacts traceable.",
+                    "output_text": "Implemented with passing verification.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_source",
+                        "pass_definition": "Source artifact remains inspectable.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(missing_artifact_path),
+                    },
+                },
+            }
+            candidate = {
+                "event_id": event_id,
+                "state": "ready",
+                "label": "Looks ready but source artifact is gone",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+                "adoption_checklist": [],
+                "required_next_steps": ["confirm_export_policy"],
+            }
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                source_event=event,
+                rationale="This would otherwise be a positive learning signal.",
+            )
+
+            preview = build_learning_dataset_preview(
+                {
+                    "workspace_id": "local-default",
+                    "paths": {
+                        "event_log_path": str(root / "artifacts" / "event_logs" / "local-default.jsonl")
+                    },
+                },
+                {"candidates": [candidate]},
+                events_by_id={event_id: event},
+                explicit_signals=[accepted_signal],
+                comparisons=[],
+            )
+            queue_item = preview["review_queue"][0]
+            excluded = preview["excluded_candidates"][0]
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(preview["counts"]["eligible_candidate_count"], 0)
+        self.assertEqual(queue_item["queue_state"], "missing_source")
+        self.assertEqual(queue_item["next_action"], "restore_source_artifact")
+        self.assertEqual(queue_item["blocked_reason"], "missing_source_artifact")
+        self.assertIn("missing_source_artifact", excluded["excluded_by"])
+        self.assertEqual(queue_item["lifecycle_summary"]["source_state"], "missing_source")
+        self.assertEqual(queue_item["lifecycle_summary"]["test_state"], "passed")
+        self.assertEqual(queue_item["lifecycle_summary"]["selection_state"], "selected")
+        self.assertEqual(
+            queue_item["event_contract"]["source_artifact"]["source_status"],
+            "missing_source",
+        )
+
+    def test_learning_preview_infers_contract_root_from_direct_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_id = "event-direct-source-artifact"
+            event = {
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {
+                    "surface": "agent_lane",
+                    "mode": "patch_plan_verify",
+                    "title": "Direct source artifact check",
+                },
+                "outcome": {
+                    "status": "ok",
+                    "quality_status": "pass",
+                    "execution_status": "ok",
+                },
+                "content": {
+                    "prompt": "Keep direct in-memory preview artifacts traceable.",
+                    "output_text": "The source artifact remains readable.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_source",
+                        "pass_definition": "Source artifact remains inspectable.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+            }
+            candidate = {
+                "event_id": event_id,
+                "state": "ready",
+                "label": "Direct source artifact candidate",
+                "reasons": ["accepted", "test_pass"],
+                "blocked_by": [],
+                "export_decision": "include_when_approved",
+                "ready_for_policy": True,
+                "adoption_checklist": [],
+                "required_next_steps": ["confirm_export_policy"],
+            }
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            test_signal = build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id=event_id,
+                source_event=event,
+            )
+
+            preview = build_learning_dataset_preview(
+                {"workspace_id": "local-default", "paths": {}},
+                {"candidates": [candidate]},
+                events_by_id={event_id: event},
+                explicit_signals=[accepted_signal, test_signal],
+                comparisons=[],
+            )
+            supervised_candidate = preview["supervised_example_candidates"][0]
+
+        self.assertEqual(preview["counts"]["eligible_candidate_count"], 1)
+        self.assertEqual(preview["excluded_candidates"], [])
+        self.assertEqual(
+            supervised_candidate["event_contract"]["source_artifact"]["source_status"],
+            "readable",
+        )
+        self.assertEqual(
+            supervised_candidate["event_contract"]["source_artifact"]["artifact_workspace_relative_path"],
+            "artifacts/agent_lane/run.json",
         )
 
     def test_learning_review_queue_uses_stable_ids_without_event_id(self) -> None:
@@ -1664,7 +1866,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "The candidate still has a failed lifecycle reason.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         preview = build_learning_dataset_preview(
             {"workspace_id": "local-default", "paths": {}},
@@ -1732,7 +1934,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "The preview should keep the rejection visible.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
 
         preview = build_learning_dataset_preview(
@@ -1774,7 +1976,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "But no traceable test or selection evidence exists.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
 
         preview = build_learning_dataset_preview(
@@ -1827,7 +2029,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Derived test pass remains traceable.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         resolved_signal = build_evaluation_signal(
             signal_kind="review_resolved",
@@ -1889,7 +2091,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Latest validation passes.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         failed_signal = build_evaluation_signal(
             signal_kind="test_fail",
@@ -1957,7 +2159,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Latest validation must pass.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         passed_signal = build_evaluation_signal(
             signal_kind="test_pass",
