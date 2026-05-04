@@ -1186,10 +1186,11 @@ def _comparison_references_by_event_id(
             continue
         candidate_event_ids = _string_list(comparison.get("candidate_event_ids"))
         winner_event_id = _clean_text(comparison.get("winner_event_id"))
+        outcome = _clean_text(comparison.get("outcome"))
         reference_event_ids = _deduplicate_strings(
             [
                 *candidate_event_ids,
-                *([winner_event_id] if winner_event_id is not None else []),
+                *([winner_event_id] if outcome == "winner_selected" and winner_event_id is not None else []),
             ]
         )
         for event_id in reference_event_ids:
@@ -1197,9 +1198,9 @@ def _comparison_references_by_event_id(
                 {
                     "comparison_id": _clean_text(comparison.get("comparison_id")),
                     "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
-                    "outcome": _clean_text(comparison.get("outcome")),
+                    "outcome": outcome,
                     "winner_event_id": winner_event_id,
-                    "role": "winner" if event_id == winner_event_id else "candidate",
+                    "role": "winner" if outcome == "winner_selected" and event_id == winner_event_id else "candidate",
                 }
             )
     for references in references_by_event_id.values():
@@ -2354,7 +2355,8 @@ def _comparison_event_ids(comparison: Mapping[str, Any]) -> list[str]:
 def _learning_comparison_trace(comparison: Mapping[str, Any], *, event_id: str) -> dict[str, Any]:
     candidate_event_ids = _comparison_event_ids(comparison)
     winner_event_id = _clean_text(comparison.get("winner_event_id"))
-    if winner_event_id == event_id:
+    outcome = _clean_text(comparison.get("outcome"))
+    if outcome == "winner_selected" and winner_event_id == event_id:
         role = "winner"
     elif event_id in candidate_event_ids:
         role = "candidate"
@@ -2365,7 +2367,7 @@ def _learning_comparison_trace(comparison: Mapping[str, Any], *, event_id: str) 
         "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
         "origin": _clean_text(comparison.get("origin")),
         "task_label": _clean_text(comparison.get("task_label")),
-        "outcome": _clean_text(comparison.get("outcome")),
+        "outcome": outcome,
         "winner_event_id": winner_event_id,
         "role": role,
         "candidate_event_ids": candidate_event_ids,

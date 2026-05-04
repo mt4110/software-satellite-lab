@@ -2559,6 +2559,26 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(report["counts"]["comparison_winner_missing_trace"], 1)
         self.assertIn("missing_comparison_winner_trace", issue_event["missing_traces"])
 
+    def test_consistency_report_does_not_treat_follow_up_winner_id_as_selected_winner(self) -> None:
+        report = build_evaluation_consistency_report(
+            signal_summaries=[],
+            comparison_summaries=[
+                {
+                    "comparison_id": "local-default:compare:follow-up",
+                    "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                    "outcome": "needs_follow_up",
+                    "winner_event_id": "follow-up-candidate",
+                    "candidate_event_ids": ["follow-up-candidate", "other-candidate"],
+                }
+            ],
+            curation_candidates=[],
+            events_by_id={},
+        )
+
+        self.assertEqual(report["counts"]["missing_trace"], 0)
+        self.assertEqual(report["counts"]["comparison_winner_missing_trace"], 0)
+        self.assertEqual(report["issue_events"], [])
+
     def test_snapshot_consistency_report_preserves_source_artifact_contract_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
