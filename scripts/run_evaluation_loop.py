@@ -23,10 +23,12 @@ from evaluation_loop import (
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
     format_human_selected_candidate_list_report,
+    format_jsonl_training_export_dry_run_report,
     format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_human_selected_candidate_list,
+    record_jsonl_training_export_dry_run,
     record_learning_dataset_preview,
 )
 from gemma_runtime import repo_root
@@ -89,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--human-selected-candidates",
         action="store_true",
         help="Write a preview-only artifact listing candidate event ids explicitly selected by a human.",
+    )
+    parser.add_argument(
+        "--jsonl-export-dry-run",
+        action="store_true",
+        help="Write a preview-only JSONL training export dry-run manifest without producing JSONL.",
     )
     parser.add_argument(
         "--curation-state",
@@ -201,6 +208,9 @@ def main() -> int:
     human_selected_candidates: dict[str, object] | None = None
     human_selected_latest_path: Path | None = None
     human_selected_run_path: Path | None = None
+    jsonl_export_dry_run: dict[str, object] | None = None
+    jsonl_export_dry_run_latest_path: Path | None = None
+    jsonl_export_dry_run_run_path: Path | None = None
     events_by_id: dict[str, dict[str, object]] | None = None
     index_summary: dict[str, object] | None = None
 
@@ -368,6 +378,29 @@ def main() -> int:
             )
         except ValueError as exc:
             parser.error(str(exc))
+    if args.jsonl_export_dry_run:
+        try:
+            (
+                jsonl_export_dry_run,
+                jsonl_export_dry_run_latest_path,
+                jsonl_export_dry_run_run_path,
+            ) = record_jsonl_training_export_dry_run(
+                root=root,
+                workspace_id=args.workspace_id,
+                learning_preview=learning_preview,
+                human_selected_candidates=human_selected_candidates,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+                curation_filters={
+                    "states": args.curation_state,
+                    "export_decisions": args.curation_decision,
+                    "reasons": args.curation_reason,
+                    "limit": args.curation_limit,
+                },
+                learning_limit=args.learning_limit,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.format == "json":
         payload: dict[str, object] = {"snapshot": snapshot}
         if recorded_signal is not None:
@@ -380,6 +413,8 @@ def main() -> int:
             payload["learning_preview"] = learning_preview
         if human_selected_candidates is not None:
             payload["human_selected_candidates"] = human_selected_candidates
+        if jsonl_export_dry_run is not None:
+            payload["jsonl_export_dry_run"] = jsonl_export_dry_run
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         blocks: list[str] = []
@@ -419,6 +454,12 @@ def main() -> int:
             blocks.append(
                 "Human-selected candidates written: "
                 f"{human_selected_run_path or human_selected_latest_path or 'n/a'}"
+            )
+        if jsonl_export_dry_run is not None:
+            blocks.append(format_jsonl_training_export_dry_run_report(jsonl_export_dry_run))
+            blocks.append(
+                "JSONL export dry-run written: "
+                f"{jsonl_export_dry_run_run_path or jsonl_export_dry_run_latest_path or 'n/a'}"
             )
         print("\n\n".join(blocks))
     return 0

@@ -39,7 +39,28 @@ HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME = "software-satellite-human-selected-c
 HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_VERSION = 1
 HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_NAME = "software-satellite-human-selected-candidate"
 HUMAN_SELECTED_CANDIDATE_ITEM_SCHEMA_VERSION = 1
+JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME = "software-satellite-jsonl-training-export-dry-run"
+JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_VERSION = 1
+JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_NAME = "software-satellite-jsonl-training-export-dry-run-item"
+JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_VERSION = 1
 EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND = "export_policy_confirmed"
+HUMAN_SELECTED_SUPPLIED_TRAINING_TEXT_KEYS = {
+    "completion",
+    "completions",
+    "input",
+    "input_text",
+    "instruction",
+    "messages",
+    "output",
+    "output_excerpt",
+    "output_text",
+    "prompt",
+    "prompt_excerpt",
+    "resolved_user_prompt",
+    "response",
+    "supervised_example",
+    "system_prompt",
+}
 
 SIGNAL_KINDS = (
     "acceptance",
@@ -170,6 +191,27 @@ def human_selected_candidates_run_path(
         / "learning"
         / "runs"
         / f"{timestamp_slug()}-human-selected-candidates.json"
+    )
+
+
+def jsonl_training_export_dry_run_latest_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return evaluation_root(workspace_id=workspace_id, root=root) / "learning" / "jsonl-export-dry-run-latest.json"
+
+
+def jsonl_training_export_dry_run_run_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return (
+        evaluation_root(workspace_id=workspace_id, root=root)
+        / "learning"
+        / "runs"
+        / f"{timestamp_slug()}-jsonl-export-dry-run.json"
     )
 
 
@@ -1558,12 +1600,22 @@ def _path_from_text(value: Any) -> Path | None:
     return Path(cleaned).expanduser()
 
 
+def _path_is_file(value: Any) -> bool:
+    path = _path_from_text(value)
+    if path is None:
+        return False
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _read_json_object(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -3231,6 +3283,516 @@ def record_human_selected_candidate_list(
     return payload, latest_path, run_path
 
 
+def _human_selected_candidate_list_artifact_path(selection: Mapping[str, Any]) -> str | None:
+    paths = _mapping_dict(selection.get("paths"))
+    return (
+        _clean_text(paths.get("human_selected_run_path"))
+        or _clean_text(paths.get("human_selected_latest_path"))
+    )
+
+
+def _read_human_selected_candidate_list_artifact(selection: Mapping[str, Any]) -> dict[str, Any] | None:
+    artifact_path = _path_from_text(_human_selected_candidate_list_artifact_path(selection))
+    payload = _read_json_object(artifact_path)
+    if (
+        payload.get("schema_name") == HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME
+        and payload.get("schema_version") == HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_VERSION
+    ):
+        return payload
+    return None
+
+
+def _strip_supplied_training_text(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_supplied_training_text(item)
+            for key, item in value.items()
+            if str(key) not in HUMAN_SELECTED_SUPPLIED_TRAINING_TEXT_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_supplied_training_text(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _record_supplied_human_selected_candidate_list(
+    selection: Mapping[str, Any],
+    *,
+    root: Path,
+    workspace_id: str,
+) -> dict[str, Any]:
+    payload = _strip_supplied_training_text(selection)
+    latest_path = human_selected_candidates_latest_path(workspace_id=workspace_id, root=root)
+    run_path = human_selected_candidates_run_path(workspace_id=workspace_id, root=root)
+    payload["paths"] = {
+        "human_selected_latest_path": str(latest_path),
+        "human_selected_run_path": str(run_path),
+        "source_learning_preview_path": _clean_text(payload.get("source_learning_preview_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload
+
+
+def _jsonl_dry_run_policy(policy: Mapping[str, Any] | None) -> dict[str, Any]:
+    source_policy = _mapping_dict(policy)
+    return {
+        "export_mode": "preview_only",
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "training_job_allowed": False,
+        "raw_log_export_allowed": False,
+        "jsonl_training_export_allowed": False,
+        "export_policy_confirmed": bool(source_policy.get("export_policy_confirmed")),
+        "confirmation_signal_id": _clean_text(source_policy.get("confirmation_signal_id")),
+        "downstream_export_requires_separate_approval": True,
+    }
+
+
+def _jsonl_dry_run_traceability(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    evidence_summary = _mapping_dict(candidate.get("evidence_summary"))
+    if evidence_summary:
+        traceability = _mapping_dict(evidence_summary.get("traceability"))
+        curation_flags = _mapping_dict(evidence_summary.get("curation_reason_flags"))
+        return {
+            "curation_reasons": _string_list(evidence_summary.get("curation_reasons")),
+            "signal_kinds": _string_list(evidence_summary.get("signal_kinds")),
+            "signal_ids": _string_list(evidence_summary.get("signal_ids")),
+            "comparison_roles": _string_list(evidence_summary.get("comparison_roles")),
+            "comparison_ids": _string_list(evidence_summary.get("comparison_ids")),
+            "curation_reason_flags": {
+                "test_pass": bool(curation_flags.get("test_pass")),
+                "accepted": bool(curation_flags.get("accepted")),
+                "review_resolved": bool(curation_flags.get("review_resolved")),
+                "comparison_winner": bool(curation_flags.get("comparison_winner")),
+                "export_policy_confirmed": bool(curation_flags.get("export_policy_confirmed")),
+            },
+            "export_policy_confirmation_signal_id": _clean_text(
+                evidence_summary.get("export_policy_confirmation_signal_id")
+            ),
+            "traceability": {
+                "test_pass": bool(traceability.get("test_pass")),
+                "accepted": bool(traceability.get("accepted")),
+                "review_resolved": bool(traceability.get("review_resolved")),
+                "comparison_winner": bool(traceability.get("comparison_winner")),
+                "export_policy_confirmed": bool(traceability.get("export_policy_confirmed")),
+            },
+        }
+
+    evidence = _mapping_dict(candidate.get("evidence"))
+    signals = [
+        signal
+        for signal in evidence.get("signals") or []
+        if isinstance(signal, Mapping)
+    ]
+    comparisons = [
+        comparison
+        for comparison in evidence.get("comparisons") or []
+        if isinstance(comparison, Mapping)
+    ]
+    signal_kinds = [
+        signal_kind
+        for signal in signals
+        if (signal_kind := _clean_text(signal.get("signal_kind"))) is not None
+    ]
+    signal_ids = [
+        signal_id
+        for signal in signals
+        if (signal_id := _clean_text(signal.get("signal_id"))) is not None
+    ]
+    comparison_roles = [
+        role
+        for comparison in comparisons
+        if (role := _clean_text(comparison.get("role"))) is not None
+    ]
+    comparison_ids = [
+        comparison_id
+        for comparison in comparisons
+        if (comparison_id := _clean_text(comparison.get("comparison_id"))) is not None
+    ]
+    has_winner_trace = any(
+        _clean_text(comparison.get("role")) == "winner"
+        and _clean_text(comparison.get("outcome")) == "winner_selected"
+        for comparison in comparisons
+    )
+    curation = _mapping_dict(candidate.get("curation"))
+    curation_reasons = _string_list(curation.get("reasons"))
+    policy = _jsonl_dry_run_policy(_mapping_dict(candidate.get("policy")))
+    return {
+        "curation_reasons": curation_reasons,
+        "signal_kinds": signal_kinds,
+        "signal_ids": signal_ids,
+        "comparison_roles": comparison_roles,
+        "comparison_ids": comparison_ids,
+        "curation_reason_flags": {
+            "test_pass": "test_pass" in curation_reasons,
+            "accepted": "accepted" in curation_reasons,
+            "review_resolved": "review_resolved" in curation_reasons,
+            "comparison_winner": "comparison_winner" in curation_reasons,
+            "export_policy_confirmed": EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND in curation_reasons,
+        },
+        "export_policy_confirmation_signal_id": _clean_text(policy.get("confirmation_signal_id")),
+        "traceability": {
+            "test_pass": "test_pass" in signal_kinds,
+            "accepted": "acceptance" in signal_kinds,
+            "review_resolved": "review_resolved" in signal_kinds,
+            "comparison_winner": has_winner_trace,
+            "export_policy_confirmed": bool(policy.get("export_policy_confirmed")),
+        },
+    }
+
+
+def _jsonl_dry_run_candidate_record(
+    *,
+    workspace_id: str,
+    candidate: Mapping[str, Any],
+    source_index: int,
+    source_kind: str,
+    source_has_durable_learning_preview: bool,
+    source_has_durable_human_selection: bool,
+) -> dict[str, Any]:
+    queue_summary = _mapping_dict(candidate.get("review_queue"))
+    if not queue_summary and "queue_state" in candidate:
+        queue_summary = {
+            "queue_state": _clean_text(candidate.get("queue_state")),
+            "queue_priority": copy.deepcopy(_mapping_dict(candidate.get("queue_priority"))),
+            "next_action": _clean_text(candidate.get("next_action")),
+            "blocked_reason": _clean_text(candidate.get("blocked_reason")),
+            "blocked_reasons": _string_list(candidate.get("blocked_reasons")),
+            "excluded_by": _string_list(candidate.get("excluded_by")),
+            "eligible_for_supervised_candidate": bool(candidate.get("eligible_for_supervised_candidate")),
+            "lifecycle_summary": copy.deepcopy(_mapping_dict(candidate.get("lifecycle_summary"))),
+            "export_policy_confirmation": copy.deepcopy(_mapping_dict(candidate.get("export_policy_confirmation"))),
+        }
+    policy = _jsonl_dry_run_policy(_mapping_dict(candidate.get("policy")))
+    preview_membership = _mapping_dict(candidate.get("preview_membership"))
+    if not preview_membership:
+        preview_membership = {
+            "in_review_queue": bool(queue_summary),
+            "in_supervised_example_candidates": (
+                source_kind == "learning_preview_supervised_candidates"
+                and source_has_durable_learning_preview
+            ),
+            "in_excluded_candidates": False,
+        }
+    blocked_reasons = sorted(
+        set(
+            _string_list(candidate.get("blocked_reasons"))
+            + _string_list(candidate.get("excluded_by"))
+            + _string_list(queue_summary.get("blocked_reasons"))
+            + _string_list(queue_summary.get("excluded_by"))
+        )
+    )
+    candidate_claims_supervised = bool(
+        candidate.get("eligible_for_supervised_candidate")
+        or queue_summary.get("eligible_for_supervised_candidate")
+        or preview_membership.get("in_supervised_example_candidates")
+    )
+    source_has_durable_artifacts = source_has_durable_learning_preview and (
+        source_kind != "human_selected_candidate_list"
+        or source_has_durable_human_selection
+    )
+    preview_membership_supports_supervised = bool(
+        preview_membership.get("in_supervised_example_candidates")
+        and source_has_durable_artifacts
+    )
+    eligible_for_supervised = candidate_claims_supervised and preview_membership_supports_supervised
+    if not eligible_for_supervised and not blocked_reasons:
+        blocked_reasons.append("not_eligible_for_supervised_candidate")
+    if candidate_claims_supervised and not source_has_durable_artifacts:
+        blocked_reasons.append("missing_durable_source_artifact")
+    policy_confirmed = bool(policy.get("export_policy_confirmed"))
+    if not policy_confirmed and "export_policy_not_confirmed" not in blocked_reasons:
+        blocked_reasons.append("export_policy_not_confirmed")
+    evidence_summary = _jsonl_dry_run_traceability(candidate)
+    traceability = _mapping_dict(evidence_summary.get("traceability"))
+    has_selection_trace = any(
+        bool(traceability.get(key))
+        for key in ("accepted", "review_resolved", "comparison_winner")
+    )
+    has_required_traceability = (
+        bool(traceability.get("test_pass"))
+        and has_selection_trace
+        and bool(traceability.get("export_policy_confirmed"))
+    )
+    if eligible_for_supervised and policy_confirmed and not has_required_traceability:
+        blocked_reasons.append("missing_required_traceability")
+    blocked_reasons = sorted(set(blocked_reasons))
+    future_candidate = (
+        eligible_for_supervised
+        and policy_confirmed
+        and has_required_traceability
+        and source_has_durable_artifacts
+    )
+    if future_candidate:
+        dry_run_status = "future_jsonl_candidate_if_separately_approved"
+    elif "missing_learning_preview_candidate" in blocked_reasons:
+        dry_run_status = "missing_learning_preview_candidate"
+    elif not eligible_for_supervised:
+        dry_run_status = "not_supervised_candidate"
+    elif not policy_confirmed:
+        dry_run_status = "export_policy_confirmation_required"
+    else:
+        dry_run_status = "missing_required_traceability"
+    event_id = _clean_text(candidate.get("event_id"))
+    source_paths = _mapping_dict(candidate.get("source_paths"))
+    return {
+        "schema_name": JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_NAME,
+        "schema_version": JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_VERSION,
+        "workspace_id": workspace_id,
+        "event_id": event_id,
+        "source_index": source_index,
+        "source_kind": source_kind,
+        "selection_id": _clean_text(candidate.get("selection_id")),
+        "supervised_example_candidate_id": (
+            _clean_text(candidate.get("supervised_example_candidate_id"))
+            or _clean_text(candidate.get("candidate_id"))
+        ),
+        "label": _clean_text(candidate.get("label")) or event_id,
+        "preview_membership": copy.deepcopy(dict(preview_membership)),
+        "eligible_for_supervised_candidate": eligible_for_supervised,
+        "dry_run_status": dry_run_status,
+        "dry_run_eligible_for_future_export_if_separately_approved": future_candidate,
+        "would_write_jsonl_record": False,
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "not_trainable": True,
+        "queue_state": _clean_text(queue_summary.get("queue_state")),
+        "queue_priority": copy.deepcopy(_mapping_dict(queue_summary.get("queue_priority"))),
+        "next_action": _clean_text(queue_summary.get("next_action")),
+        "blocked_reason": _clean_text(queue_summary.get("blocked_reason")),
+        "blocked_reasons": blocked_reasons,
+        "required_before_training_export": [
+            *([] if policy_confirmed else ["export_policy_confirmation"]),
+            *([] if has_required_traceability else ["restore_required_traceability"]),
+            "separate_downstream_export_approval",
+            "m8_training_job_design",
+        ],
+        "export_policy_confirmation": copy.deepcopy(_mapping_dict(queue_summary.get("export_policy_confirmation"))),
+        "evidence_summary": evidence_summary,
+        "source_paths": {
+            key: copy.deepcopy(value)
+            for key, value in source_paths.items()
+            if key not in {"prompt", "output_text", "supervised_example"}
+        },
+        "policy": policy,
+        "jsonl_projection": {
+            "record_format": "not_emitted_in_m7_dry_run",
+            "jsonl_file_written": False,
+            "supervised_example_text_copied": False,
+            "raw_log_text_copied": False,
+            "omitted_training_text_fields": ["instruction", "response", "messages"],
+            "metadata_preview_fields": [
+                "event_id",
+                "supervised_example_candidate_id",
+                "traceability",
+                "policy",
+                "source_paths",
+            ],
+        },
+    }
+
+
+def build_jsonl_training_export_dry_run(
+    *,
+    learning_preview: Mapping[str, Any] | None = None,
+    human_selected_candidates: Mapping[str, Any] | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
+    if learning_preview is None and human_selected_candidates is None:
+        raise ValueError("JSONL training export dry-run requires a learning preview or human-selected candidate list.")
+    source_artifact = human_selected_candidates if human_selected_candidates is not None else learning_preview
+    assert source_artifact is not None
+    resolved_workspace_id = (
+        _clean_text(workspace_id)
+        or _clean_text(source_artifact.get("workspace_id"))
+        or DEFAULT_WORKSPACE_ID
+    )
+    source_mode = (
+        "human_selected_candidate_list"
+        if human_selected_candidates is not None
+        else "learning_preview_supervised_candidates"
+    )
+    if human_selected_candidates is not None:
+        source_candidates = human_selected_candidates.get("selected_candidates") or []
+    elif learning_preview is not None:
+        source_candidates = learning_preview.get("supervised_example_candidates") or []
+    else:
+        source_candidates = []
+    learning_preview_paths = _mapping_dict(learning_preview.get("paths")) if learning_preview is not None else {}
+    human_selected_paths = (
+        _mapping_dict(human_selected_candidates.get("paths"))
+        if human_selected_candidates is not None
+        else {}
+    )
+    source_paths = _mapping_dict(source_artifact.get("source_paths"))
+    source_learning_preview_path = (
+        _clean_text(source_artifact.get("source_learning_preview_path"))
+        or _clean_text(source_paths.get("source_learning_preview_path"))
+    )
+    if source_learning_preview_path is None and learning_preview is not None:
+        source_learning_preview_path = _learning_preview_artifact_path(learning_preview)
+    source_human_selected_path = (
+        _human_selected_candidate_list_artifact_path(human_selected_candidates)
+        if human_selected_candidates is not None
+        else None
+    )
+    source_has_durable_learning_preview = _path_is_file(source_learning_preview_path)
+    source_has_durable_human_selection = (
+        source_mode != "human_selected_candidate_list"
+        or _path_is_file(source_human_selected_path)
+    )
+    candidates = [
+        _jsonl_dry_run_candidate_record(
+            workspace_id=resolved_workspace_id,
+            candidate=candidate,
+            source_index=index,
+            source_kind=source_mode,
+            source_has_durable_learning_preview=source_has_durable_learning_preview,
+            source_has_durable_human_selection=source_has_durable_human_selection,
+        )
+        for index, candidate in enumerate(source_candidates)
+        if isinstance(candidate, Mapping)
+    ]
+    future_candidate_count = sum(
+        1
+        for candidate in candidates
+        if bool(candidate.get("dry_run_eligible_for_future_export_if_separately_approved"))
+    )
+    policy_confirmed_candidate_count = sum(
+        1
+        for candidate in candidates
+        if bool(_mapping_dict(candidate.get("policy")).get("export_policy_confirmed"))
+    )
+    missing_candidate_count = sum(
+        1
+        for candidate in candidates
+        if candidate.get("dry_run_status") == "missing_learning_preview_candidate"
+    )
+    blocked_candidate_count = len(candidates) - future_candidate_count
+    return {
+        "schema_name": JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME,
+        "schema_version": JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_VERSION,
+        "workspace_id": resolved_workspace_id,
+        "generated_at_utc": timestamp_utc(),
+        "export_mode": "preview_only",
+        "artifact_kind": "jsonl_training_export_dry_run_manifest",
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "not_trainable": True,
+        "source_mode": source_mode,
+        "source_learning_preview_path": source_learning_preview_path,
+        "source_human_selected_candidates_path": source_human_selected_path,
+        "source_paths": {
+            **copy.deepcopy(dict(source_paths)),
+            "source_learning_preview_path": source_learning_preview_path,
+            "learning_preview_latest_path": _clean_text(learning_preview_paths.get("learning_preview_latest_path")),
+            "learning_preview_run_path": _clean_text(learning_preview_paths.get("learning_preview_run_path")),
+            "source_human_selected_candidates_path": source_human_selected_path,
+            "human_selected_latest_path": _clean_text(human_selected_paths.get("human_selected_latest_path")),
+            "human_selected_run_path": _clean_text(human_selected_paths.get("human_selected_run_path")),
+        },
+        "counts": {
+            "source_candidate_count": len(source_candidates),
+            "inspected_candidate_count": len(candidates),
+            "future_jsonl_candidate_if_separately_approved_count": future_candidate_count,
+            "blocked_candidate_count": blocked_candidate_count,
+            "missing_candidate_count": missing_candidate_count,
+            "policy_confirmed_candidate_count": policy_confirmed_candidate_count,
+            "would_write_jsonl_record_count": 0,
+            "supervised_example_text_copied_count": 0,
+            "raw_log_text_copied_count": 0,
+        },
+        "candidates": candidates,
+        "export_policy": {
+            "mode": "preview_only",
+            "artifact_kind": "validation_report_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "not_trainable": True,
+            "training_job_allowed": False,
+            "raw_log_export_allowed": False,
+            "jsonl_training_export_allowed": False,
+            "jsonl_file_written": False,
+            "selection_does_not_promote_candidate": True,
+            "downstream_export_requires_separate_approval": True,
+        },
+        "dry_run_manifest": {
+            "manifest_kind": "preview_only_validation_report",
+            "file_extension": ".json",
+            "jsonl_file_written": False,
+            "trainable_artifact_written": False,
+            "would_write_jsonl_record_count": 0,
+        },
+        "notes": [
+            "Dry-run only; no JSONL file or trainable dataset artifact is produced.",
+            "Human-selected candidates remain inspection inputs and do not promote unready candidates.",
+            "Supervised example text and raw logs are not copied into this artifact.",
+            "A separate downstream export approval and M8 training-job design are required before training export.",
+        ],
+    }
+
+
+def record_jsonl_training_export_dry_run(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    learning_preview: Mapping[str, Any] | None = None,
+    human_selected_candidates: Mapping[str, Any] | None = None,
+    snapshot: Mapping[str, Any] | None = None,
+    curation_preview: Mapping[str, Any] | None = None,
+    curation_filters: Mapping[str, Any] | None = None,
+    learning_limit: int | None = None,
+) -> tuple[dict[str, Any], Path, Path]:
+    resolved_root = _resolve_root(root)
+    source_learning_preview = learning_preview
+    source_human_selected_candidates = human_selected_candidates
+    if source_human_selected_candidates is not None:
+        persisted_selection = _read_human_selected_candidate_list_artifact(source_human_selected_candidates)
+        if persisted_selection is not None:
+            source_human_selected_candidates = persisted_selection
+        else:
+            source_human_selected_candidates = _record_supplied_human_selected_candidate_list(
+                source_human_selected_candidates,
+                root=resolved_root,
+                workspace_id=workspace_id,
+            )
+    if source_human_selected_candidates is None and source_learning_preview is None:
+        source_learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+            root=resolved_root,
+            workspace_id=workspace_id,
+            snapshot=snapshot,
+            curation_preview=curation_preview,
+            curation_filters=curation_filters,
+            limit=learning_limit,
+        )
+    elif (
+        source_human_selected_candidates is None
+        and source_learning_preview is not None
+        and not _learning_preview_artifact_is_readable(source_learning_preview)
+    ):
+        source_learning_preview = _record_supplied_learning_preview(
+            source_learning_preview,
+            root=resolved_root,
+            workspace_id=workspace_id,
+        )
+    payload = build_jsonl_training_export_dry_run(
+        learning_preview=source_learning_preview,
+        human_selected_candidates=source_human_selected_candidates,
+        workspace_id=workspace_id,
+    )
+    latest_path = jsonl_training_export_dry_run_latest_path(workspace_id=workspace_id, root=resolved_root)
+    run_path = jsonl_training_export_dry_run_run_path(workspace_id=workspace_id, root=resolved_root)
+    payload["paths"] = {
+        "jsonl_export_dry_run_latest_path": str(latest_path),
+        "jsonl_export_dry_run_run_path": str(run_path),
+        "source_learning_preview_path": _clean_text(payload.get("source_learning_preview_path")),
+        "source_human_selected_candidates_path": _clean_text(payload.get("source_human_selected_candidates_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload, latest_path, run_path
+
+
 def _curation_preview_artifact_path(preview: Mapping[str, Any]) -> str | None:
     paths = _mapping_dict(preview.get("paths"))
     return (
@@ -3294,6 +3856,51 @@ def format_human_selected_candidate_list_report(selection: Mapping[str, Any]) ->
             lines.append(
                 f"- {state}: {label} "
                 f"(supervised={supervised}; policy={policy_state}; next={next_action})"
+            )
+    return "\n".join(lines)
+
+
+def format_jsonl_training_export_dry_run_report(dry_run: Mapping[str, Any]) -> str:
+    counts = _mapping_dict(dry_run.get("counts"))
+    paths = _mapping_dict(dry_run.get("paths"))
+    lines = [
+        "JSONL training export dry-run: preview_only",
+        f"Source mode: {_clean_text(dry_run.get('source_mode')) or 'n/a'}",
+        f"Inspected: {int(counts.get('inspected_candidate_count') or 0)}",
+        (
+            "Future candidates if separately approved: "
+            f"{int(counts.get('future_jsonl_candidate_if_separately_approved_count') or 0)}"
+        ),
+        f"Blocked: {int(counts.get('blocked_candidate_count') or 0)}",
+        f"Policy confirmed: {int(counts.get('policy_confirmed_candidate_count') or 0)}",
+        "JSONL file written: no",
+        "Training export ready: no",
+        "Trainable artifact: no",
+        "Human gate: required",
+    ]
+    if paths.get("jsonl_export_dry_run_latest_path"):
+        lines.append(f"Dry-run: {paths['jsonl_export_dry_run_latest_path']}")
+    candidates = [
+        item
+        for item in dry_run.get("candidates") or []
+        if isinstance(item, Mapping)
+    ]
+    if candidates:
+        lines.extend(("", "Dry-run candidates:"))
+        for item in candidates[:5]:
+            label = _single_line_report_label(
+                _clean_text(item.get("label"))
+                or _clean_text(item.get("event_id"))
+                or "candidate"
+            )
+            status = _clean_text(item.get("dry_run_status")) or "unknown"
+            next_action = _clean_text(item.get("next_action")) or "review_candidate"
+            policy = _mapping_dict(item.get("policy"))
+            policy_state = "confirmed" if policy.get("export_policy_confirmed") else "pending"
+            future = "yes" if item.get("dry_run_eligible_for_future_export_if_separately_approved") else "no"
+            lines.append(
+                f"- {status}: {label} "
+                f"(future={future}; policy={policy_state}; next={next_action})"
             )
     return "\n".join(lines)
 
