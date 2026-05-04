@@ -1583,6 +1583,16 @@ def _path_from_text(value: Any) -> Path | None:
     return Path(cleaned).expanduser()
 
 
+def _path_is_file(value: Any) -> bool:
+    path = _path_from_text(value)
+    if path is None:
+        return False
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _read_json_object(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
         return {}
@@ -3408,6 +3418,8 @@ def _jsonl_dry_run_candidate_record(
     candidate: Mapping[str, Any],
     source_index: int,
     source_kind: str,
+    source_has_durable_learning_preview: bool,
+    source_has_durable_human_selection: bool,
 ) -> dict[str, Any]:
     queue_summary = _mapping_dict(candidate.get("review_queue"))
     if not queue_summary and "queue_state" in candidate:
@@ -3427,7 +3439,10 @@ def _jsonl_dry_run_candidate_record(
     if not preview_membership:
         preview_membership = {
             "in_review_queue": bool(queue_summary),
-            "in_supervised_example_candidates": True,
+            "in_supervised_example_candidates": (
+                source_kind == "learning_preview_supervised_candidates"
+                and source_has_durable_learning_preview
+            ),
             "in_excluded_candidates": False,
         }
     blocked_reasons = sorted(
@@ -3438,13 +3453,24 @@ def _jsonl_dry_run_candidate_record(
             + _string_list(queue_summary.get("excluded_by"))
         )
     )
-    eligible_for_supervised = bool(
+    candidate_claims_supervised = bool(
         candidate.get("eligible_for_supervised_candidate")
         or queue_summary.get("eligible_for_supervised_candidate")
         or preview_membership.get("in_supervised_example_candidates")
     )
+    source_has_durable_artifacts = source_has_durable_learning_preview and (
+        source_kind != "human_selected_candidate_list"
+        or source_has_durable_human_selection
+    )
+    preview_membership_supports_supervised = bool(
+        preview_membership.get("in_supervised_example_candidates")
+        and source_has_durable_artifacts
+    )
+    eligible_for_supervised = candidate_claims_supervised and preview_membership_supports_supervised
     if not eligible_for_supervised and not blocked_reasons:
         blocked_reasons.append("not_eligible_for_supervised_candidate")
+    if candidate_claims_supervised and not source_has_durable_artifacts:
+        blocked_reasons.append("missing_durable_source_artifact")
     policy_confirmed = bool(policy.get("export_policy_confirmed"))
     if not policy_confirmed and "export_policy_not_confirmed" not in blocked_reasons:
         blocked_reasons.append("export_policy_not_confirmed")
@@ -3462,7 +3488,12 @@ def _jsonl_dry_run_candidate_record(
     if eligible_for_supervised and policy_confirmed and not has_required_traceability:
         blocked_reasons.append("missing_required_traceability")
     blocked_reasons = sorted(set(blocked_reasons))
-    future_candidate = eligible_for_supervised and policy_confirmed and has_required_traceability
+    future_candidate = (
+        eligible_for_supervised
+        and policy_confirmed
+        and has_required_traceability
+        and source_has_durable_artifacts
+    )
     if future_candidate:
         dry_run_status = "future_jsonl_candidate_if_separately_approved"
     elif "missing_learning_preview_candidate" in blocked_reasons:
@@ -3558,12 +3589,37 @@ def build_jsonl_training_export_dry_run(
         source_candidates = learning_preview.get("supervised_example_candidates") or []
     else:
         source_candidates = []
+    learning_preview_paths = _mapping_dict(learning_preview.get("paths")) if learning_preview is not None else {}
+    human_selected_paths = (
+        _mapping_dict(human_selected_candidates.get("paths"))
+        if human_selected_candidates is not None
+        else {}
+    )
+    source_paths = _mapping_dict(source_artifact.get("source_paths"))
+    source_learning_preview_path = (
+        _clean_text(source_artifact.get("source_learning_preview_path"))
+        or _clean_text(source_paths.get("source_learning_preview_path"))
+    )
+    if source_learning_preview_path is None and learning_preview is not None:
+        source_learning_preview_path = _learning_preview_artifact_path(learning_preview)
+    source_human_selected_path = (
+        _human_selected_candidate_list_artifact_path(human_selected_candidates)
+        if human_selected_candidates is not None
+        else None
+    )
+    source_has_durable_learning_preview = _path_is_file(source_learning_preview_path)
+    source_has_durable_human_selection = (
+        source_mode != "human_selected_candidate_list"
+        or _path_is_file(source_human_selected_path)
+    )
     candidates = [
         _jsonl_dry_run_candidate_record(
             workspace_id=resolved_workspace_id,
             candidate=candidate,
             source_index=index,
             source_kind=source_mode,
+            source_has_durable_learning_preview=source_has_durable_learning_preview,
+            source_has_durable_human_selection=source_has_durable_human_selection,
         )
         for index, candidate in enumerate(source_candidates)
         if isinstance(candidate, Mapping)
@@ -3584,24 +3640,6 @@ def build_jsonl_training_export_dry_run(
         if candidate.get("dry_run_status") == "missing_learning_preview_candidate"
     )
     blocked_candidate_count = len(candidates) - future_candidate_count
-    learning_preview_paths = _mapping_dict(learning_preview.get("paths")) if learning_preview is not None else {}
-    human_selected_paths = (
-        _mapping_dict(human_selected_candidates.get("paths"))
-        if human_selected_candidates is not None
-        else {}
-    )
-    source_paths = _mapping_dict(source_artifact.get("source_paths"))
-    source_learning_preview_path = (
-        _clean_text(source_artifact.get("source_learning_preview_path"))
-        or _clean_text(source_paths.get("source_learning_preview_path"))
-    )
-    if source_learning_preview_path is None and learning_preview is not None:
-        source_learning_preview_path = _learning_preview_artifact_path(learning_preview)
-    source_human_selected_path = (
-        _human_selected_candidate_list_artifact_path(human_selected_candidates)
-        if human_selected_candidates is not None
-        else None
-    )
     return {
         "schema_name": JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME,
         "schema_version": JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_VERSION,

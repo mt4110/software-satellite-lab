@@ -806,8 +806,13 @@ class EvaluationLoopTests(unittest.TestCase):
             comparisons=[],
         )
 
-        dry_run = build_jsonl_training_export_dry_run(learning_preview=learning_preview)
-        candidate = dry_run["candidates"][0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dry_run, _latest_path, _run_path = record_jsonl_training_export_dry_run(
+                root=root,
+                learning_preview=learning_preview,
+            )
+            candidate = dry_run["candidates"][0]
 
         self.assertEqual(dry_run["source_mode"], "learning_preview_supervised_candidates")
         self.assertFalse(dry_run["export_policy"]["jsonl_file_written"])
@@ -818,41 +823,47 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertFalse(candidate["jsonl_projection"]["raw_log_text_copied"])
 
     def test_jsonl_export_dry_run_requires_traceability_before_future_candidate(self) -> None:
-        dry_run = build_jsonl_training_export_dry_run(
-            human_selected_candidates={
-                "workspace_id": "local-default",
-                "paths": {},
-                "source_paths": {},
-                "selected_candidates": [
-                    {
-                        "event_id": "spoofed-ready-candidate",
-                        "preview_membership": {
-                            "in_review_queue": True,
-                            "in_supervised_example_candidates": True,
-                            "in_excluded_candidates": False,
-                        },
-                        "eligible_for_supervised_candidate": True,
-                        "policy": {
-                            "export_policy_confirmed": True,
-                            "training_export_ready": True,
-                            "training_job_allowed": True,
-                            "raw_log_export_allowed": True,
-                            "jsonl_training_export_allowed": True,
-                        },
-                        "evidence_summary": {
-                            "traceability": {
-                                "test_pass": False,
-                                "accepted": False,
-                                "review_resolved": False,
-                                "comparison_winner": False,
-                                "export_policy_confirmed": False,
-                            }
-                        },
-                    }
-                ],
-            }
-        )
-        candidate = dry_run["candidates"][0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            learning_preview_path = root / "learning-preview.json"
+            learning_preview_path.write_text("{}", encoding="utf-8")
+            dry_run, _latest_path, _run_path = record_jsonl_training_export_dry_run(
+                root=root,
+                human_selected_candidates={
+                    "workspace_id": "local-default",
+                    "paths": {},
+                    "source_learning_preview_path": str(learning_preview_path),
+                    "source_paths": {"source_learning_preview_path": str(learning_preview_path)},
+                    "selected_candidates": [
+                        {
+                            "event_id": "spoofed-ready-candidate",
+                            "preview_membership": {
+                                "in_review_queue": True,
+                                "in_supervised_example_candidates": True,
+                                "in_excluded_candidates": False,
+                            },
+                            "eligible_for_supervised_candidate": True,
+                            "policy": {
+                                "export_policy_confirmed": True,
+                                "training_export_ready": True,
+                                "training_job_allowed": True,
+                                "raw_log_export_allowed": True,
+                                "jsonl_training_export_allowed": True,
+                            },
+                            "evidence_summary": {
+                                "traceability": {
+                                    "test_pass": False,
+                                    "accepted": False,
+                                    "review_resolved": False,
+                                    "comparison_winner": False,
+                                    "export_policy_confirmed": False,
+                                }
+                            },
+                        }
+                    ],
+                },
+            )
+            candidate = dry_run["candidates"][0]
 
         self.assertEqual(dry_run["counts"]["future_jsonl_candidate_if_separately_approved_count"], 0)
         self.assertEqual(candidate["dry_run_status"], "missing_required_traceability")
@@ -863,6 +874,38 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertFalse(candidate["policy"]["jsonl_training_export_allowed"])
         self.assertIn("missing_required_traceability", candidate["blocked_reasons"])
         self.assertIn("restore_required_traceability", candidate["required_before_training_export"])
+
+    def test_jsonl_export_dry_run_defaults_unknown_candidates_to_non_supervised(self) -> None:
+        dry_run = build_jsonl_training_export_dry_run(
+            human_selected_candidates={
+                "workspace_id": "local-default",
+                "paths": {},
+                "source_paths": {},
+                "selected_candidates": [
+                    {
+                        "event_id": "unknown-candidate-with-spoofed-trace",
+                        "policy": {"export_policy_confirmed": True},
+                        "evidence_summary": {
+                            "traceability": {
+                                "test_pass": True,
+                                "accepted": True,
+                                "review_resolved": False,
+                                "comparison_winner": False,
+                                "export_policy_confirmed": True,
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        candidate = dry_run["candidates"][0]
+
+        self.assertFalse(candidate["preview_membership"]["in_supervised_example_candidates"])
+        self.assertFalse(candidate["eligible_for_supervised_candidate"])
+        self.assertEqual(dry_run["counts"]["future_jsonl_candidate_if_separately_approved_count"], 0)
+        self.assertEqual(candidate["dry_run_status"], "not_supervised_candidate")
+        self.assertFalse(candidate["would_write_jsonl_record"])
+        self.assertIn("not_eligible_for_supervised_candidate", candidate["blocked_reasons"])
 
     def test_jsonl_export_dry_run_persists_supplied_human_selected_candidates(self) -> None:
         supplied_selection = build_human_selected_candidate_list(
