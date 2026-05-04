@@ -924,6 +924,18 @@ class EvaluationLoopTests(unittest.TestCase):
             "instruction": "This malformed text must not be copied.",
             "response": "Dry-run artifacts stay metadata-only.",
         }
+        supplied_selection["selected_candidates"][0]["source_event"] = {
+            "event_id": "local-default:missing-selection",
+            "prompt_excerpt": "Do not persist prompt previews from supplied selections.",
+            "output_excerpt": "Do not persist output previews from supplied selections.",
+        }
+        supplied_selection["selected_candidates"][0]["source_paths"]["prompt"] = "training prompt text"
+        supplied_selection["selected_candidates"][0]["source_paths"]["output_text"] = "training output text"
+        supplied_selection["selected_candidates"][0]["source_paths"]["input_text"] = "training input text"
+        supplied_selection["selected_candidates"][0]["source_paths"]["completion"] = "training completion text"
+        supplied_selection["selected_candidates"][0]["messages"] = [
+            {"role": "user", "content": "Do not persist chat messages from supplied selections."}
+        ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -933,10 +945,22 @@ class EvaluationLoopTests(unittest.TestCase):
             )
             source_selection_path = Path(str(dry_run["source_human_selected_candidates_path"]))
             source_selection_exists = source_selection_path.exists()
+            persisted_selection = json.loads(source_selection_path.read_text(encoding="utf-8"))
+            persisted_candidate = persisted_selection["selected_candidates"][0]
             candidate = dry_run["candidates"][0]
 
         self.assertTrue(source_selection_exists)
         self.assertEqual(source_selection_path.suffix, ".json")
+        self.assertEqual(persisted_candidate["event_id"], "local-default:missing-selection")
+        self.assertIn("traceability", persisted_candidate["evidence_summary"])
+        self.assertNotIn("supervised_example", persisted_candidate["evidence_summary"])
+        self.assertNotIn("prompt_excerpt", persisted_candidate["source_event"])
+        self.assertNotIn("output_excerpt", persisted_candidate["source_event"])
+        self.assertNotIn("prompt", persisted_candidate["source_paths"])
+        self.assertNotIn("output_text", persisted_candidate["source_paths"])
+        self.assertNotIn("input_text", persisted_candidate["source_paths"])
+        self.assertNotIn("completion", persisted_candidate["source_paths"])
+        self.assertNotIn("messages", persisted_candidate)
         self.assertFalse(dry_run["training_export_ready"])
         self.assertFalse(dry_run["export_policy"]["jsonl_file_written"])
         self.assertEqual(dry_run["counts"]["missing_candidate_count"], 1)

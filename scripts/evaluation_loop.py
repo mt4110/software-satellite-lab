@@ -44,6 +44,23 @@ JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_VERSION = 1
 JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_NAME = "software-satellite-jsonl-training-export-dry-run-item"
 JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_VERSION = 1
 EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND = "export_policy_confirmed"
+HUMAN_SELECTED_SUPPLIED_TRAINING_TEXT_KEYS = {
+    "completion",
+    "completions",
+    "input",
+    "input_text",
+    "instruction",
+    "messages",
+    "output",
+    "output_excerpt",
+    "output_text",
+    "prompt",
+    "prompt_excerpt",
+    "resolved_user_prompt",
+    "response",
+    "supervised_example",
+    "system_prompt",
+}
 
 SIGNAL_KINDS = (
     "acceptance",
@@ -3285,13 +3302,25 @@ def _read_human_selected_candidate_list_artifact(selection: Mapping[str, Any]) -
     return None
 
 
+def _strip_supplied_training_text(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _strip_supplied_training_text(item)
+            for key, item in value.items()
+            if str(key) not in HUMAN_SELECTED_SUPPLIED_TRAINING_TEXT_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_supplied_training_text(item) for item in value]
+    return copy.deepcopy(value)
+
+
 def _record_supplied_human_selected_candidate_list(
     selection: Mapping[str, Any],
     *,
     root: Path,
     workspace_id: str,
 ) -> dict[str, Any]:
-    payload = copy.deepcopy(dict(selection))
+    payload = _strip_supplied_training_text(selection)
     latest_path = human_selected_candidates_latest_path(workspace_id=workspace_id, root=root)
     run_path = human_selected_candidates_run_path(workspace_id=workspace_id, root=root)
     payload["paths"] = {
