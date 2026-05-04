@@ -1096,7 +1096,12 @@ def build_evaluation_snapshot(
     event_log_path = Path(resolved_index_summary["event_log_path"])
     event_log = read_event_log(event_log_path)
     events = [dict(event) for event in event_log.get("events") or [] if isinstance(event, Mapping)]
-    event_contract = build_event_contract_report(events, root=resolved_root)
+    cached_event_contract = resolved_index_summary.get("event_contract")
+    event_contract = (
+        copy.deepcopy(dict(cached_event_contract))
+        if isinstance(cached_event_contract, Mapping)
+        else build_event_contract_report(events, root=resolved_root)
+    )
     events_by_id = {
         str(event.get("event_id")): event
         for event in events
@@ -2348,12 +2353,6 @@ def _learning_source_contract_exclusions(source_contract: Mapping[str, Any]) -> 
     return exclusions
 
 
-def _event_has_source_artifact_path(event: Mapping[str, Any]) -> bool:
-    source_refs = _mapping_dict(event.get("source_refs"))
-    artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
-    return _clean_text(artifact_ref.get("artifact_path")) is not None
-
-
 def _learning_traceability_exclusions(
     *,
     signals: Iterable[Mapping[str, Any]],
@@ -2590,9 +2589,8 @@ def build_learning_dataset_preview(
         if event_id is None or event is None:
             exclusions.append("missing_source_event")
         else:
-            if contract_root is not None or _event_has_source_artifact_path(event):
-                source_contract = build_event_contract_check(event, root=contract_root)
-                exclusions.extend(_learning_source_contract_exclusions(source_contract))
+            source_contract = build_event_contract_check(event, root=contract_root)
+            exclusions.extend(_learning_source_contract_exclusions(source_contract))
             supervised_example = _learning_supervised_example(event)
             missing_instruction = _clean_text(supervised_example.get("instruction")) is None
             missing_response = _clean_text(supervised_example.get("response")) is None

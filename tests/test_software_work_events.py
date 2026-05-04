@@ -216,15 +216,33 @@ class SoftwareWorkEventTests(unittest.TestCase):
                     }
                 },
             }
+            outside_event = {
+                "event_id": "local-default:session:outside",
+                "event_kind": "chat_turn",
+                "outcome": {"status": "ok"},
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_path": str(root.parent / "outside-workspace-source.json")
+                    }
+                },
+            }
 
             readable_check = build_event_contract_check(readable_event, root=root)
             missing_check = build_event_contract_check(missing_event, root=root)
+            outside_check = build_event_contract_check(outside_event, root=root)
             report = build_event_contract_report([readable_event, missing_event], root=root)
 
         self.assertEqual(readable_check["contract_status"], "ok")
         self.assertEqual(readable_check["source_artifact"]["source_status"], "readable")
         self.assertEqual(missing_check["contract_status"], "missing_source")
         self.assertIn("source_artifact_missing", missing_check["source_artifact"]["reasons"])
+        self.assertEqual(outside_check["contract_status"], "missing_source")
+        self.assertEqual(outside_check["source_artifact"]["durability_status"], "outside_workspace")
+        self.assertEqual(outside_check["source_artifact"]["readability_status"], "not_checked")
+        self.assertEqual(
+            outside_check["source_artifact"]["reasons"],
+            ["source_artifact_outside_workspace"],
+        )
         self.assertEqual(report["failed_event_count"], 1)
         self.assertEqual(report["source_status_counts"]["missing_source"], 1)
 

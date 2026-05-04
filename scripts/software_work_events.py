@@ -152,25 +152,26 @@ def build_event_contract_check(
         workspace_relative_path = _workspace_relative_path(resolved_artifact_path, root=resolved_root)
         if workspace_relative_path is None:
             durability_status = "outside_workspace"
+            readability_status = "not_checked"
             source_reasons.append("source_artifact_outside_workspace")
         else:
             durability_status = "durable"
 
-        if not resolved_artifact_path.exists():
-            readability_status = "missing"
-            source_reasons.append("source_artifact_missing")
-        elif not resolved_artifact_path.is_file():
-            readability_status = "unreadable"
-            source_reasons.append("source_artifact_not_file")
-        else:
-            try:
-                with resolved_artifact_path.open("rb") as handle:
-                    handle.read(1)
-            except OSError:
+            if not resolved_artifact_path.exists():
+                readability_status = "missing"
+                source_reasons.append("source_artifact_missing")
+            elif not resolved_artifact_path.is_file():
                 readability_status = "unreadable"
-                source_reasons.append("source_artifact_unreadable")
+                source_reasons.append("source_artifact_not_file")
             else:
-                readability_status = "readable"
+                try:
+                    with resolved_artifact_path.open("rb") as handle:
+                        handle.read(1)
+                except OSError:
+                    readability_status = "unreadable"
+                    source_reasons.append("source_artifact_unreadable")
+                else:
+                    readability_status = "readable"
 
     source_status = "readable" if not source_reasons else "missing_source"
     if source_status == "missing_source":

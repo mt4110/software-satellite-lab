@@ -46,6 +46,15 @@ from run_evaluation_loop import main as evaluation_main  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
+def readable_test_source_refs(*, artifact_kind: str = "agent_run") -> dict[str, object]:
+    return {
+        "artifact_ref": {
+            "artifact_kind": artifact_kind,
+            "artifact_path": str(Path(__file__).resolve()),
+        }
+    }
+
+
 def write_capability_matrix(root: Path) -> None:
     matrix_path = root / "artifacts" / "capability_matrix" / "matrix.json"
     pass_artifact_path = root / "artifacts" / "text" / "pass.json"
@@ -796,7 +805,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Dry-run remains preview-only.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1234,7 +1243,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Policy confirmation does not permit training export.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1350,7 +1359,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Derived test pass remains traceable.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         accepted_signal = build_evaluation_signal(
             signal_kind="acceptance",
@@ -1401,7 +1410,7 @@ class EvaluationLoopTests(unittest.TestCase):
                         "pass_definition": "Queue ordering remains stable.",
                     },
                 },
-                "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+                "source_refs": readable_test_source_refs(),
             }
 
         confirmed_event = ready_event("a-confirmed-policy")
@@ -1778,7 +1787,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "The candidate still has a failed lifecycle reason.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         preview = build_learning_dataset_preview(
             {"workspace_id": "local-default", "paths": {}},
@@ -1846,7 +1855,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "The preview should keep the rejection visible.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
 
         preview = build_learning_dataset_preview(
@@ -1888,7 +1897,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "output_text": "But no traceable test or selection evidence exists.",
                 "options": {},
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
 
         preview = build_learning_dataset_preview(
@@ -1941,7 +1950,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Derived test pass remains traceable.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         resolved_signal = build_evaluation_signal(
             signal_kind="review_resolved",
@@ -2003,7 +2012,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Latest validation passes.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         failed_signal = build_evaluation_signal(
             signal_kind="test_fail",
@@ -2071,7 +2080,7 @@ class EvaluationLoopTests(unittest.TestCase):
                     "pass_definition": "Latest validation must pass.",
                 },
             },
-            "source_refs": {"artifact_ref": {"artifact_kind": "agent_run"}},
+            "source_refs": readable_test_source_refs(),
         }
         passed_signal = build_evaluation_signal(
             signal_kind="test_pass",
