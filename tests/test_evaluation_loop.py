@@ -43,6 +43,7 @@ from evaluation_loop import (  # noqa: E402
 )
 from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
 from run_evaluation_loop import main as evaluation_main  # noqa: E402
+from software_work_events import write_event_log  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
@@ -2390,6 +2391,350 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(blocked_candidates[0]["state"], "blocked")
         self.assertIn("review_unresolved", blocked_candidates[0]["reasons"])
         self.assertNotIn("review_resolved", blocked_candidates[0]["reasons"])
+
+    def test_snapshot_consistency_report_explains_newer_negative_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_id = "stale-positive-event"
+            event = {
+                "schema_name": "software-satellite-event",
+                "schema_version": 1,
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "workspace": {"workspace_id": "local-default"},
+                "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+                "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+                "content": {
+                    "prompt": "Keep stale positives out of promotion.",
+                    "output_text": "This candidate later regressed.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_consistency",
+                        "pass_definition": "Latest negative traces win.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+                "tags": [],
+            }
+            event_log_path = root / "artifacts" / "event_logs" / "local-default.jsonl"
+            write_event_log(event_log_path, [event], workspace_id="local-default")
+            for signal in (
+                build_evaluation_signal(
+                    signal_kind="acceptance",
+                    source_event_id=event_id,
+                    source_event=event,
+                    recorded_at_utc="2026-04-01T00:01:00+00:00",
+                    signal_id="local-default:eval:acceptance",
+                ),
+                build_evaluation_signal(
+                    signal_kind="review_resolved",
+                    source_event_id=event_id,
+                    source_event=event,
+                    recorded_at_utc="2026-04-01T00:02:00+00:00",
+                    signal_id="local-default:eval:review-resolved",
+                ),
+                build_evaluation_signal(
+                    signal_kind="test_fail",
+                    source_event_id=event_id,
+                    source_event=event,
+                    recorded_at_utc="2026-04-01T00:03:00+00:00",
+                    signal_id="local-default:eval:test-fail",
+                ),
+                build_evaluation_signal(
+                    signal_kind="rejection",
+                    source_event_id=event_id,
+                    source_event=event,
+                    recorded_at_utc="2026-04-01T00:04:00+00:00",
+                    signal_id="local-default:eval:rejection",
+                ),
+                build_evaluation_signal(
+                    signal_kind="review_unresolved",
+                    source_event_id=event_id,
+                    source_event=event,
+                    recorded_at_utc="2026-04-01T00:05:00+00:00",
+                    signal_id="local-default:eval:review-unresolved",
+                ),
+            ):
+                append_evaluation_signal(
+                    evaluation_signal_log_path(root=root),
+                    signal,
+                    workspace_id="local-default",
+                )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(
+                root=root,
+                index_summary={
+                    "event_log_path": str(event_log_path),
+                    "index_path": str(root / "artifacts" / "indexes" / "test.sqlite3"),
+                },
+            )
+            consistency_item = snapshot["evaluation_consistency"]["events"][0]
+            report = format_evaluation_snapshot_report(snapshot)
+
+        self.assertEqual(snapshot["counts"]["curation_blocked"], 1)
+        self.assertEqual(snapshot["counts"]["stale_positive_signal"], 3)
+        self.assertEqual(snapshot["counts"]["negative_signal_wins"], 3)
+        self.assertIn("test_pass", consistency_item["stale_positive_signals"])
+        self.assertIn("accepted", consistency_item["stale_positive_signals"])
+        self.assertIn("review_resolved", consistency_item["stale_positive_signals"])
+        self.assertIn("test_pass", consistency_item["stale_positive_reasons"])
+        self.assertIn("accepted", consistency_item["stale_positive_reasons"])
+        self.assertEqual(consistency_item["latest_signals"]["test"]["signal_kind"], "test_fail")
+        self.assertEqual(consistency_item["latest_signals"]["selection"]["signal_kind"], "rejection")
+        self.assertEqual(consistency_item["latest_signals"]["review"]["signal_kind"], "review_unresolved")
+        self.assertIn("Consistency stale positives: 3", report)
+        self.assertIn("Evaluation consistency:", report)
+
+    def test_snapshot_consistency_report_flags_untraceable_comparison_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            event_log_path = root / "artifacts" / "event_logs" / "local-default.jsonl"
+            write_event_log(event_log_path, [], workspace_id="local-default")
+            comparison = build_evaluation_comparison(
+                candidate_event_ids=["missing-winner", "missing-loser"],
+                winner_event_id="missing-winner",
+                recorded_at_utc="2026-04-01T00:00:00+00:00",
+                comparison_id="local-default:compare:missing-winner",
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(root=root),
+                comparison,
+                workspace_id="local-default",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(
+                root=root,
+                index_summary={
+                    "event_log_path": str(event_log_path),
+                    "index_path": str(root / "artifacts" / "indexes" / "test.sqlite3"),
+                },
+            )
+            issue_event = snapshot["evaluation_consistency"]["issue_events"][0]
+
+        self.assertEqual(snapshot["counts"]["comparison_winner_missing_trace"], 1)
+        self.assertEqual(snapshot["counts"]["missing_trace"], 1)
+        self.assertEqual(issue_event["event_id"], "missing-winner")
+        self.assertIn("comparison_winner_missing_source_event", issue_event["missing_traces"])
+        self.assertFalse(issue_event["source_trace"]["source_event_present"])
+
+    def test_snapshot_consistency_report_preserves_source_artifact_contract_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            event_id = "outside-source-winner"
+            event = {
+                "schema_name": "software-satellite-event",
+                "schema_version": 1,
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "workspace": {"workspace_id": "local-default"},
+                "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+                "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+                "content": {
+                    "prompt": "Preserve source artifact contract reasons.",
+                    "output_text": "The comparison winner points outside the workspace root.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_contract",
+                        "pass_definition": "Winner evidence returns to a durable source artifact.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(Path(__file__).resolve()),
+                    },
+                },
+                "tags": [],
+            }
+            event_log_path = root / "artifacts" / "event_logs" / "local-default.jsonl"
+            write_event_log(event_log_path, [event], workspace_id="local-default")
+            comparison = build_evaluation_comparison(
+                candidate_event_ids=[event_id, "missing-loser"],
+                winner_event_id=event_id,
+                recorded_at_utc="2026-04-01T00:01:00+00:00",
+                comparison_id="local-default:compare:outside-source-winner",
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(root=root),
+                comparison,
+                workspace_id="local-default",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(
+                root=root,
+                index_summary={
+                    "event_log_path": str(event_log_path),
+                    "index_path": str(root / "artifacts" / "indexes" / "test.sqlite3"),
+                },
+            )
+            issue_event = snapshot["evaluation_consistency"]["issue_events"][0]
+
+        self.assertEqual(snapshot["counts"]["comparison_winner_missing_trace"], 1)
+        self.assertIn("comparison_winner_source_artifact_not_durable", issue_event["missing_traces"])
+        self.assertIn(
+            "source_artifact_outside_workspace",
+            issue_event["source_trace"]["source_artifact_reasons"],
+        )
+
+    def test_learning_preview_explains_stale_positive_trace_exclusions(self) -> None:
+        event = {
+            "event_id": "stale-learning-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Do not promote stale positive evidence.",
+                "output_text": "The later traces turned negative.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_stale",
+                    "pass_definition": "Latest negative traces win.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        signals = [
+            build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:00:00+00:00",
+                signal_id="local-default:eval:test-pass",
+            ),
+            build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:01:00+00:00",
+                signal_id="local-default:eval:acceptance",
+            ),
+            build_evaluation_signal(
+                signal_kind="review_resolved",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:02:00+00:00",
+                signal_id="local-default:eval:review-resolved",
+            ),
+            build_evaluation_signal(
+                signal_kind="test_fail",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:03:00+00:00",
+                signal_id="local-default:eval:test-fail",
+            ),
+            build_evaluation_signal(
+                signal_kind="rejection",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:04:00+00:00",
+                signal_id="local-default:eval:rejection",
+            ),
+            build_evaluation_signal(
+                signal_kind="review_unresolved",
+                source_event_id="stale-learning-candidate",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:05:00+00:00",
+                signal_id="local-default:eval:review-unresolved",
+            ),
+        ]
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "stale-learning-candidate",
+                        "state": "ready",
+                        "label": "Stale learning candidate",
+                        "reasons": ["accepted", "review_resolved", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"stale-learning-candidate": event},
+            explicit_signals=signals,
+            comparisons=[],
+        )
+        excluded = preview["excluded_candidates"][0]
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertFalse(preview["training_export_ready"])
+        self.assertTrue(preview["human_gate_required"])
+        self.assertIn("test_fail_trace", excluded["excluded_by"])
+        self.assertIn("stale_test_pass_trace", excluded["excluded_by"])
+        self.assertIn("rejected_trace", excluded["excluded_by"])
+        self.assertIn("stale_accepted_trace", excluded["excluded_by"])
+        self.assertIn("review_unresolved_trace", excluded["excluded_by"])
+        self.assertIn("stale_review_resolved_trace", excluded["excluded_by"])
+        self.assertEqual(excluded["blocked_reason"], "review_unresolved")
+        self.assertEqual(excluded["lifecycle_summary"]["test_state"], "failed")
+        self.assertEqual(excluded["lifecycle_summary"]["selection_state"], "rejected")
+        self.assertEqual(excluded["lifecycle_summary"]["review_state"], "unresolved")
+
+    def test_learning_preview_explains_missing_comparison_winner_trace_without_snapshot_report(self) -> None:
+        event = {
+            "event_id": "missing-comparison-trace-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Do not trust comparison_winner curation without a comparison trace.",
+                "output_text": "This candidate needs the winner trace restored before learning preview promotion.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_comparison_trace",
+                    "pass_definition": "Comparison winner reason is traceable.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        test_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="missing-comparison-trace-candidate",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:missing-comparison:test-pass",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "missing-comparison-trace-candidate",
+                        "state": "ready",
+                        "label": "Missing comparison trace candidate",
+                        "reasons": ["comparison_winner", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"missing-comparison-trace-candidate": event},
+            explicit_signals=[test_signal],
+            comparisons=[],
+        )
+        excluded = preview["excluded_candidates"][0]
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertIn("missing_comparison_winner_trace", excluded["excluded_by"])
+        self.assertIn("missing_selection_trace", excluded["excluded_by"])
+        self.assertEqual(excluded["next_action"], "record_comparison_winner_trace")
 
     def test_cli_records_explicit_signal_and_prints_json_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
