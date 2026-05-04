@@ -21,6 +21,7 @@ from evaluation_loop import (  # noqa: E402
     append_evaluation_comparison,
     append_evaluation_signal,
     build_evaluation_comparison,
+    build_evaluation_consistency_report,
     build_evaluation_signal,
     build_human_selected_candidate_list,
     build_jsonl_training_export_dry_run,
@@ -2525,6 +2526,38 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(issue_event["event_id"], "missing-winner")
         self.assertIn("comparison_winner_missing_source_event", issue_event["missing_traces"])
         self.assertFalse(issue_event["source_trace"]["source_event_present"])
+
+    def test_consistency_report_rolls_up_missing_comparison_winner_reason_trace(self) -> None:
+        event = {
+            "event_id": "stale-comparison-winner-candidate",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Explain missing comparison winner traces in rollups.",
+                "output_text": "The curation reason is stale without a winner_selected trace.",
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+
+        report = build_evaluation_consistency_report(
+            signal_summaries=[],
+            comparison_summaries=[],
+            curation_candidates=[
+                {
+                    "event_id": "stale-comparison-winner-candidate",
+                    "state": "ready",
+                    "reasons": ["comparison_winner"],
+                }
+            ],
+            events_by_id={"stale-comparison-winner-candidate": event},
+        )
+        issue_event = report["issue_events"][0]
+
+        self.assertEqual(report["counts"]["missing_trace"], 1)
+        self.assertEqual(report["counts"]["comparison_winner_missing_trace"], 1)
+        self.assertIn("missing_comparison_winner_trace", issue_event["missing_traces"])
 
     def test_snapshot_consistency_report_preserves_source_artifact_contract_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

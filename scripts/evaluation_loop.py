@@ -1367,6 +1367,7 @@ def build_evaluation_consistency_report(
             inconsistencies.append("missing_comparison_winner_trace")
             issue_counts["missing_comparison_winner_trace"] += 1
             issue_counts["missing_trace"] += 1
+            issue_counts["comparison_winner_missing_trace"] += 1
 
         source_trace = _consistency_source_trace(
             event_id=event_id,
