@@ -76,6 +76,13 @@ M7 の新しい出力は learning dataset preview です。
 - `artifacts/evaluation/<workspace>/learning/preview-latest.json`
 - `artifacts/evaluation/<workspace>/learning/runs/*-learning-preview.json`
 
+M7.3 では、人間が明示的に選んだ候補リストも preview-only artifact として残せる。
+
+保存先:
+
+- `artifacts/evaluation/<workspace>/learning/human-selected-latest.json`
+- `artifacts/evaluation/<workspace>/learning/runs/*-human-selected-candidates.json`
+
 この artifact は preview-only で、trainable dataset ではない。
 `training_export_ready` は常に `false` で、`human_gate_required` は常に `true` です。
 
@@ -324,6 +331,79 @@ priority bucket は `ready_policy_confirmed` に移す。
 policy confirmation は「学習に進める許可」ではなく、
 「preview-only 境界を人間が確認した証跡」です。
 
+## M7.3 Human-Selected Candidate List
+
+M7.3 では、learning preview / review queue を見た人間が、
+候補 event id を明示的に選んだ事実だけを file-first artifact として残す。
+
+これは supervised candidate の採用条件を置き換えない。
+`accepted` / `review_resolved` / `comparison_winner` / `test_pass` /
+`export_policy_confirmed` の traceability は、引き続き learning preview 側の evidence から読む。
+human-selected list は、それらを silent に補完したり、未 ready 候補を昇格したりしない。
+
+最低限の shape:
+
+```json
+{
+  "schema_name": "software-satellite-human-selected-candidate-list",
+  "schema_version": 1,
+  "workspace_id": "local-default",
+  "export_mode": "preview_only",
+  "training_export_ready": false,
+  "human_gate_required": true,
+  "source_learning_preview_path": "artifacts/evaluation/local-default/learning/runs/...",
+  "selection": {
+    "origin": "cli",
+    "selection_mode": "explicit_human_candidate_list",
+    "selected_event_ids": ["<source-event-id>"],
+    "rationale": "Human-selected shortlist."
+  },
+  "selected_candidates": [
+    {
+      "event_id": "<source-event-id>",
+      "preview_membership": {
+        "in_review_queue": true,
+        "in_supervised_example_candidates": true,
+        "in_excluded_candidates": false
+      },
+      "eligible_for_supervised_candidate": true,
+      "queue_state": "ready",
+      "next_action": "review_downstream_export_policy",
+      "evidence_summary": {
+        "signal_ids": ["local-default:eval:..."],
+        "comparison_ids": [],
+        "export_policy_confirmation_signal_id": "local-default:eval:...",
+        "traceability": {
+          "test_pass": true,
+          "accepted": true,
+          "review_resolved": false,
+          "comparison_winner": false,
+          "export_policy_confirmed": true
+        }
+      },
+      "policy": {
+        "export_mode": "preview_only",
+        "training_export_ready": false,
+        "human_gate_required": true,
+        "training_job_allowed": false,
+        "raw_log_export_allowed": false,
+        "downstream_export_requires_separate_approval": true
+      }
+    }
+  ]
+}
+```
+
+選ばれた event id が learning preview に存在しない場合も、捨てずに
+`missing_learning_preview_candidate` として artifact に残す。
+存在しているが `blocked` / `needs_review` の候補も、
+`eligible_for_supervised_candidate=false` のまま残す。
+
+大事なのは、人間の shortlist が「次に見る対象」を示すだけで、
+training export の許可や JSONL 生成を意味しない点です。
+ここを混ぜると silent feedback loop になります。
+それは M7 の境界として間違いです。
+
 ## CLI
 
 評価スナップショット、curation preview、learning preview は同じ CLI から作れる。
@@ -350,6 +430,18 @@ export policy confirmation を記録する場合:
 
 これは `signals.jsonl` に `export_policy_confirmed` を追記し、learning preview を更新するだけです。
 trainable dataset、JSONL training export、外部 training job は作らない。
+
+human-selected candidate list を記録する場合:
+
+```bash
+.venv/bin/python scripts/run_evaluation_loop.py \
+  --human-selected-candidates \
+  --select-candidate-event-id <source-event-id> \
+  --rationale "Human selected this candidate for preview inspection."
+```
+
+これは learning preview を source artifact として参照し、選択された event id の shortlist を書くだけです。
+supervised example の本文はコピーせず、trainable dataset、JSONL training export、外部 training job は作らない。
 
 `--curation-state` や `--curation-reason` は source curation preview のフィルタとして使えるが、
 learning preview 側はさらに安全な採用条件をかける。
@@ -381,6 +473,7 @@ M7 の次に進むなら、次を小さく足す。
 - export policy confirmation の明示 signal
   - M7.2 で `export_policy_confirmed` として追加済み
 - human-selected candidate list
+  - M7.3 で preview-only artifact として追加済み
 - JSONL training export の dry-run
 - candidate diff
 - candidate review UI
