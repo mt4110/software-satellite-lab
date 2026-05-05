@@ -316,6 +316,59 @@ class RecallContextTests(unittest.TestCase):
         self.assertIn("priority:design:rejected", ranked[0].reasons)
         self.assertNotIn("priority:design:accepted", ranked[0].reasons)
 
+    def test_execution_ok_without_explicit_pass_signal_is_not_test_pass_evidence(self) -> None:
+        request = normalize_recall_request(
+            {
+                "task_kind": "proposal",
+                "query_text": "proposal rollout",
+            }
+        )
+        candidate = RecallCandidate(
+            event_id="ordinary-ok",
+            recorded_at_utc="2026-04-12T10:00:00+00:00",
+            session_id="chat-main",
+            session_surface="chat",
+            session_mode="proposal",
+            model_id="backend-a",
+            event_kind="chat_turn",
+            status="neutral",
+            prompt="Proposal rollout note",
+            output_text="An ordinary successful execution without validation.",
+            notes_text="proposal accepted",
+            pass_definition=None,
+            execution_status="ok",
+            artifact_path="artifacts/proposal/ordinary.json",
+        )
+
+        ranked = rank_candidates(request, [candidate])
+
+        self.assertIn("priority:proposal:accepted", ranked[0].reasons)
+        self.assertNotIn("priority:proposal:test_pass", ranked[0].reasons)
+
+    def test_source_evaluation_marks_pool_status_unknown_without_get_event_adapter(self) -> None:
+        class SearchOnlyIndex:
+            def search(
+                self,
+                query: str | None = None,
+                *,
+                limit: int = 10,
+                surface: str | None = None,
+                status: str | None = None,
+            ) -> list[dict[str, object]]:
+                return []
+
+        bundle = build_context_bundle(
+            {
+                "task_kind": "review",
+                "query_text": "review recall ranking",
+                "source_event_id": "source",
+            },
+            index=SearchOnlyIndex(),
+        )
+
+        self.assertEqual(bundle["source_evaluation"]["miss_reason"], "not_retrieved")
+        self.assertEqual(bundle["source_evaluation"]["source_candidate_pool_status"], "unknown")
+
     def test_context_budget_trims_excess_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

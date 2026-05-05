@@ -409,8 +409,7 @@ class RecallCandidate:
 
     def test_pass_like(self) -> bool:
         quality_status = (self.quality_status or "").lower()
-        execution_status = (self.execution_status or "").lower()
-        if quality_status == "pass" or execution_status == "ok":
+        if quality_status == "pass":
             return True
         text = self.combined_text()
         return any(keyword in text for keyword in ("test_pass", "test pass", "verification passed", "passed test"))
@@ -1331,7 +1330,12 @@ def _source_evaluation(
             miss_reason = SOURCE_CONTRACT_MISS_REASON
         else:
             miss_reason = "not_retrieved" if source_exists_in_index is not False else "source_missing_from_index"
-        pool_status = "not_in_candidate_pool" if source_exists_in_index else "missing_from_index"
+        if source_exists_in_index is True:
+            pool_status = "not_in_candidate_pool"
+        elif source_exists_in_index is False:
+            pool_status = "missing_from_index"
+        else:
+            pool_status = "unknown"
         return {
             "source_event_id": source_event_id,
             "source_selected": False,
