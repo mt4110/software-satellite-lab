@@ -368,6 +368,8 @@ class RecallContextTests(unittest.TestCase):
 
         self.assertEqual(bundle["source_evaluation"]["miss_reason"], "not_retrieved")
         self.assertEqual(bundle["source_evaluation"]["source_candidate_pool_status"], "unknown")
+        self.assertIn("candidate_pool_unknown", bundle["source_evaluation"]["miss_diagnostics"])
+        self.assertNotIn("candidate_pool_present", bundle["source_evaluation"]["miss_diagnostics"])
 
     def test_context_budget_trims_excess_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

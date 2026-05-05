@@ -23,6 +23,7 @@ from recall_context import (
     TASK_KINDS,
     build_context_bundle,
 )
+from software_work_events import build_event_contract_check
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
@@ -48,6 +49,12 @@ def _nonnegative_int(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_clean_text(item) for item in value if _clean_text(item)]
 
 
 def _format_group_members(
@@ -281,6 +288,7 @@ def bundle_needs_source_refresh(
     *,
     source_event_id: str | None,
     index: MemoryIndex,
+    root: Path,
 ) -> bool:
     try:
         bundle_version = int(bundle.get("bundle_version") or 0)
@@ -305,7 +313,39 @@ def bundle_needs_source_refresh(
         return True
     if not source_exists_now and source_selected:
         return True
+    current_contract = source_contract_snapshot(index=index, source_event_id=source_event_id, root=root)
+    if current_contract is not None:
+        for key, current_value in current_contract.items():
+            if source_evaluation.get(key) != current_value:
+                return True
     return False
+
+
+def source_contract_snapshot(
+    *,
+    index: MemoryIndex,
+    source_event_id: str,
+    root: Path,
+) -> dict[str, Any] | None:
+    source_row = index.get_event(source_event_id)
+    if source_row is None:
+        return None
+    payload_json = _clean_text(source_row.get("payload_json"))
+    if not payload_json:
+        return None
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    contract = build_event_contract_check(payload, root=root)
+    source_artifact = dict(contract.get("source_artifact") or {})
+    return {
+        "source_event_contract_status": _clean_text(contract.get("contract_status")) or None,
+        "source_artifact_status": _clean_text(source_artifact.get("source_status")) or None,
+        "source_artifact_reasons": _clean_string_list(source_artifact.get("reasons")),
+    }
 
 
 def build_bundle_for_dataset_entry(
@@ -325,7 +365,12 @@ def build_bundle_for_dataset_entry(
     bundle_path = dataset_bundle_path(entry)
     if bundle_path is not None and bundle_path.exists():
         bundle = read_bundle(bundle_path)
-        if not bundle_needs_source_refresh(bundle, source_event_id=source_event_id, index=index_handle):
+        if not bundle_needs_source_refresh(
+            bundle,
+            source_event_id=source_event_id,
+            index=index_handle,
+            root=root,
+        ):
             return bundle
     bundle = build_context_bundle(
         request_payload,

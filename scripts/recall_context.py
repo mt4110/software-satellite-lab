@@ -1222,6 +1222,8 @@ def _miss_diagnostics(
         return diagnostics
     if pool_status in {"missing_from_index", "not_in_candidate_pool"}:
         diagnostics.append(pool_status)
+    elif pool_status == "unknown":
+        diagnostics.append("candidate_pool_unknown")
     elif pool_status:
         diagnostics.append("candidate_pool_present")
     if miss_reason in {"ranked_out_by_limit", "dropped_by_context_budget", "dropped_by_block_budget"}:

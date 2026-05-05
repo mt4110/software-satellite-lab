@@ -249,7 +249,7 @@ miss は次の理由に分けて扱う。
 
 この分離はかなり重要です。
 Recall が悪いのか、Ranking が悪いのか、Budget が悪いのか、index 状態が悪いのか、source artifact が壊れているのかを一緒くたにしないためです。
-summary には `miss_diagnostic_counts` も残し、`not_in_candidate_pool` / `ranking_or_budget_drop` / `source_event_contract_broken` / `evidence_type_mismatch` を横断集計できる。
+summary には `miss_diagnostic_counts` も残し、`not_in_candidate_pool` / `candidate_pool_unknown` / `ranking_or_budget_drop` / `source_event_contract_broken` / `evidence_type_mismatch` を横断集計できる。
 
 ### Variant Summary
 

@@ -705,6 +705,72 @@ class RecallRunnerTests(unittest.TestCase):
         self.assertIsNone(refreshed_dataset["requests"][0]["miss_reason"])
         self.assertTrue(refreshed_bundle["source_evaluation"]["source_selected"])
 
+    def test_main_refreshes_stale_bundle_when_source_artifact_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_path = root / "artifacts" / "text" / "review.json"
+            store = WorkspaceSessionStore(root=root)
+            messages = store.chat_messages_for_next_turn(
+                model_id="backend-a",
+                system_prompt="You are concise.",
+            )
+            store.record_chat_turn(
+                model_id="backend-a",
+                status="ok",
+                artifact_path=artifact_path,
+                prompt="Review the memory index patch.",
+                system_prompt="You are concise.",
+                resolved_user_prompt="Review the memory index patch.",
+                output_text="Looks good with one regression note.",
+                base_messages=messages,
+                notes=["review accepted"],
+            )
+            dataset_path = root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
+            dataset, _resolved_path = ensure_recall_dataset(
+                root=root,
+                dataset_path=dataset_path,
+                refresh=True,
+                max_requests=1,
+                max_adversarial_requests=0,
+            )
+            bundle_path = Path(dataset["requests"][0]["bundle_path"])
+            self.assertTrue(dataset["requests"][0]["source_hit"])
+            self.assertTrue(artifact_path.exists())
+
+            artifact_path.unlink()
+            stdout = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_recall_demo.py",
+                    "--root",
+                    str(root),
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--miss-report",
+                ],
+            ):
+                with redirect_stdout(stdout):
+                    exit_code = main()
+
+            refreshed_dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+            refreshed_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("reason=source_event_contract_broken", stdout.getvalue())
+        self.assertFalse(refreshed_dataset["requests"][0]["source_hit"])
+        self.assertEqual(refreshed_dataset["requests"][0]["miss_reason"], "source_event_contract_broken")
+        self.assertEqual(
+            refreshed_bundle["source_evaluation"]["source_event_contract_status"],
+            "missing_source",
+        )
+        self.assertIn(
+            "source_artifact_missing",
+            refreshed_bundle["source_evaluation"]["source_artifact_reasons"],
+        )
+
     def test_main_rebuilds_stale_default_index_before_miss_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
