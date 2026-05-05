@@ -10,16 +10,18 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from memory_index import MemoryIndex, default_memory_index_path, rebuild_memory_index
+from software_work_events import build_event_contract_check
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
 TASK_KINDS = ("review", "design", "proposal", "failure_analysis")
 DEFAULT_LIMIT = 12
 DEFAULT_CONTEXT_BUDGET_CHARS = 6000
-CONTEXT_BUNDLE_VERSION = 5
+CONTEXT_BUNDLE_VERSION = 6
 PASS_DEFINITION_CONTEXT_BUDGET_MULTIPLIER = 1.5
 FAILURE_STATUSES = {"quality_fail", "failed", "blocked", "error"}
 ACCEPTED_NOTE_KEYWORDS = ("accept", "accepted", "approved", "decision", "pass", "passed")
+REJECTED_NOTE_KEYWORDS = ("reject", "rejected", "declined", "not accepted", "discarded")
 REPAIR_NOTE_KEYWORDS = ("repair", "fixed", "fix", "follow-up", "followup", "resolved")
 OPEN_RISK_KEYWORDS = ("risk", "regression", "blocker", "blocked", "fail", "failed", "error")
 QUERY_TERM_STOPWORDS = {
@@ -59,6 +61,38 @@ TASK_KEYWORDS = {
     "proposal": ("proposal", "plan", "implement", "implementation", "rollout", "test"),
     "failure_analysis": ("fail", "failure", "blocked", "repair", "error", "bug", "incident"),
 }
+TASK_EVIDENCE_PRIORITY = {
+    "review": {
+        "source-artifact": 2.0,
+        "accepted": 3.0,
+        "test_fail": 2.5,
+        "repair": 2.0,
+        "rejected": 0.75,
+    },
+    "design": {
+        "source-artifact": 2.0,
+        "accepted": 3.5,
+        "rejected": 2.5,
+        "repair": 1.0,
+        "test_fail": 0.75,
+    },
+    "proposal": {
+        "source-artifact": 2.0,
+        "accepted": 3.0,
+        "test_pass": 2.5,
+        "repair": 2.0,
+        "rejected": 1.0,
+    },
+    "failure_analysis": {
+        "source-artifact": 1.5,
+        "test_fail": 4.5,
+        "repair": 3.0,
+        "rejected": 2.0,
+        "accepted": 0.75,
+    },
+}
+SOURCE_CONTRACT_MISS_REASON = "source_event_contract_broken"
+EVIDENCE_TYPE_MISMATCH_MISS_REASON = "evidence_type_mismatch"
 BLOCK_RELEVANT = "Relevant prior prompts"
 BLOCK_ACCEPTED = "Accepted outcomes"
 BLOCK_FAILURE = "Failure and repair patterns"
@@ -258,13 +292,24 @@ class RecallCandidate:
     output_text: str | None
     notes_text: str | None
     pass_definition: str | None
-    artifact_path: str | None
+    quality_status: str | None = None
+    execution_status: str | None = None
+    evaluation_signal_text: str | None = None
+    artifact_path: str | None = None
+    payload_json: str | None = None
     raw_fts_score: float | None = None
     best_rank: int = 10_000
     query_hits: int = 0
     score: float = 0.0
     reasons: list[str] = field(default_factory=list)
     block_title: str | None = None
+    evidence_types: tuple[str, ...] = ()
+    evidence_priority: dict[str, Any] = field(default_factory=dict)
+    event_contract_status: str | None = None
+    source_artifact_status: str | None = None
+    source_artifact_reasons: tuple[str, ...] = ()
+    source_artifact_durability_status: str | None = None
+    source_artifact_readability_status: str | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any], *, rank: int) -> "RecallCandidate":
@@ -288,7 +333,11 @@ class RecallCandidate:
             output_text=row.get("output_text"),
             notes_text=row.get("notes_text"),
             pass_definition=row.get("pass_definition"),
+            quality_status=row.get("quality_status"),
+            execution_status=row.get("execution_status"),
+            evaluation_signal_text=row.get("evaluation_signal_text"),
             artifact_path=row.get("artifact_path"),
+            payload_json=row.get("payload_json"),
             raw_fts_score=parsed_score,
             best_rank=rank,
             query_hits=1 if parsed_score is not None else 0,
@@ -307,6 +356,8 @@ class RecallCandidate:
             self.raw_fts_score = parsed_score
         if self.pass_definition is None and isinstance(row.get("pass_definition"), str):
             self.pass_definition = row.get("pass_definition")
+        if self.payload_json is None and isinstance(row.get("payload_json"), str):
+            self.payload_json = row.get("payload_json")
 
     def combined_text(self) -> str:
         return _lower_text(
@@ -315,6 +366,9 @@ class RecallCandidate:
                 self.output_text,
                 self.notes_text,
                 self.pass_definition,
+                self.quality_status,
+                self.execution_status,
+                self.evaluation_signal_text,
                 self.artifact_path,
                 self.event_kind,
                 self.session_mode,
@@ -324,10 +378,18 @@ class RecallCandidate:
         )
 
     def accepted_like(self) -> bool:
+        if self.rejected_like():
+            return False
         text = self.combined_text()
         if (self.status or "").lower() == "ok":
             return True
         return any(keyword in text for keyword in ACCEPTED_NOTE_KEYWORDS)
+
+    def rejected_like(self) -> bool:
+        text = self.combined_text()
+        if (self.status or "").lower() == "rejected":
+            return True
+        return any(keyword in text for keyword in REJECTED_NOTE_KEYWORDS)
 
     def failure_like(self) -> bool:
         status = (self.status or "").lower()
@@ -335,6 +397,23 @@ class RecallCandidate:
             return True
         text = self.combined_text()
         return any(keyword in text for keyword in ("repair", "blocked", "fail", "error", "regression", "bug"))
+
+    def test_fail_like(self) -> bool:
+        status = (self.status or "").lower()
+        quality_status = (self.quality_status or "").lower()
+        execution_status = (self.execution_status or "").lower()
+        if status in FAILURE_STATUSES or quality_status == "fail" or execution_status in FAILURE_STATUSES:
+            return True
+        text = self.combined_text()
+        return any(keyword in text for keyword in ("test_fail", "test fail", "failed test", "verification failed"))
+
+    def test_pass_like(self) -> bool:
+        quality_status = (self.quality_status or "").lower()
+        execution_status = (self.execution_status or "").lower()
+        if quality_status == "pass" or execution_status == "ok":
+            return True
+        text = self.combined_text()
+        return any(keyword in text for keyword in ("test_pass", "test pass", "verification passed", "passed test"))
 
     def repair_like(self) -> bool:
         text = self.combined_text()
@@ -349,13 +428,23 @@ class RecallCandidate:
     def prompt_excerpt(self) -> str:
         return _truncate(self.prompt or self.pass_definition, limit=120)
 
+    def source_artifact_recallable(self) -> bool:
+        if self.event_contract_status is None:
+            return bool(_clean_text(self.artifact_path))
+        return self.event_contract_status == "ok"
+
+    def source_contract_broken(self) -> bool:
+        return self.event_contract_status in {"missing_source", "invalid_event_contract"}
+
     def to_reference_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "event_id": self.event_id,
             "score": round(self.score, 3),
             "reasons": list(self.reasons),
             "block_title": self.block_title,
             "status": self.status,
+            "quality_status": self.quality_status,
+            "execution_status": self.execution_status,
             "recorded_at_utc": self.recorded_at_utc,
             "session_id": self.session_id,
             "session_surface": self.session_surface,
@@ -363,7 +452,20 @@ class RecallCandidate:
             "event_kind": self.event_kind,
             "artifact_path": self.artifact_path,
             "prompt_excerpt": self.prompt_excerpt(),
+            "evidence_types": list(self.evidence_types),
+            "evidence_priority": dict(self.evidence_priority),
         }
+        if self.event_contract_status is not None:
+            payload.update(
+                {
+                    "event_contract_status": self.event_contract_status,
+                    "source_artifact_status": self.source_artifact_status,
+                    "source_artifact_reasons": list(self.source_artifact_reasons),
+                    "source_artifact_durability_status": self.source_artifact_durability_status,
+                    "source_artifact_readability_status": self.source_artifact_readability_status,
+                }
+            )
+        return payload
 
 
 def _candidate_label(candidate: RecallCandidate) -> str:
@@ -383,6 +485,85 @@ def _dedupe_reasons(reasons: Iterable[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def _candidate_event_payload(candidate: RecallCandidate) -> dict[str, Any] | None:
+    payload_json = _clean_text(candidate.payload_json)
+    if not payload_json:
+        return None
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _annotate_source_contract(
+    candidates: Iterable[RecallCandidate],
+    *,
+    root: Path | None,
+) -> None:
+    for candidate in candidates:
+        payload = _candidate_event_payload(candidate)
+        if payload is None:
+            continue
+        check = build_event_contract_check(payload, root=root)
+        source_artifact = dict(check.get("source_artifact") or {})
+        candidate.event_contract_status = _clean_text(check.get("contract_status")) or None
+        candidate.source_artifact_status = _clean_text(source_artifact.get("source_status")) or None
+        candidate.source_artifact_reasons = tuple(_clean_string_list(source_artifact.get("reasons")))
+        candidate.source_artifact_durability_status = _clean_text(source_artifact.get("durability_status")) or None
+        candidate.source_artifact_readability_status = _clean_text(source_artifact.get("readability_status")) or None
+
+
+def _candidate_evidence_types(candidate: RecallCandidate) -> tuple[str, ...]:
+    evidence_types: list[str] = []
+    if candidate.source_artifact_recallable():
+        evidence_types.append("source-artifact")
+    if candidate.accepted_like():
+        evidence_types.append("accepted")
+    if candidate.rejected_like():
+        evidence_types.append("rejected")
+    if candidate.test_fail_like():
+        evidence_types.append("test_fail")
+    if candidate.test_pass_like():
+        evidence_types.append("test_pass")
+    if candidate.repair_like():
+        evidence_types.append("repair")
+    return tuple(dict.fromkeys(evidence_types))
+
+
+def _evidence_priority_for_task(
+    request: RecallRequest,
+    candidate: RecallCandidate,
+) -> tuple[float, dict[str, Any], list[str]]:
+    evidence_types = _candidate_evidence_types(candidate)
+    candidate.evidence_types = evidence_types
+    priority = TASK_EVIDENCE_PRIORITY[request.task_kind]
+    matched = [
+        {
+            "evidence_type": evidence_type,
+            "weight": priority[evidence_type],
+        }
+        for evidence_type in evidence_types
+        if evidence_type in priority
+    ]
+    score = round(sum(float(item["weight"]) for item in matched), 3)
+    candidate.evidence_priority = {
+        "task_kind": request.task_kind,
+        "matched_evidence_types": [str(item["evidence_type"]) for item in matched],
+        "matched_task_evidence_types": [
+            str(item["evidence_type"])
+            for item in matched
+            if item["evidence_type"] != "source-artifact"
+        ],
+        "score": score,
+    }
+    reasons = [f"priority:{request.task_kind}:{item['evidence_type']}" for item in matched]
+    if evidence_types and not matched:
+        reasons.append(f"priority:{request.task_kind}:mismatch")
+        candidate.evidence_priority["mismatch"] = True
+    return score, candidate.evidence_priority, reasons
 
 
 @dataclass
@@ -478,19 +659,22 @@ class RecallSelectionUnit:
         )
 
     def to_reference_dict(self) -> dict[str, Any]:
-        payload = {
-            "event_id": self.event_id,
-            "score": round(self.score, 3),
-            "reasons": self.reasons,
-            "block_title": self.block_title,
-            "status": self.status,
-            "recorded_at_utc": self.recorded_at_utc,
-            "session_id": self.session_id,
-            "session_surface": self.session_surface,
-            "event_kind": self.event_kind,
-            "artifact_path": self.artifact_path,
-            "prompt_excerpt": self.prompt_excerpt(),
-        }
+        payload = self.representative.to_reference_dict()
+        payload.update(
+            {
+                "event_id": self.event_id,
+                "score": round(self.score, 3),
+                "reasons": self.reasons,
+                "block_title": self.block_title,
+                "status": self.status,
+                "recorded_at_utc": self.recorded_at_utc,
+                "session_id": self.session_id,
+                "session_surface": self.session_surface,
+                "event_kind": self.event_kind,
+                "artifact_path": self.artifact_path,
+                "prompt_excerpt": self.prompt_excerpt(),
+            }
+        )
         if self.grouped_by is not None and len(self.members) > 1:
             payload.update(
                 {
@@ -512,8 +696,18 @@ class RecallSelectionUnit:
             "event_kind": self.event_kind,
             "recorded_at_utc": self.recorded_at_utc,
             "artifact_path": self.artifact_path,
+            "evidence_types": list(self.representative.evidence_types),
+            "evidence_priority": dict(self.representative.evidence_priority),
             "summary": self.summary(),
         }
+        if self.representative.event_contract_status is not None:
+            payload.update(
+                {
+                    "event_contract_status": self.representative.event_contract_status,
+                    "source_artifact_status": self.representative.source_artifact_status,
+                    "source_artifact_reasons": list(self.representative.source_artifact_reasons),
+                }
+            )
         if self.grouped_by is not None and len(self.members) > 1:
             payload.pop("artifact_path", None)
             payload.update(
@@ -727,10 +921,10 @@ def _query_alignment(
     reasons: list[str] = []
     exact_fields = tuple(part for part in (prompt_text, output_text, pass_definition_text) if part)
     if exact_fields and normalized_query in exact_fields:
-        score += 11.0
+        score += 18.0
         reasons.append("exact-query-match")
     elif len(normalized_query) >= 18 and any(normalized_query in part for part in exact_fields):
-        score += 5.5
+        score += 8.0
         reasons.append("query-phrase-match")
 
     terms = _query_terms(normalized_query)
@@ -771,8 +965,12 @@ def rank_candidates(request: RecallRequest, candidates: list[RecallCandidate]) -
         score = 0.0
         reasons: list[str] = []
         if candidate.event_id in pinned_event_ids:
-            score += 100.0
             reasons.append("pinned")
+        if candidate.source_contract_broken():
+            score -= 50.0
+            reasons.append("source-contract-broken")
+            for reason in candidate.source_artifact_reasons[:2]:
+                reasons.append(f"source-contract:{reason}")
         if candidate.raw_fts_score is not None and candidate.best_rank < 10_000:
             score += max(1.0, 12.0 - min(candidate.best_rank, 10))
             reasons.append("fts-hit")
@@ -818,6 +1016,11 @@ def rank_candidates(request: RecallRequest, candidates: list[RecallCandidate]) -
         if task_hits:
             score += min(6.0, 2.0 + float(task_hits))
             reasons.append("task-affinity")
+
+        priority_score, _priority_payload, priority_reasons = _evidence_priority_for_task(request, candidate)
+        if priority_score:
+            score += priority_score
+        reasons.extend(priority_reasons)
 
         if request.task_kind == "failure_analysis":
             if candidate.failure_like():
@@ -943,11 +1146,96 @@ def _top_selected_reference_dict(unit: RecallSelectionUnit) -> dict[str, Any]:
         "session_id",
         "session_surface",
         "artifact_path",
+        "evidence_types",
+        "evidence_priority",
+        "event_contract_status",
+        "source_artifact_status",
+        "source_artifact_reasons",
         "group_member_count",
         "group_member_event_ids",
         "group_member_labels",
     )
     return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _source_contract_payload(candidate: RecallCandidate | None) -> dict[str, Any]:
+    if candidate is None:
+        return {
+            "source_event_contract_status": None,
+            "source_artifact_status": None,
+            "source_artifact_reasons": [],
+            "source_artifact_durability_status": None,
+            "source_artifact_readability_status": None,
+        }
+    return {
+        "source_event_contract_status": candidate.event_contract_status,
+        "source_artifact_status": candidate.source_artifact_status,
+        "source_artifact_reasons": list(candidate.source_artifact_reasons),
+        "source_artifact_durability_status": candidate.source_artifact_durability_status,
+        "source_artifact_readability_status": candidate.source_artifact_readability_status,
+    }
+
+
+def _source_evidence_type_match(candidate: RecallCandidate | None) -> bool | None:
+    if candidate is None:
+        return None
+    return bool(candidate.evidence_priority.get("matched_task_evidence_types"))
+
+
+def _miss_reason_detail(
+    miss_reason: str | None,
+    *,
+    pool_status: str,
+    source_candidate: RecallCandidate | None,
+) -> str | None:
+    if miss_reason is None:
+        return None
+    if miss_reason == "source_missing_from_index":
+        return "source event is not present in the memory index"
+    if miss_reason == "not_retrieved":
+        return "source event exists in the index but was absent from the candidate pool for this query"
+    if miss_reason == "ranked_out_by_limit":
+        return "source event was in the candidate pool but fell below the selected candidate limit"
+    if miss_reason == "dropped_by_context_budget":
+        return "source event was ranked but omitted by the overall context budget"
+    if miss_reason == "dropped_by_block_budget":
+        return "source event was ranked but omitted by its block budget"
+    if miss_reason == SOURCE_CONTRACT_MISS_REASON:
+        reasons = ", ".join(source_candidate.source_artifact_reasons) if source_candidate is not None else ""
+        suffix = f": {reasons}" if reasons else ""
+        return f"source event is present but its event contract or source artifact is not recallable{suffix}"
+    if miss_reason == EVIDENCE_TYPE_MISMATCH_MISS_REASON:
+        return "source event reached ranking but its evidence types are low-priority for this task kind"
+    if miss_reason == "not_selected":
+        return f"source event reached {pool_status} but was not selected; inspect source and top candidate reasons"
+    return miss_reason
+
+
+def _miss_diagnostics(
+    *,
+    source_selected: bool,
+    pool_status: str,
+    miss_reason: str | None,
+    source_candidate: RecallCandidate | None,
+) -> list[str]:
+    diagnostics: list[str] = []
+    if source_selected:
+        return diagnostics
+    if pool_status in {"missing_from_index", "not_in_candidate_pool"}:
+        diagnostics.append(pool_status)
+    elif pool_status:
+        diagnostics.append("candidate_pool_present")
+    if miss_reason in {"ranked_out_by_limit", "dropped_by_context_budget", "dropped_by_block_budget"}:
+        diagnostics.append("ranking_or_budget_drop")
+    if source_candidate is not None and source_candidate.source_contract_broken():
+        diagnostics.append("source_event_contract_broken")
+    if (
+        source_candidate is not None
+        and _source_evidence_type_match(source_candidate) is False
+        and source_candidate.evidence_types
+    ):
+        diagnostics.append("evidence_type_mismatch")
+    return _dedupe_reasons(diagnostics)
 
 
 def _pass_definition_group_key(
@@ -971,6 +1259,8 @@ def _selection_units_from_ranked(
     ordered_keys: list[tuple[str, str] | str] = []
     grouped_members: dict[tuple[str, str], list[RecallCandidate]] = {}
     for candidate in ranked:
+        if candidate.source_contract_broken():
+            continue
         group_key = _pass_definition_group_key(request, candidate)
         if group_key is None:
             ordered_keys.append(candidate.event_id)
@@ -1015,6 +1305,7 @@ def _selection_units_from_ranked(
 def _source_evaluation(
     request: RecallRequest,
     *,
+    root: Path | None,
     index: MemoryIndex | None,
     ranked: list[RecallCandidate],
     selected_units: list[RecallSelectionUnit],
@@ -1029,7 +1320,18 @@ def _source_evaluation(
     source_candidate = next((candidate for candidate in ranked if candidate.event_id == source_event_id), None)
     if source_candidate is None:
         get_event = getattr(index, "get_event", None)
-        source_exists_in_index = bool(get_event(source_event_id)) if callable(get_event) else None
+        source_row = get_event(source_event_id) if callable(get_event) else None
+        source_exists_in_index = bool(source_row) if callable(get_event) else None
+        source_probe = None
+        if isinstance(source_row, Mapping):
+            source_probe = RecallCandidate.from_row(source_row, rank=10_000)
+            _annotate_source_contract([source_probe], root=root)
+            _evidence_priority_for_task(request, source_probe)
+        if source_probe is not None and source_probe.source_contract_broken():
+            miss_reason = SOURCE_CONTRACT_MISS_REASON
+        else:
+            miss_reason = "not_retrieved" if source_exists_in_index is not False else "source_missing_from_index"
+        pool_status = "not_in_candidate_pool" if source_exists_in_index else "missing_from_index"
         return {
             "source_event_id": source_event_id,
             "source_selected": False,
@@ -1045,16 +1347,43 @@ def _source_evaluation(
             "source_group_prompt_excerpt": None,
             "source_group_member_event_ids": [],
             "source_group_member_labels": [],
-            "miss_reason": "not_retrieved" if source_exists_in_index is not False else "source_missing_from_index",
+            "miss_reason": miss_reason,
+            "miss_reason_detail": _miss_reason_detail(
+                miss_reason,
+                pool_status=pool_status,
+                source_candidate=source_probe,
+            ),
+            "miss_diagnostics": _miss_diagnostics(
+                source_selected=False,
+                pool_status=pool_status,
+                miss_reason=miss_reason,
+                source_candidate=source_probe,
+            ),
+            "source_candidate_pool_status": pool_status,
             "source_exists_in_index": source_exists_in_index,
+            "source_evidence_types": list(source_probe.evidence_types) if source_probe is not None else [],
+            "source_evidence_priority": dict(source_probe.evidence_priority) if source_probe is not None else {},
+            "source_evidence_type_match": _source_evidence_type_match(source_probe),
+            **_source_contract_payload(source_probe),
             "selected_count": len(selected_units),
             "top_selected": [_top_selected_reference_dict(unit) for unit in selected_units[:3]],
         }
 
-    source_selected = selected_unit is not None
+    source_selected = selected_unit is not None and not source_candidate.source_contract_broken()
     source_group_payload = selected_unit.to_reference_dict() if selected_unit is not None else {}
     source_grouped_by = source_group_payload.get("grouped_by")
     source_group_member_count = len(selected_unit.members) if source_grouped_by and selected_unit is not None else None
+    pool_status = "selected" if source_selected else "candidate_pool_present"
+    if source_candidate.source_contract_broken():
+        miss_reason = SOURCE_CONTRACT_MISS_REASON
+    else:
+        miss_reason = None if source_selected else omitted_reasons.get(source_event_id) or "not_selected"
+        if (
+            miss_reason == "not_selected"
+            and _source_evidence_type_match(source_candidate) is False
+            and source_candidate.evidence_types
+        ):
+            miss_reason = EVIDENCE_TYPE_MISMATCH_MISS_REASON
     return {
         "source_event_id": source_event_id,
         "source_selected": source_selected,
@@ -1064,7 +1393,10 @@ def _source_evaluation(
         "source_prompt_excerpt": source_candidate.prompt_excerpt(),
         "source_reasons": list(source_candidate.reasons),
         "source_selected_via_group": bool(
-            selected_unit is not None and selected_unit.grouped_by is not None and selected_unit.event_id != source_event_id
+            source_selected
+            and selected_unit is not None
+            and selected_unit.grouped_by is not None
+            and selected_unit.event_id != source_event_id
         ),
         "source_group_member_count": source_group_member_count,
         "source_grouped_by": source_grouped_by,
@@ -1072,8 +1404,24 @@ def _source_evaluation(
         "source_group_prompt_excerpt": source_group_payload.get("prompt_excerpt") if source_grouped_by else None,
         "source_group_member_event_ids": source_group_payload.get("group_member_event_ids") or [],
         "source_group_member_labels": source_group_payload.get("group_member_labels") or [],
-        "miss_reason": None if source_selected else omitted_reasons.get(source_event_id) or "not_selected",
+        "miss_reason": miss_reason,
+        "miss_reason_detail": _miss_reason_detail(
+            miss_reason,
+            pool_status=pool_status,
+            source_candidate=source_candidate,
+        ),
+        "miss_diagnostics": _miss_diagnostics(
+            source_selected=source_selected,
+            pool_status=pool_status,
+            miss_reason=miss_reason,
+            source_candidate=source_candidate,
+        ),
+        "source_candidate_pool_status": pool_status,
         "source_exists_in_index": True,
+        "source_evidence_types": list(source_candidate.evidence_types),
+        "source_evidence_priority": dict(source_candidate.evidence_priority),
+        "source_evidence_type_match": _source_evidence_type_match(source_candidate),
+        **_source_contract_payload(source_candidate),
         "selected_count": len(selected_units),
         "top_selected": [_top_selected_reference_dict(unit) for unit in selected_units[:3]],
     }
@@ -1096,6 +1444,7 @@ def build_context_bundle(
         index_path=index_path,
         index=target_index,
     )
+    _annotate_source_contract(candidates, root=root)
     ranked = rank_candidates(normalized_request, candidates)
     for candidate in ranked:
         candidate.block_title = _choose_block_title(normalized_request, candidate)
@@ -1110,12 +1459,22 @@ def build_context_bundle(
     block_payloads: dict[str, list[dict[str, Any]]] = {title: [] for title in block_titles}
     block_used_chars: dict[str, int] = {title: 0 for title in block_titles}
     selected_units: list[RecallSelectionUnit] = []
-    omitted_reasons: dict[str, str] = {}
+    omitted_reasons: dict[str, str] = {
+        candidate.event_id: SOURCE_CONTRACT_MISS_REASON
+        for candidate in ranked
+        if candidate.source_contract_broken()
+    }
     used_chars = 0
-    omitted_count = 0
+    omitted_count = len(omitted_reasons)
 
     for unit in selection_units:
         member_event_ids = unit.member_event_ids
+        if unit.representative.source_contract_broken():
+            for event_id in member_event_ids:
+                if event_id not in omitted_reasons:
+                    omitted_count += 1
+                    omitted_reasons[event_id] = SOURCE_CONTRACT_MISS_REASON
+            continue
         if len(selected_units) >= normalized_request.limit:
             omitted_count += len(member_event_ids)
             for event_id in member_event_ids:
@@ -1167,6 +1526,7 @@ def build_context_bundle(
     }
     source_evaluation = _source_evaluation(
         normalized_request,
+        root=root,
         index=target_index,
         ranked=ranked,
         selected_units=selected_units,

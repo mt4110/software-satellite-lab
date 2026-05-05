@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -11,9 +12,23 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
-from memory_index import rebuild_memory_index  # noqa: E402
+from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
 from recall_context import RecallCandidate, build_context_bundle, normalize_recall_request, rank_candidates, retrieve_candidates  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
+
+
+def _materialize_workspace_artifacts(root: Path) -> None:
+    sessions_root = root / "artifacts" / "workspaces" / "local-default" / "sessions"
+    for session_path in sessions_root.glob("*.json"):
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        for artifact_ref in payload.get("artifact_refs") or []:
+            artifact_path = artifact_ref.get("artifact_path")
+            if not isinstance(artifact_path, str) or not artifact_path.strip():
+                continue
+            target = Path(artifact_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_text("{}", encoding="utf-8")
 
 
 class RecallContextTests(unittest.TestCase):
@@ -201,6 +216,7 @@ class RecallContextTests(unittest.TestCase):
                 notes=["blocked upstream dependency"],
             )
 
+            _materialize_workspace_artifacts(root)
             summary = rebuild_memory_index(root=root)
             bundle = build_context_bundle(
                 {
@@ -216,6 +232,8 @@ class RecallContextTests(unittest.TestCase):
         self.assertIn("Review scripts/memory_index.py patch", bundle["selected_candidates"][0]["prompt_excerpt"])
         self.assertIn("file-match", bundle["selected_candidates"][0]["reasons"])
         self.assertIn("accepted-signal", bundle["selected_candidates"][0]["reasons"])
+        self.assertIn("priority:review:source-artifact", bundle["selected_candidates"][0]["reasons"])
+        self.assertIn("priority:review:accepted", bundle["selected_candidates"][0]["reasons"])
         self.assertEqual(bundle["blocks"][0]["title"], "Related files and artifact paths")
 
     def test_failure_analysis_prioritizes_failure_patterns(self) -> None:
@@ -251,6 +269,7 @@ class RecallContextTests(unittest.TestCase):
                 notes=["repair needed", "failed review handoff"],
             )
 
+            _materialize_workspace_artifacts(root)
             summary = rebuild_memory_index(root=root)
             bundle = build_context_bundle(
                 {
@@ -266,6 +285,36 @@ class RecallContextTests(unittest.TestCase):
         self.assertEqual(bundle["selected_candidates"][0]["status"], "quality_fail")
         self.assertEqual(bundle["blocks"][0]["title"], "Failure and repair patterns")
         self.assertIn("failure-signal", bundle["selected_candidates"][0]["reasons"])
+        self.assertIn("priority:failure_analysis:test_fail", bundle["selected_candidates"][0]["reasons"])
+        self.assertIn("priority:failure_analysis:repair", bundle["selected_candidates"][0]["reasons"])
+
+    def test_rejected_evidence_does_not_pick_up_accepted_priority_from_not_accepted_text(self) -> None:
+        request = normalize_recall_request(
+            {
+                "task_kind": "design",
+                "query_text": "design tradeoff rejection",
+            }
+        )
+        rejected = RecallCandidate(
+            event_id="rejected",
+            recorded_at_utc="2026-04-12T10:00:00+00:00",
+            session_id="chat-main",
+            session_surface="chat",
+            session_mode="design",
+            model_id="backend-a",
+            event_kind="design_proposal",
+            status="neutral",
+            prompt="Design tradeoff rejection note",
+            output_text="This option was not accepted after review.",
+            notes_text="rejected tradeoff",
+            pass_definition=None,
+            artifact_path="artifacts/design/rejected.json",
+        )
+
+        ranked = rank_candidates(request, [rejected])
+
+        self.assertIn("priority:design:rejected", ranked[0].reasons)
+        self.assertNotIn("priority:design:accepted", ranked[0].reasons)
 
     def test_context_budget_trims_excess_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -288,6 +337,7 @@ class RecallContextTests(unittest.TestCase):
                     notes=["proposal accepted", "test pass"],
                 )
 
+            _materialize_workspace_artifacts(root)
             summary = rebuild_memory_index(root=root)
             bundle = build_context_bundle(
                 {
@@ -549,6 +599,70 @@ class RecallContextTests(unittest.TestCase):
             any("structured-json" in label for label in bundle["source_evaluation"]["source_group_member_labels"])
         )
 
+    def test_pass_definition_group_excludes_member_with_broken_source_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shared_pass_definition = "Pass means execution completed and the output satisfied the capability-specific contract check."
+            leader_artifact = root / "artifacts" / "capability" / "leader.json"
+            third_artifact = root / "artifacts" / "capability" / "third.json"
+            leader_artifact.parent.mkdir(parents=True, exist_ok=True)
+            leader_artifact.write_text("{}", encoding="utf-8")
+            third_artifact.write_text("{}", encoding="utf-8")
+
+            def row(event_id: str, artifact_path: Path, *, score: float) -> dict[str, object]:
+                payload = {
+                    "event_id": event_id,
+                    "event_kind": "capability_result",
+                    "outcome": {"status": "ok"},
+                    "source_refs": {
+                        "artifact_ref": {
+                            "artifact_path": str(artifact_path),
+                        }
+                    },
+                }
+                return {
+                    "event_id": event_id,
+                    "recorded_at_utc": "2026-04-12T10:00:00+00:00",
+                    "session_surface": "evaluation",
+                    "session_mode": "phase5",
+                    "model_id": "backend-a",
+                    "event_kind": "capability_result",
+                    "status": "ok",
+                    "prompt": f"{event_id} | python scripts/run_capability_matrix.py --only {event_id}",
+                    "output_text": "Capability output.",
+                    "notes_text": "quality_status: pass",
+                    "pass_definition": shared_pass_definition,
+                    "artifact_path": str(artifact_path),
+                    "payload_json": json.dumps(payload),
+                    "score": score,
+                }
+
+            bundle = build_context_bundle(
+                {
+                    "task_kind": "proposal",
+                    "query_text": shared_pass_definition,
+                    "request_basis": "pass_definition",
+                    "limit": 1,
+                    "context_budget_chars": 1800,
+                    "source_event_id": "source",
+                },
+                root=root,
+                index=self._StaticIndex(
+                    query_rows=[
+                        row("leader", leader_artifact, score=0.01),
+                        row("source", root / "artifacts" / "capability" / "missing.json", score=0.02),
+                        row("third", third_artifact, score=0.03),
+                    ],
+                    broad_rows=[],
+                ),
+            )
+
+        self.assertEqual(bundle["selected_candidates"][0]["grouped_by"], "pass_definition")
+        self.assertEqual(bundle["selected_candidates"][0]["group_member_count"], 2)
+        self.assertNotIn("source", bundle["selected_candidates"][0]["group_member_event_ids"])
+        self.assertFalse(bundle["source_evaluation"]["source_selected"])
+        self.assertEqual(bundle["source_evaluation"]["miss_reason"], "source_event_contract_broken")
+
     def test_build_context_bundle_classifies_source_miss_when_limit_is_tight(self) -> None:
         leader = {
             "event_id": "leader",
@@ -606,7 +720,54 @@ class RecallContextTests(unittest.TestCase):
         self.assertEqual(bundle["source_evaluation"]["top_selected"][0]["artifact_path"], "artifacts/review/leader.json")
         self.assertIn("fts-hit", bundle["source_evaluation"]["top_selected"][0]["reasons"])
 
-    def test_build_context_bundle_includes_pinned_candidate_even_when_query_misses_it(self) -> None:
+    def test_source_miss_diagnostics_include_evidence_type_mismatch(self) -> None:
+        leader = {
+            "event_id": "leader",
+            "recorded_at_utc": "2026-04-13T10:00:00+00:00",
+            "session_surface": "chat",
+            "session_mode": "analysis",
+            "model_id": "backend-a",
+            "event_kind": "chat_turn",
+            "status": "ok",
+            "prompt": "Review recall ranking patch",
+            "output_text": "Accepted review outcome for the ranking patch.",
+            "notes_text": "review accepted",
+            "pass_definition": None,
+            "artifact_path": "artifacts/review/leader.json",
+            "score": 0.1,
+        }
+        source = {
+            "event_id": "source",
+            "recorded_at_utc": "2026-04-12T10:00:00+00:00",
+            "session_surface": "chat",
+            "session_mode": "analysis",
+            "model_id": "backend-a",
+            "event_kind": "chat_turn",
+            "status": "neutral",
+            "prompt": "Reference-only artifact path",
+            "output_text": "Only a plain artifact pointer.",
+            "notes_text": "reference only",
+            "pass_definition": None,
+            "artifact_path": "artifacts/review/source.json",
+            "score": None,
+        }
+
+        bundle = build_context_bundle(
+            {
+                "task_kind": "review",
+                "query_text": "review recall ranking",
+                "limit": 1,
+                "context_budget_chars": 1800,
+                "source_event_id": "source",
+            },
+            index=self._StaticIndex(query_rows=[leader], broad_rows=[leader, source]),
+        )
+
+        self.assertEqual(bundle["source_evaluation"]["miss_reason"], "ranked_out_by_limit")
+        self.assertFalse(bundle["source_evaluation"]["source_evidence_type_match"])
+        self.assertIn("evidence_type_mismatch", bundle["source_evaluation"]["miss_diagnostics"])
+
+    def test_build_context_bundle_injects_pinned_candidate_without_promoting_it(self) -> None:
         leader = {
             "event_id": "leader",
             "recorded_at_utc": "2026-04-13T10:00:00+00:00",
@@ -645,12 +806,16 @@ class RecallContextTests(unittest.TestCase):
                 "pinned_event_ids": ["pinned"],
                 "limit": 1,
                 "context_budget_chars": 1800,
+                "source_event_id": "pinned",
             },
             index=self._StaticIndex(query_rows=[leader], broad_rows=[leader, pinned]),
         )
 
-        self.assertEqual(bundle["selected_candidates"][0]["event_id"], "pinned")
-        self.assertIn("pinned", bundle["selected_candidates"][0]["reasons"])
+        self.assertEqual(bundle["selected_candidates"][0]["event_id"], "leader")
+        self.assertFalse(bundle["source_evaluation"]["source_selected"])
+        self.assertEqual(bundle["source_evaluation"]["source_rank"], 2)
+        self.assertEqual(bundle["source_evaluation"]["miss_reason"], "ranked_out_by_limit")
+        self.assertIn("pinned", bundle["source_evaluation"]["source_reasons"])
         self.assertEqual(bundle["pinned_event_ids"], ["pinned"])
 
     def test_build_context_bundle_marks_missing_source_when_event_left_the_index(self) -> None:
@@ -672,6 +837,7 @@ class RecallContextTests(unittest.TestCase):
                 base_messages=messages,
                 notes=["review accepted"],
             )
+            _materialize_workspace_artifacts(root)
             summary = rebuild_memory_index(root=root)
             bundle = build_context_bundle(
                 {
@@ -688,6 +854,44 @@ class RecallContextTests(unittest.TestCase):
         self.assertFalse(bundle["source_evaluation"]["source_selected_via_group"])
         self.assertIsNone(bundle["source_evaluation"]["source_group_member_count"])
         self.assertEqual(bundle["source_evaluation"]["source_group_member_event_ids"], [])
+
+    def test_build_context_bundle_does_not_select_event_with_missing_source_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = WorkspaceSessionStore(root=root)
+            messages = store.chat_messages_for_next_turn(
+                model_id="backend-a",
+                system_prompt="You are concise.",
+            )
+            store.record_chat_turn(
+                model_id="backend-a",
+                status="ok",
+                artifact_path=root / "artifacts" / "text" / "missing-review.json",
+                prompt="Review the missing source artifact patch.",
+                system_prompt="You are concise.",
+                resolved_user_prompt="Review the missing source artifact patch.",
+                output_text="The review would be useful, but the artifact is gone.",
+                base_messages=messages,
+                notes=["review accepted"],
+            )
+            summary = rebuild_memory_index(root=root)
+            index = MemoryIndex(Path(summary["index_path"]))
+            source_event_id = index.search("missing AND source AND artifact", limit=1)[0]["event_id"]
+            bundle = build_context_bundle(
+                {
+                    "task_kind": "review",
+                    "query_text": "Review the missing source artifact patch.",
+                    "source_event_id": source_event_id,
+                },
+                root=root,
+                index_path=Path(summary["index_path"]),
+            )
+
+        self.assertEqual(bundle["selected_count"], 0)
+        self.assertFalse(bundle["source_evaluation"]["source_selected"])
+        self.assertEqual(bundle["source_evaluation"]["miss_reason"], "source_event_contract_broken")
+        self.assertEqual(bundle["source_evaluation"]["source_event_contract_status"], "missing_source")
+        self.assertIn("source_artifact_missing", bundle["source_evaluation"]["source_artifact_reasons"])
 
     def test_pipe_delimited_capability_query_prefers_matching_capability_with_shared_file_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -744,6 +948,7 @@ class RecallContextTests(unittest.TestCase):
                 },
             )
             write_artifact(matrix_path, payload)
+            _materialize_workspace_artifacts(root)
             summary = rebuild_memory_index(root=root)
             request = normalize_recall_request(
                 {

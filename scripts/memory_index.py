@@ -359,6 +359,7 @@ class MemoryIndex:
                         e.pass_definition,
                         e.evaluation_signal_text,
                         e.artifact_path,
+                        e.payload_json,
                         bm25(events_fts) AS score
                     FROM events_fts
                     JOIN events e ON e.event_id = events_fts.event_id
@@ -387,6 +388,7 @@ class MemoryIndex:
                         e.pass_definition,
                         e.evaluation_signal_text,
                         e.artifact_path,
+                        e.payload_json,
                         NULL AS score
                     FROM events e
                     WHERE 1 = 1{filter_sql}

@@ -189,7 +189,7 @@ flowchart TD
 
 ```python
 {
-  "bundle_version": 5,
+  "bundle_version": 6,
   "task_kind": "review",
   "query_text": "review the memory index patch",
   "request_basis": "prompt-or-artifact",
@@ -219,6 +219,14 @@ flowchart TD
   "event_id": "event-123",
   "score": 23.4,
   "reasons": ["fts-hit", "file-match", "accepted-signal"],
+  "evidence_types": ["source-artifact", "accepted"],
+  "evidence_priority": {
+    "task_kind": "review",
+    "matched_evidence_types": ["source-artifact", "accepted"],
+    "score": 5.0,
+  },
+  "event_contract_status": "ok",
+  "source_artifact_status": "readable",
   "block_title": "Related files and artifact paths",
   "status": "ok",
   "recorded_at_utc": "2026-04-13T10:00:00+00:00",
@@ -251,6 +259,13 @@ pass definition ベースの request では、複数 event を 1 つの selectio
   "source_block_title": "Accepted outcomes",
   "source_prompt_excerpt": "Review the memory index patch.",
   "source_reasons": ["fts-hit", "accepted-signal"],
+  "source_candidate_pool_status": "selected",
+  "source_evidence_types": ["source-artifact", "accepted"],
+  "source_evidence_priority": {...},
+  "source_evidence_type_match": True,
+  "source_event_contract_status": "ok",
+  "source_artifact_status": "readable",
+  "source_artifact_reasons": [],
   "source_selected_via_group": False,
   "source_group_member_count": None,
   "source_grouped_by": None,
@@ -259,6 +274,8 @@ pass definition ベースの request では、複数 event を 1 つの selectio
   "source_group_member_event_ids": [],
   "source_group_member_labels": [],
   "miss_reason": None,
+  "miss_reason_detail": None,
+  "miss_diagnostics": [],
   "source_exists_in_index": True,
   "selected_count": 3,
   "top_selected": [...],
@@ -275,6 +292,8 @@ source が group の代表 candidate になった場合は `False` のまま、`
 - `dropped_by_context_budget`
 - `dropped_by_block_budget`
 - `source_missing_from_index`
+- `source_event_contract_broken`
+- `evidence_type_mismatch`
 
 ## 処理フロー
 
@@ -348,18 +367,23 @@ index 側で参照される主な列は次。
 - `validation-command-match`
 - `validation-command-mismatch`
 - `task-affinity`
+- `priority:<task_kind>:<evidence_type>`
 - `accepted-signal`
 - `failure-signal`
 - `repair-signal`
 - `risk-signal`
 - `recent`
 - `pinned`
+- `source-contract-broken`
 
 #### ranking の思想
 
 - review では file hit と accepted outcome を強めに見る
+- task kind ごとの evidence priority を `priority:review:accepted` のような reason tag に残す
 - failure_analysis では failure / repair を前に出す
+- source artifact / event contract に戻れない event は、候補には残しても selected evidence としては採用しない
 - pass definition request では exact phrase hit を強く見る
+- pinned event は inspection 用に candidate pool へ注入するだけで、ranking score の昇格には使わない
 - capability matrix 由来の pipe-delimited query では head anchor と `--only ...` の一致を見る
 
 この設計の良いところは、外したときに理由を追えることです。
@@ -415,6 +439,8 @@ block budget は task kind ごとに固定比率を持つ。
 - `ranked_out_by_limit`
 - `dropped_by_context_budget`
 - `dropped_by_block_budget`
+- `source_event_contract_broken`
+- `evidence_type_mismatch`
 
 ここはかなり大事です。
 Recall が弱いのか、Ranking が悪いのか、Budget がきついのかを分けて見られないと、改善が鈍るからです。
@@ -486,6 +512,9 @@ variant は現時点で次を持つ。
 - pass-definition request の phrase-first retrieval
 - same pass-definition grouping
 - pinned event の注入
+- pinned event compare による通常 ranking との差分診断
+- task kind ごとの evidence priority reason
+- source artifact / event contract broken candidate の除外
 - evaluation summary の記録
 - source が pass-definition group 経由で選ばれたときの group metadata 記録
 

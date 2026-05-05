@@ -289,8 +289,10 @@ Current baseline:
 - ranking is lexical and rule-based, with explainable reason tags rather than a learned re-ranker
 - context assembly groups selected candidates into stable blocks and trims them against a character budget
 - `source_event_id` support records whether the expected source was selected and why it missed when it was not selected
+- selected candidates carry task-kind evidence priority reasons, including accepted / rejected / test_fail / repair / source-artifact signals
+- source events with broken event contracts or unreachable source artifacts are diagnosed instead of treated as good recall evidence
 - pass-definition requests use phrase-first retrieval and same-pass-definition grouping
-- pinned event ids can be injected for manual compare and source-hit diagnosis
+- pinned event ids can be injected for manual compare and source-hit diagnosis without score promotion
 - `docs/recall_context_builder_design.md` is the implementation-following design note for this milestone
 - `docs/recall_hit_quality_loop.md` defines the lightweight source-hit evaluation loop used to tune M3
 
