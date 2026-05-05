@@ -27,6 +27,10 @@ EVALUATION_COMPARISON_LOG_SCHEMA_NAME = "software-satellite-evaluation-compariso
 EVALUATION_COMPARISON_LOG_SCHEMA_VERSION = 1
 EVALUATION_SNAPSHOT_SCHEMA_NAME = "software-satellite-evaluation-snapshot"
 EVALUATION_SNAPSHOT_SCHEMA_VERSION = 1
+EVALUATION_CONSISTENCY_REPORT_SCHEMA_NAME = "software-satellite-evaluation-consistency-report"
+EVALUATION_CONSISTENCY_REPORT_SCHEMA_VERSION = 1
+EVALUATION_CONSISTENCY_ITEM_SCHEMA_NAME = "software-satellite-evaluation-consistency-item"
+EVALUATION_CONSISTENCY_ITEM_SCHEMA_VERSION = 1
 CURATION_EXPORT_PREVIEW_SCHEMA_NAME = "software-satellite-curation-export-preview"
 CURATION_EXPORT_PREVIEW_SCHEMA_VERSION = 1
 LEARNING_DATASET_PREVIEW_SCHEMA_NAME = "software-satellite-learning-dataset-preview"
@@ -87,6 +91,10 @@ LEARNING_MISSING_SOURCE_EXCLUSIONS = {
     "missing_source_artifact",
     "unreadable_source_artifact",
     "source_artifact_not_durable",
+    "comparison_winner_missing_source_event",
+    "comparison_winner_missing_source_artifact",
+    "comparison_winner_source_artifact_not_durable",
+    "comparison_winner_unreadable_source_artifact",
 }
 
 PASS_QUALITY_STATUSES = {"pass", "passed", "quality_pass"}
@@ -1079,6 +1087,390 @@ def _deduplicate_signals_by_source_event(signals: Iterable[Mapping[str, Any]]) -
     return deduplicated
 
 
+def _deduplicate_strings(values: Iterable[str]) -> list[str]:
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _clean_text(value)
+        if cleaned is None or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduplicated.append(cleaned)
+    return deduplicated
+
+
+def _compact_signal_reference(signal: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if signal is None:
+        return None
+    return {
+        key: value
+        for key, value in {
+            "signal_id": _clean_text(signal.get("signal_id")),
+            "signal_kind": _clean_text(signal.get("signal_kind")),
+            "polarity": _clean_text(signal.get("polarity")),
+            "origin": _clean_text(signal.get("origin")),
+            "recorded_at_utc": _clean_text(signal.get("recorded_at_utc")),
+        }.items()
+        if value is not None
+    }
+
+
+def _latest_signal_summary(
+    signals: Iterable[Mapping[str, Any]],
+    *,
+    signal_kinds: set[str],
+) -> dict[str, Any] | None:
+    matching_signals = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+        if _clean_text(signal.get("signal_kind")) in signal_kinds
+    ]
+    matching_signals.sort(
+        key=lambda signal: (
+            _timestamp_sort_key(signal.get("recorded_at_utc")),
+            str(signal.get("signal_id") or ""),
+        ),
+        reverse=True,
+    )
+    return matching_signals[0] if matching_signals else None
+
+
+def _consistency_signal_bucket(
+    signals: Iterable[Mapping[str, Any]],
+    *,
+    positive_kind: str,
+    negative_kind: str,
+    positive_reason: str,
+    negative_reason: str,
+) -> dict[str, Any]:
+    signal_list = [
+        dict(signal)
+        for signal in signals
+        if isinstance(signal, Mapping)
+        if _clean_text(signal.get("signal_kind")) in {positive_kind, negative_kind}
+    ]
+    latest_signal = _latest_signal_summary(
+        signal_list,
+        signal_kinds={positive_kind, negative_kind},
+    )
+    positive_signals = [
+        signal
+        for signal in signal_list
+        if _clean_text(signal.get("signal_kind")) == positive_kind
+    ]
+    negative_signals = [
+        signal
+        for signal in signal_list
+        if _clean_text(signal.get("signal_kind")) == negative_kind
+    ]
+    latest_kind = _clean_text(latest_signal.get("signal_kind")) if latest_signal is not None else None
+    negative_wins = latest_kind == negative_kind and bool(positive_signals)
+    return {
+        "latest_signal": _compact_signal_reference(latest_signal),
+        "positive_signal_count": len(positive_signals),
+        "negative_signal_count": len(negative_signals),
+        "positive_reason": positive_reason,
+        "negative_reason": negative_reason,
+        "stale_positive_signal": negative_wins,
+        "negative_signal_wins": negative_wins,
+    }
+
+
+def _comparison_references_by_event_id(
+    comparisons: Iterable[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    references_by_event_id: dict[str, list[dict[str, Any]]] = {}
+    for comparison in comparisons:
+        if not isinstance(comparison, Mapping):
+            continue
+        candidate_event_ids = _string_list(comparison.get("candidate_event_ids"))
+        winner_event_id = _clean_text(comparison.get("winner_event_id"))
+        outcome = _clean_text(comparison.get("outcome"))
+        reference_event_ids = _deduplicate_strings(
+            [
+                *candidate_event_ids,
+                *([winner_event_id] if outcome == "winner_selected" and winner_event_id is not None else []),
+            ]
+        )
+        for event_id in reference_event_ids:
+            references_by_event_id.setdefault(event_id, []).append(
+                {
+                    "comparison_id": _clean_text(comparison.get("comparison_id")),
+                    "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
+                    "outcome": outcome,
+                    "winner_event_id": winner_event_id,
+                    "role": "winner" if outcome == "winner_selected" and event_id == winner_event_id else "candidate",
+                }
+            )
+    for references in references_by_event_id.values():
+        references.sort(
+            key=lambda item: (
+                _timestamp_sort_key(item.get("recorded_at_utc")),
+                str(item.get("comparison_id") or ""),
+            ),
+            reverse=True,
+        )
+    return references_by_event_id
+
+
+def _consistency_source_trace(
+    *,
+    event_id: str,
+    event: Mapping[str, Any] | None,
+    root: Path | None,
+) -> dict[str, Any]:
+    if event is None:
+        return {
+            "source_event_present": False,
+            "event_contract_status": "missing_source_event",
+            "source_artifact_status": None,
+            "source_artifact_reasons": ["missing_source_event"],
+        }
+    contract = build_event_contract_check(event, root=root)
+    source_artifact = _mapping_dict(contract.get("source_artifact"))
+    return {
+        "source_event_present": True,
+        "event_contract_status": _clean_text(contract.get("contract_status")),
+        "source_artifact_status": _clean_text(source_artifact.get("source_status")),
+        "source_artifact_reasons": _string_list(source_artifact.get("reasons")),
+        "event_contract": contract,
+    }
+
+
+def _comparison_winner_contract_issue_key(source_trace: Mapping[str, Any]) -> str:
+    if not bool(source_trace.get("source_event_present")):
+        return "comparison_winner_missing_source_event"
+    contract_status = _clean_text(source_trace.get("event_contract_status"))
+    source_reasons = set(_string_list(source_trace.get("source_artifact_reasons")))
+    if contract_status == "missing_source":
+        if "source_artifact_outside_workspace" in source_reasons:
+            return "comparison_winner_source_artifact_not_durable"
+        if source_reasons & {"source_artifact_not_file", "source_artifact_unreadable"}:
+            return "comparison_winner_unreadable_source_artifact"
+        if source_reasons & {"missing_source_artifact_path", "source_artifact_missing"}:
+            return "comparison_winner_missing_source_artifact"
+        return "comparison_winner_missing_source_artifact"
+    return "comparison_winner_invalid_event_contract"
+
+
+def build_evaluation_consistency_report(
+    *,
+    signal_summaries: Iterable[Mapping[str, Any]],
+    comparison_summaries: Iterable[Mapping[str, Any]],
+    curation_candidates: Iterable[Mapping[str, Any]],
+    events_by_id: Mapping[str, Mapping[str, Any]],
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Summarize whether positive curation evidence is still backed by latest traces."""
+    signal_summary_list = [
+        dict(signal)
+        for signal in signal_summaries
+        if isinstance(signal, Mapping)
+    ]
+    comparison_summary_list = [
+        dict(comparison)
+        for comparison in comparison_summaries
+        if isinstance(comparison, Mapping)
+    ]
+    curation_by_event_id = {
+        event_id: dict(candidate)
+        for candidate in curation_candidates
+        if isinstance(candidate, Mapping)
+        if (event_id := _clean_text(candidate.get("event_id"))) is not None
+    }
+    signals_by_event_id: dict[str, list[dict[str, Any]]] = {}
+    for signal in signal_summary_list:
+        event_id = _clean_text(signal.get("source_event_id"))
+        if event_id is None:
+            continue
+        signals_by_event_id.setdefault(event_id, []).append(signal)
+
+    comparison_references_by_event = _comparison_references_by_event_id(comparison_summary_list)
+
+    event_ids = sorted(set(signals_by_event_id) | set(curation_by_event_id) | set(comparison_references_by_event))
+    items: list[dict[str, Any]] = []
+    issue_counts: Counter[str] = Counter()
+    for event_id in event_ids:
+        event_signals = signals_by_event_id.get(event_id, [])
+        curation_candidate = curation_by_event_id.get(event_id, {})
+        curation_reasons = set(_string_list(curation_candidate.get("reasons")))
+        curation_state = _clean_text(curation_candidate.get("state"))
+        buckets = {
+            "test": _consistency_signal_bucket(
+                event_signals,
+                positive_kind="test_pass",
+                negative_kind="test_fail",
+                positive_reason="test_pass",
+                negative_reason="test_fail",
+            ),
+            "review": _consistency_signal_bucket(
+                event_signals,
+                positive_kind="review_resolved",
+                negative_kind="review_unresolved",
+                positive_reason="review_resolved",
+                negative_reason="review_unresolved",
+            ),
+            "selection": _consistency_signal_bucket(
+                event_signals,
+                positive_kind="acceptance",
+                negative_kind="rejection",
+                positive_reason="accepted",
+                negative_reason="rejected",
+            ),
+        }
+        stale_positive_signals: list[str] = []
+        stale_positive_reasons: list[str] = []
+        negative_signal_wins: list[str] = []
+        missing_traces: list[str] = []
+        inconsistencies: list[str] = []
+
+        for bucket_name, bucket in buckets.items():
+            positive_reason = _clean_text(bucket.get("positive_reason"))
+            negative_reason = _clean_text(bucket.get("negative_reason"))
+            latest_signal = _mapping_dict(bucket.get("latest_signal"))
+            latest_kind = _clean_text(latest_signal.get("signal_kind"))
+            if bucket.get("stale_positive_signal") and positive_reason is not None:
+                stale_positive_signals.append(positive_reason)
+                negative_signal_wins.append(negative_reason or bucket_name)
+                issue_key = f"stale_{positive_reason}_signal"
+                inconsistencies.append(issue_key)
+                issue_counts[issue_key] += 1
+                issue_counts["stale_positive_signal"] += 1
+                issue_counts["negative_signal_wins"] += 1
+                if positive_reason in curation_reasons:
+                    stale_positive_reasons.append(positive_reason)
+                    reason_issue_key = f"stale_{positive_reason}_reason"
+                    inconsistencies.append(reason_issue_key)
+                    issue_counts[reason_issue_key] += 1
+            if positive_reason in curation_reasons and latest_kind not in {
+                "acceptance" if positive_reason == "accepted" else positive_reason
+            }:
+                if latest_kind is None:
+                    missing_key = f"missing_{positive_reason}_trace"
+                    missing_traces.append(missing_key)
+                    issue_counts[missing_key] += 1
+                    issue_counts["missing_trace"] += 1
+                elif latest_kind == negative_reason:
+                    stale_reason_key = f"stale_{positive_reason}_reason"
+                    if stale_reason_key not in inconsistencies:
+                        inconsistencies.append(stale_reason_key)
+                        issue_counts[stale_reason_key] += 1
+
+        comparison_refs = comparison_references_by_event.get(event_id, [])
+        has_winner_trace = any(
+            item.get("role") == "winner" and item.get("outcome") == "winner_selected"
+            for item in comparison_refs
+        )
+        if "comparison_winner" in curation_reasons and not has_winner_trace:
+            missing_traces.append("missing_comparison_winner_trace")
+            inconsistencies.append("missing_comparison_winner_trace")
+            issue_counts["missing_comparison_winner_trace"] += 1
+            issue_counts["missing_trace"] += 1
+            issue_counts["comparison_winner_missing_trace"] += 1
+
+        source_trace = _consistency_source_trace(
+            event_id=event_id,
+            event=events_by_id.get(event_id),
+            root=root,
+        )
+        winner_needs_trace = has_winner_trace or any(
+            item.get("role") == "winner"
+            for item in comparison_refs
+        )
+        source_event_present = bool(source_trace.get("source_event_present"))
+        event_contract_status = _clean_text(source_trace.get("event_contract_status"))
+        if winner_needs_trace and (
+            not source_event_present or event_contract_status != "ok"
+        ):
+            issue_key = _comparison_winner_contract_issue_key(source_trace)
+            missing_traces.append(issue_key)
+            inconsistencies.append(issue_key)
+            issue_counts[issue_key] += 1
+            issue_counts["missing_trace"] += 1
+            issue_counts["comparison_winner_missing_trace"] += 1
+
+        item_issue_counts = Counter(_deduplicate_strings([*inconsistencies, *missing_traces]))
+        items.append(
+            {
+                "schema_name": EVALUATION_CONSISTENCY_ITEM_SCHEMA_NAME,
+                "schema_version": EVALUATION_CONSISTENCY_ITEM_SCHEMA_VERSION,
+                "event_id": event_id,
+                "curation": {
+                    "present": bool(curation_candidate),
+                    "state": curation_state,
+                    "reasons": sorted(curation_reasons),
+                },
+                "latest_signals": {
+                    key: copy.deepcopy(_mapping_dict(bucket.get("latest_signal")))
+                    for key, bucket in buckets.items()
+                    if bucket.get("latest_signal")
+                },
+                "signal_counts": {
+                    key: {
+                        "positive": int(bucket.get("positive_signal_count") or 0),
+                        "negative": int(bucket.get("negative_signal_count") or 0),
+                    }
+                    for key, bucket in buckets.items()
+                },
+                "stale_positive_signals": _deduplicate_strings(stale_positive_signals),
+                "stale_positive_reasons": _deduplicate_strings(stale_positive_reasons),
+                "negative_signal_wins": _deduplicate_strings(negative_signal_wins),
+                "missing_traces": _deduplicate_strings(missing_traces),
+                "inconsistencies": _deduplicate_strings(inconsistencies),
+                "issue_counts": {
+                    key: int(value)
+                    for key, value in sorted(item_issue_counts.items())
+                },
+                "comparisons": comparison_refs,
+                "source_trace": source_trace,
+            }
+        )
+
+    events_with_issues = [
+        item
+        for item in items
+        if item.get("inconsistencies") or item.get("missing_traces")
+    ]
+    rollup_issue_keys = {
+        "stale_positive_signal",
+        "negative_signal_wins",
+        "missing_trace",
+        "comparison_winner_missing_trace",
+    }
+    specific_issue_count = sum(
+        int(value)
+        for key, value in issue_counts.items()
+        if key not in rollup_issue_keys
+    )
+    return {
+        "schema_name": EVALUATION_CONSISTENCY_REPORT_SCHEMA_NAME,
+        "schema_version": EVALUATION_CONSISTENCY_REPORT_SCHEMA_VERSION,
+        "workspace_id": workspace_id,
+        "generated_at_utc": timestamp_utc(),
+        "counts": {
+            "event_count": len(items),
+            "events_with_issues": len(events_with_issues),
+            "stale_positive_signal": int(issue_counts.get("stale_positive_signal", 0)),
+            "negative_signal_wins": int(issue_counts.get("negative_signal_wins", 0)),
+            "missing_trace": int(issue_counts.get("missing_trace", 0)),
+            "comparison_winner_missing_trace": int(issue_counts.get("comparison_winner_missing_trace", 0)),
+            "inconsistency": specific_issue_count,
+        },
+        "issue_counts": {
+            key: int(value)
+            for key, value in sorted(issue_counts.items())
+        },
+        "events": items,
+        "issue_events": events_with_issues[:12],
+        "notes": [
+            "Latest negative evidence wins over older positive evidence for consistency checks.",
+            "Export-policy confirmation is reported as policy evidence only, not selection evidence.",
+        ],
+    }
+
+
 def build_evaluation_snapshot(
     *,
     root: Path | None = None,
@@ -1158,8 +1550,17 @@ def build_evaluation_snapshot(
         comparison_summaries=comparison_summaries,
         events_by_id=events_by_id,
     )
+    evaluation_consistency = build_evaluation_consistency_report(
+        signal_summaries=signal_summaries,
+        comparison_summaries=comparison_summaries,
+        curation_candidates=curation_candidates,
+        events_by_id=events_by_id,
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
     curation_state_counts = Counter(str(item.get("state") or "") for item in curation_candidates)
     comparison_counts = Counter(str(item.get("outcome") or "") for item in comparison_summaries)
+    consistency_counts = _mapping_dict(evaluation_consistency.get("counts"))
 
     return {
         "schema_name": EVALUATION_SNAPSHOT_SCHEMA_NAME,
@@ -1201,6 +1602,13 @@ def build_evaluation_snapshot(
             "curation_ready": int(curation_state_counts.get("ready", 0)),
             "curation_needs_review": int(curation_state_counts.get("needs_review", 0)),
             "curation_blocked": int(curation_state_counts.get("blocked", 0)),
+            "stale_positive_signal": int(consistency_counts.get("stale_positive_signal") or 0),
+            "negative_signal_wins": int(consistency_counts.get("negative_signal_wins") or 0),
+            "missing_trace": int(consistency_counts.get("missing_trace") or 0),
+            "comparison_winner_missing_trace": int(
+                consistency_counts.get("comparison_winner_missing_trace") or 0
+            ),
+            "evaluation_inconsistency": int(consistency_counts.get("inconsistency") or 0),
             "event_contract_failed": int(event_contract.get("failed_event_count") or 0),
             "event_contract_missing_source": int(
                 _mapping_dict(event_contract.get("source_status_counts")).get("missing_source") or 0
@@ -1220,6 +1628,7 @@ def build_evaluation_snapshot(
         },
         "index_summary": resolved_index_summary,
         "event_contract": event_contract,
+        "evaluation_consistency": evaluation_consistency,
     }
 
 
@@ -1946,7 +2355,8 @@ def _comparison_event_ids(comparison: Mapping[str, Any]) -> list[str]:
 def _learning_comparison_trace(comparison: Mapping[str, Any], *, event_id: str) -> dict[str, Any]:
     candidate_event_ids = _comparison_event_ids(comparison)
     winner_event_id = _clean_text(comparison.get("winner_event_id"))
-    if winner_event_id == event_id:
+    outcome = _clean_text(comparison.get("outcome"))
+    if outcome == "winner_selected" and winner_event_id == event_id:
         role = "winner"
     elif event_id in candidate_event_ids:
         role = "candidate"
@@ -1957,7 +2367,7 @@ def _learning_comparison_trace(comparison: Mapping[str, Any], *, event_id: str) 
         "recorded_at_utc": _clean_text(comparison.get("recorded_at_utc")),
         "origin": _clean_text(comparison.get("origin")),
         "task_label": _clean_text(comparison.get("task_label")),
-        "outcome": _clean_text(comparison.get("outcome")),
+        "outcome": outcome,
         "winner_event_id": winner_event_id,
         "role": role,
         "candidate_event_ids": candidate_event_ids,
@@ -2014,9 +2424,17 @@ def _learning_candidate_blocked_reasons(
         if reason in exclusions or reason in reasons or reason in blocked_by:
             ordered_reasons.append(reason)
     trace_blockers = {
-        "rejected_trace": "rejected",
         "review_unresolved_trace": "review_unresolved",
         "test_fail_trace": "test_fail",
+        "stale_review_resolved_trace": "review_unresolved",
+        "stale_test_pass_trace": "test_fail",
+        "rejected_trace": "rejected",
+        "stale_accepted_trace": "rejected",
+        "comparison_winner_missing_source_event": "missing_source_event",
+        "comparison_winner_missing_source_artifact": "missing_source_artifact",
+        "comparison_winner_source_artifact_not_durable": "source_artifact_not_durable",
+        "comparison_winner_unreadable_source_artifact": "unreadable_source_artifact",
+        "comparison_winner_invalid_event_contract": "invalid_event_contract",
     }
     for exclusion, reason in trace_blockers.items():
         if exclusion in exclusions and reason not in ordered_reasons:
@@ -2111,13 +2529,22 @@ def _learning_next_action(
     policy_confirmed = bool(_mapping_dict(policy_confirmation).get("confirmed"))
     if "missing_source_event" in exclusions:
         return "restore_source_event"
+    if "comparison_winner_missing_source_event" in exclusions:
+        return "restore_source_event"
     if "missing_source_artifact_path" in exclusions:
         return "record_source_artifact_path"
-    if exclusions & {"missing_source_artifact", "source_artifact_not_durable"}:
+    if exclusions & {
+        "missing_source_artifact",
+        "source_artifact_not_durable",
+        "comparison_winner_missing_source_artifact",
+        "comparison_winner_source_artifact_not_durable",
+    }:
         return "restore_source_artifact"
-    if "unreadable_source_artifact" in exclusions:
+    if exclusions & {"unreadable_source_artifact", "comparison_winner_unreadable_source_artifact"}:
         return "restore_readable_source_artifact"
     if "invalid_event_contract" in exclusions:
+        return "repair_event_contract"
+    if "comparison_winner_invalid_event_contract" in exclusions:
         return "repair_event_contract"
     if "missing_supervised_text" in exclusions:
         return "restore_instruction_or_response_excerpt"
@@ -2135,8 +2562,16 @@ def _learning_next_action(
         return "confirm_export_policy"
     if "missing_test_pass" in exclusions or "missing_test_pass_trace" in exclusions:
         return "record_test_pass"
+    if "missing_comparison_winner_trace" in exclusions:
+        return "record_comparison_winner_trace"
     if (
-        "missing_human_or_comparison_selection" in exclusions
+        "comparison_winner_missing_source_event" in exclusions
+        or "comparison_winner_missing_source_artifact" in exclusions
+        or "comparison_winner_invalid_event_contract" in exclusions
+        or "stale_accepted_trace" in exclusions
+        or "stale_review_resolved_trace" in exclusions
+        or "stale_test_pass_trace" in exclusions
+        or "missing_human_or_comparison_selection" in exclusions
         or "missing_selection_trace" in exclusions
         or not (reasons & LEARNING_SELECTION_REASONS)
     ):
@@ -2167,7 +2602,7 @@ def _learning_lifecycle_summary(
     source_artifact_state = _clean_text(source_artifact.get("source_status"))
     if missing_source_event:
         test_state = "missing_trace"
-    elif "test_fail_trace" in exclusions:
+    elif "test_fail_trace" in exclusions or "stale_test_pass_trace" in exclusions:
         test_state = "failed"
     elif "missing_test_pass_trace" in exclusions:
         test_state = "missing_trace"
@@ -2179,7 +2614,7 @@ def _learning_lifecycle_summary(
         test_state = "missing"
     if missing_source_event:
         review_state = "unknown"
-    elif "review_unresolved_trace" in exclusions:
+    elif "review_unresolved_trace" in exclusions or "stale_review_resolved_trace" in exclusions:
         review_state = "unresolved"
     elif "missing_selection_trace" in exclusions and "review_resolved" in reasons:
         review_state = "missing_trace"
@@ -2191,7 +2626,7 @@ def _learning_lifecycle_summary(
         review_state = "not_recorded"
     if missing_source_event:
         selection_state = "missing_trace"
-    elif "rejected_trace" in exclusions:
+    elif "rejected_trace" in exclusions or "stale_accepted_trace" in exclusions:
         selection_state = "rejected"
     elif "rejected" in reasons:
         selection_state = "rejected"
@@ -2360,6 +2795,66 @@ def _learning_candidate_exclusions(candidate: Mapping[str, Any]) -> list[str]:
     return exclusions
 
 
+def _evaluation_consistency_by_event_id(snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    report = _mapping_dict(snapshot.get("evaluation_consistency"))
+    return {
+        event_id: dict(item)
+        for item in report.get("events") or []
+        if isinstance(item, Mapping)
+        if (event_id := _clean_text(item.get("event_id"))) is not None
+    }
+
+
+def _fresh_learning_consistency_by_event_id(
+    *,
+    signal_traces: Iterable[Mapping[str, Any]],
+    comparison_traces: Iterable[Mapping[str, Any]],
+    curation_candidates: Iterable[Mapping[str, Any]],
+    events_by_id: Mapping[str, Mapping[str, Any]],
+    workspace_id: str,
+    root: Path | None,
+) -> dict[str, dict[str, Any]]:
+    report = build_evaluation_consistency_report(
+        signal_summaries=[_signal_summary(signal) for signal in signal_traces],
+        comparison_summaries=[_comparison_summary(comparison) for comparison in comparison_traces],
+        curation_candidates=curation_candidates,
+        events_by_id=events_by_id,
+        workspace_id=workspace_id,
+        root=root,
+    )
+    return {
+        event_id: dict(item)
+        for item in report.get("events") or []
+        if isinstance(item, Mapping)
+        if (event_id := _clean_text(item.get("event_id"))) is not None
+    }
+
+
+def _learning_consistency_exclusions(consistency_item: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(consistency_item, Mapping):
+        return []
+    stale_reasons = set(_string_list(consistency_item.get("stale_positive_signals")))
+    missing_traces = set(_string_list(consistency_item.get("missing_traces")))
+    exclusions: list[str] = []
+    if "accepted" in stale_reasons:
+        exclusions.append("stale_accepted_trace")
+    if "review_resolved" in stale_reasons:
+        exclusions.append("stale_review_resolved_trace")
+    if "test_pass" in stale_reasons:
+        exclusions.append("stale_test_pass_trace")
+    for missing_trace in (
+        "missing_comparison_winner_trace",
+        "comparison_winner_missing_source_event",
+        "comparison_winner_missing_source_artifact",
+        "comparison_winner_source_artifact_not_durable",
+        "comparison_winner_unreadable_source_artifact",
+        "comparison_winner_invalid_event_contract",
+    ):
+        if missing_trace in missing_traces:
+            exclusions.append(missing_trace)
+    return exclusions
+
+
 def _learning_source_contract_exclusions(source_contract: Mapping[str, Any]) -> list[str]:
     contract_status = _clean_text(source_contract.get("contract_status"))
     source_artifact = _mapping_dict(source_contract.get("source_artifact"))
@@ -2382,6 +2877,7 @@ def _learning_traceability_exclusions(
     *,
     signals: Iterable[Mapping[str, Any]],
     comparisons: Iterable[Mapping[str, Any]],
+    expected_reasons: Iterable[str] | None = None,
 ) -> list[str]:
     signal_list = [
         dict(signal)
@@ -2404,9 +2900,12 @@ def _learning_traceability_exclusions(
         for comparison in comparisons
         if isinstance(comparison, Mapping)
     )
+    reasons = set(_string_list(list(expected_reasons or [])))
     exclusions: list[str] = []
     if not has_test_pass:
         exclusions.append("missing_test_pass_trace")
+    if "comparison_winner" in reasons and not has_comparison_winner:
+        exclusions.append("missing_comparison_winner_trace")
     if not (has_selection_signal or has_comparison_winner):
         exclusions.append("missing_selection_trace")
     return exclusions
@@ -2459,10 +2958,16 @@ def _learning_blocking_trace_exclusions(*, signals: Iterable[Mapping[str, Any]])
     exclusions: list[str] = []
     if latest_selection_signal == "rejection":
         exclusions.append("rejected_trace")
+        if any(_clean_text(signal.get("signal_kind")) == "acceptance" for signal in signal_list):
+            exclusions.append("stale_accepted_trace")
     if _learning_latest_review_signal_kind_from_traces(signal_list) == "review_unresolved":
         exclusions.append("review_unresolved_trace")
+        if any(_clean_text(signal.get("signal_kind")) == "review_resolved" for signal in signal_list):
+            exclusions.append("stale_review_resolved_trace")
     if latest_test_signal == "test_fail":
         exclusions.append("test_fail_trace")
+        if any(_clean_text(signal.get("signal_kind")) == "test_pass" for signal in signal_list):
+            exclusions.append("stale_test_pass_trace")
     return exclusions
 
 
@@ -2600,6 +3105,23 @@ def build_learning_dataset_preview(
         if isinstance(candidate, Mapping)
     ]
     contract_root = _learning_contract_root(source_paths)
+    has_trace_overrides = (
+        explicit_signals is not None
+        or comparisons is not None
+        or events_by_id is not None
+    )
+    consistency_by_event_id = (
+        _fresh_learning_consistency_by_event_id(
+            signal_traces=resolved_signals,
+            comparison_traces=resolved_comparisons,
+            curation_candidates=source_candidates,
+            events_by_id=resolved_events_by_id,
+            workspace_id=resolved_workspace_id,
+            root=contract_root,
+        )
+        if has_trace_overrides
+        else _evaluation_consistency_by_event_id(snapshot)
+    )
     eligible_candidates: list[dict[str, Any]] = []
     excluded_candidates: list[dict[str, Any]] = []
     review_queue: list[dict[str, Any]] = []
@@ -2636,13 +3158,18 @@ def build_learning_dataset_preview(
             )
             policy_confirmation = _learning_policy_confirmation_trace(signal_traces)
             exclusions.extend(_learning_blocking_trace_exclusions(signals=signal_traces))
+            exclusions.extend(
+                _learning_consistency_exclusions(consistency_by_event_id.get(event_id))
+            )
             if not exclusions:
                 exclusions.extend(
                     _learning_traceability_exclusions(
                         signals=signal_traces,
                         comparisons=comparison_traces,
+                        expected_reasons=candidate.get("reasons"),
                     )
                 )
+        exclusions = _deduplicate_strings(exclusions)
 
         queue_item = _learning_review_queue_item(
             workspace_id=resolved_workspace_id,
@@ -4186,6 +4713,9 @@ def format_evaluation_snapshot_report(snapshot: Mapping[str, Any]) -> str:
         f"Follow-up links: {int(counts.get('follow_up_links') or 0)}",
         f"Comparisons: {int(counts.get('comparisons') or 0)}",
         f"Curation ready: {int(counts.get('curation_ready') or 0)}",
+        f"Consistency stale positives: {int(counts.get('stale_positive_signal') or 0)}",
+        f"Consistency negative wins: {int(counts.get('negative_signal_wins') or 0)}",
+        f"Consistency missing trace: {int(counts.get('missing_trace') or 0)}",
         f"Event contract failed: {int(counts.get('event_contract_failed') or 0)}",
         f"Event contract missing source: {int(counts.get('event_contract_missing_source') or 0)}",
         f"Addressed failures: {int(counts.get('addressed_failures') or 0)}",
@@ -4238,6 +4768,19 @@ def format_evaluation_snapshot_report(snapshot: Mapping[str, Any]) -> str:
             label = _clean_text(item.get("task_label")) or _clean_text(item.get("comparison_id")) or "comparison"
             winner = _clean_text(item.get("winner_event_id")) or "n/a"
             lines.append(f"- {label}: {_clean_text(item.get('outcome')) or 'n/a'} winner={winner}")
+    consistency = _mapping_dict(snapshot.get("evaluation_consistency"))
+    issue_events = [
+        item
+        for item in (consistency.get("issue_events") or [])
+        if isinstance(item, Mapping)
+    ]
+    if issue_events:
+        lines.extend(("", "Evaluation consistency:"))
+        for item in issue_events[:5]:
+            event_id = _clean_text(item.get("event_id")) or "n/a"
+            stale = ",".join(_string_list(item.get("stale_positive_signals"))) or "none"
+            missing = ",".join(_string_list(item.get("missing_traces"))) or "none"
+            lines.append(f"- {event_id}: stale={stale}; missing_trace={missing}")
     curation = _mapping_dict(snapshot.get("curation"))
     curation_candidates = [
         item
