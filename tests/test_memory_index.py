@@ -63,6 +63,7 @@ class MemoryIndexTests(unittest.TestCase):
         self.assertGreaterEqual(len(matches), 1)
         self.assertEqual(matches[0]["event_kind"], "chat_turn")
         self.assertIn("SQLite FTS5 first.", matches[0]["output_text"])
+        self.assertIn("payload_json", matches[0])
         self.assertEqual(latest[0]["prompt"], "Review the memory index patch.")
 
     def test_search_supports_surface_and_status_filters(self) -> None:

@@ -15,12 +15,14 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from run_recall_demo import (  # noqa: E402
+    build_pinned_event_compare,
     build_bundle_report,
     compare_evaluation_summaries,
     dataset_request_to_bundle_request,
     ensure_recall_dataset,
     format_evaluation_report,
     format_miss_report,
+    format_pinned_event_compare_report,
     format_request_catalog,
     load_latest_evaluation_summary,
     main,
@@ -30,6 +32,20 @@ from run_recall_demo import (  # noqa: E402
 from memory_index import MemoryIndex, default_memory_index_path, rebuild_memory_index  # noqa: E402
 from recall_context import CONTEXT_BUNDLE_VERSION  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
+
+
+def _materialize_workspace_artifacts(root: Path) -> None:
+    sessions_root = root / "artifacts" / "workspaces" / "local-default" / "sessions"
+    for session_path in sessions_root.glob("*.json"):
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        for artifact_ref in payload.get("artifact_refs") or []:
+            artifact_path = artifact_ref.get("artifact_path")
+            if not isinstance(artifact_path, str) or not artifact_path.strip():
+                continue
+            target = Path(artifact_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_text("{}", encoding="utf-8")
 
 
 class RecallRunnerTests(unittest.TestCase):
@@ -210,6 +226,57 @@ class RecallRunnerTests(unittest.TestCase):
         self.assertIn("Source group: pass_definition representative=leader members=3", report)
         self.assertIn("group members: 3: leader capability; source capability; third capability", report)
 
+    def test_pinned_event_compare_reports_normal_vs_pinned_without_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = WorkspaceSessionStore(root=root)
+            for prompt in [
+                "Pin-only recall diagnosis target.",
+                "Decoy recall note one.",
+                "Decoy recall note two.",
+                "Review the leader patch.",
+            ]:
+                messages = store.chat_messages_for_next_turn(
+                    model_id="backend-a",
+                    system_prompt="You are concise.",
+                )
+                store.record_chat_turn(
+                    model_id="backend-a",
+                    status="ok",
+                    artifact_path=root / "artifacts" / "text" / f"{prompt.split()[0].lower()}-{len(prompt)}.json",
+                    prompt=prompt,
+                    system_prompt="You are concise.",
+                    resolved_user_prompt=prompt,
+                    output_text=f"Accepted outcome for {prompt}",
+                    base_messages=messages,
+                    notes=["accepted"],
+                )
+            _materialize_workspace_artifacts(root)
+            summary = rebuild_memory_index(root=root)
+            index = MemoryIndex(Path(summary["index_path"]))
+            pin_event_id = index.search("Pin", limit=1)[0]["event_id"]
+
+            compare = build_pinned_event_compare(
+                {
+                    "task_kind": "review",
+                    "query_text": "Review the leader patch.",
+                    "limit": 1,
+                    "context_budget_chars": 1800,
+                },
+                pinned_event_ids=[pin_event_id],
+                root=root,
+                workspace_id="local-default",
+                index_path=Path(summary["index_path"]),
+            )
+            report = format_pinned_event_compare_report(compare)
+
+        self.assertIn("without a score boost", compare["pin_policy"])
+        self.assertEqual(compare["selected_added_event_ids"], [])
+        self.assertEqual(compare["pinned_events"][0]["normal_source_rank"], None)
+        self.assertIsNotNone(compare["pinned_events"][0]["pinned_source_rank"])
+        self.assertIn("Pinned event compare", report)
+        self.assertIn("pinned reasons:", report)
+
     def test_format_evaluation_report_summarizes_hit_rate_and_miss_reasons(self) -> None:
         report = format_evaluation_report(
             {
@@ -321,6 +388,20 @@ class RecallRunnerTests(unittest.TestCase):
                         "source_status": "ok",
                         "source_rank": 3,
                         "source_prompt_excerpt": "Tighten recall ranking around miss-report requests.",
+                        "source_candidate_pool_status": "candidate_pool_present",
+                        "source_event_contract_status": "ok",
+                        "source_artifact_status": "readable",
+                        "source_evidence_types": ["source-artifact", "accepted"],
+                        "source_evidence_type_match": True,
+                        "source_reasons": ["priority:review:accepted"],
+                        "miss_reason_detail": "source event was in the candidate pool but fell below the selected candidate limit",
+                        "top_selected": [
+                            {
+                                "event_id": "leader",
+                                "score": 22.1,
+                                "reasons": ["fts-hit", "priority:review:accepted"],
+                            }
+                        ],
                         "miss_reason": "ranked_out_by_limit",
                         "request_variant": "adversarial-pass-definition",
                     }
@@ -331,6 +412,13 @@ class RecallRunnerTests(unittest.TestCase):
 
         self.assertIn("Misses: 1 / 3", report)
         self.assertIn("reason=ranked_out_by_limit", report)
+        self.assertIn("pool=candidate_pool_present", report)
+        self.assertIn("type_match=yes", report)
+        self.assertIn("contract=ok", report)
+        self.assertIn("evidence=source-artifact,accepted", report)
+        self.assertIn("detail: source event was in the candidate pool", report)
+        self.assertIn("source reasons: priority:review:accepted", report)
+        self.assertIn("top selected: leader", report)
         self.assertIn("variant=adversarial-pass-definition", report)
         self.assertIn("source: Tighten recall ranking", report)
 
@@ -355,6 +443,7 @@ class RecallRunnerTests(unittest.TestCase):
             )
 
             dataset_path = root / "tmp" / "custom_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
             dataset, resolved_path = ensure_recall_dataset(
                 root=root,
                 dataset_path=dataset_path,
@@ -386,6 +475,7 @@ class RecallRunnerTests(unittest.TestCase):
             )
 
             dataset_path = root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
             dataset, _resolved_path = ensure_recall_dataset(
                 root=root,
                 dataset_path=dataset_path,
@@ -396,6 +486,7 @@ class RecallRunnerTests(unittest.TestCase):
             bundle["selected_candidates"][0]["prompt_excerpt"] = "SENTINEL STORED BUNDLE"
             bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+            _materialize_workspace_artifacts(root)
             stdout = io.StringIO()
             with patch.object(
                 sys,
@@ -552,6 +643,7 @@ class RecallRunnerTests(unittest.TestCase):
                 notes=["review accepted"],
             )
             dataset_path = root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
             dataset, _resolved_path = ensure_recall_dataset(
                 root=root,
                 dataset_path=dataset_path,
@@ -613,6 +705,72 @@ class RecallRunnerTests(unittest.TestCase):
         self.assertIsNone(refreshed_dataset["requests"][0]["miss_reason"])
         self.assertTrue(refreshed_bundle["source_evaluation"]["source_selected"])
 
+    def test_main_refreshes_stale_bundle_when_source_artifact_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_path = root / "artifacts" / "text" / "review.json"
+            store = WorkspaceSessionStore(root=root)
+            messages = store.chat_messages_for_next_turn(
+                model_id="backend-a",
+                system_prompt="You are concise.",
+            )
+            store.record_chat_turn(
+                model_id="backend-a",
+                status="ok",
+                artifact_path=artifact_path,
+                prompt="Review the memory index patch.",
+                system_prompt="You are concise.",
+                resolved_user_prompt="Review the memory index patch.",
+                output_text="Looks good with one regression note.",
+                base_messages=messages,
+                notes=["review accepted"],
+            )
+            dataset_path = root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
+            dataset, _resolved_path = ensure_recall_dataset(
+                root=root,
+                dataset_path=dataset_path,
+                refresh=True,
+                max_requests=1,
+                max_adversarial_requests=0,
+            )
+            bundle_path = Path(dataset["requests"][0]["bundle_path"])
+            self.assertTrue(dataset["requests"][0]["source_hit"])
+            self.assertTrue(artifact_path.exists())
+
+            artifact_path.unlink()
+            stdout = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_recall_demo.py",
+                    "--root",
+                    str(root),
+                    "--dataset-path",
+                    str(dataset_path),
+                    "--miss-report",
+                ],
+            ):
+                with redirect_stdout(stdout):
+                    exit_code = main()
+
+            refreshed_dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+            refreshed_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("reason=source_event_contract_broken", stdout.getvalue())
+        self.assertFalse(refreshed_dataset["requests"][0]["source_hit"])
+        self.assertEqual(refreshed_dataset["requests"][0]["miss_reason"], "source_event_contract_broken")
+        self.assertEqual(
+            refreshed_bundle["source_evaluation"]["source_event_contract_status"],
+            "missing_source",
+        )
+        self.assertIn(
+            "source_artifact_missing",
+            refreshed_bundle["source_evaluation"]["source_artifact_reasons"],
+        )
+
     def test_main_rebuilds_stale_default_index_before_miss_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -632,6 +790,7 @@ class RecallRunnerTests(unittest.TestCase):
                 base_messages=first_messages,
                 notes=["review accepted"],
             )
+            _materialize_workspace_artifacts(root)
             rebuild_memory_index(root=root)
 
             second_messages = store.chat_messages_for_next_turn(
@@ -651,6 +810,7 @@ class RecallRunnerTests(unittest.TestCase):
             )
 
             dataset_path = root / "artifacts" / "recall_data" / "local-default" / "real_recall_dataset.json"
+            _materialize_workspace_artifacts(root)
             dataset, _resolved_path = ensure_recall_dataset(
                 root=root,
                 dataset_path=dataset_path,

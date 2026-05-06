@@ -23,6 +23,7 @@ from recall_context import (
     TASK_KINDS,
     build_context_bundle,
 )
+from software_work_events import build_event_contract_check
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
@@ -48,6 +49,12 @@ def _nonnegative_int(value: Any) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_clean_text(item) for item in value if _clean_text(item)]
 
 
 def _format_group_members(
@@ -175,6 +182,7 @@ def dataset_request_to_bundle_request(entry: Mapping[str, Any]) -> dict[str, Any
         "file_hints": list(entry.get("file_hints") or []),
         "surface_filters": list(entry.get("surface_filters") or []),
         "status_filters": list(entry.get("status_filters") or []),
+        "pinned_event_ids": list(entry.get("pinned_event_ids") or []),
         "limit": int(entry.get("limit") or DEFAULT_LIMIT),
         "context_budget_chars": int(entry.get("context_budget_chars") or DEFAULT_CONTEXT_BUDGET_CHARS),
     }
@@ -280,6 +288,7 @@ def bundle_needs_source_refresh(
     *,
     source_event_id: str | None,
     index: MemoryIndex,
+    root: Path,
 ) -> bool:
     try:
         bundle_version = int(bundle.get("bundle_version") or 0)
@@ -304,7 +313,39 @@ def bundle_needs_source_refresh(
         return True
     if not source_exists_now and source_selected:
         return True
+    current_contract = source_contract_snapshot(index=index, source_event_id=source_event_id, root=root)
+    if current_contract is not None:
+        for key, current_value in current_contract.items():
+            if source_evaluation.get(key) != current_value:
+                return True
     return False
+
+
+def source_contract_snapshot(
+    *,
+    index: MemoryIndex,
+    source_event_id: str,
+    root: Path,
+) -> dict[str, Any] | None:
+    source_row = index.get_event(source_event_id)
+    if source_row is None:
+        return None
+    payload_json = _clean_text(source_row.get("payload_json"))
+    if not payload_json:
+        return None
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    contract = build_event_contract_check(payload, root=root)
+    source_artifact = dict(contract.get("source_artifact") or {})
+    return {
+        "source_event_contract_status": _clean_text(contract.get("contract_status")) or None,
+        "source_artifact_status": _clean_text(source_artifact.get("source_status")) or None,
+        "source_artifact_reasons": _clean_string_list(source_artifact.get("reasons")),
+    }
 
 
 def build_bundle_for_dataset_entry(
@@ -324,7 +365,12 @@ def build_bundle_for_dataset_entry(
     bundle_path = dataset_bundle_path(entry)
     if bundle_path is not None and bundle_path.exists():
         bundle = read_bundle(bundle_path)
-        if not bundle_needs_source_refresh(bundle, source_event_id=source_event_id, index=index_handle):
+        if not bundle_needs_source_refresh(
+            bundle,
+            source_event_id=source_event_id,
+            index=index_handle,
+            root=root,
+        ):
             return bundle
     bundle = build_context_bundle(
         request_payload,
@@ -346,6 +392,7 @@ def evaluate_dataset(
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     miss_reason_counts: Counter[str] = Counter()
+    miss_diagnostic_counts: Counter[str] = Counter()
     requests = dataset.get("requests") or []
     for index, entry in enumerate(requests, start=1):
         if not isinstance(entry, Mapping):
@@ -361,6 +408,10 @@ def evaluate_dataset(
         miss_reason = _clean_text(source_evaluation.get("miss_reason")) or None
         if not source_hit and miss_reason:
             miss_reason_counts[miss_reason] += 1
+        if not source_hit:
+            for diagnostic in source_evaluation.get("miss_diagnostics") or []:
+                if _clean_text(diagnostic):
+                    miss_diagnostic_counts[_clean_text(diagnostic)] += 1
         rows.append(
             {
                 "index": index,
@@ -377,12 +428,21 @@ def evaluate_dataset(
                 "source_block_title": _clean_text(source_evaluation.get("source_block_title")) or None,
                 "source_prompt_excerpt": _clean_text(source_evaluation.get("source_prompt_excerpt")) or None,
                 "source_reasons": list(source_evaluation.get("source_reasons") or []),
+                "source_candidate_pool_status": _clean_text(source_evaluation.get("source_candidate_pool_status")) or None,
+                "source_evidence_types": list(source_evaluation.get("source_evidence_types") or []),
+                "source_evidence_priority": dict(source_evaluation.get("source_evidence_priority") or {}),
+                "source_evidence_type_match": source_evaluation.get("source_evidence_type_match"),
+                "source_event_contract_status": _clean_text(source_evaluation.get("source_event_contract_status")) or None,
+                "source_artifact_status": _clean_text(source_evaluation.get("source_artifact_status")) or None,
+                "source_artifact_reasons": list(source_evaluation.get("source_artifact_reasons") or []),
                 "source_selected_via_group": bool(source_evaluation.get("source_selected_via_group")),
                 "source_grouped_by": _clean_text(source_evaluation.get("source_grouped_by")) or None,
                 "source_group_event_id": _clean_text(source_evaluation.get("source_group_event_id")) or None,
                 "source_group_member_count": source_evaluation.get("source_group_member_count"),
                 "source_group_member_labels": list(source_evaluation.get("source_group_member_labels") or []),
                 "miss_reason": miss_reason,
+                "miss_reason_detail": _clean_text(source_evaluation.get("miss_reason_detail")) or None,
+                "miss_diagnostics": list(source_evaluation.get("miss_diagnostics") or []),
                 "top_selected": list(source_evaluation.get("top_selected") or []),
             }
         )
@@ -418,6 +478,7 @@ def evaluate_dataset(
         "source_misses": len(misses),
         "hit_rate": round(hit_count / len(rows), 3) if rows else 0.0,
         "miss_reason_counts": dict(sorted(miss_reason_counts.items())),
+        "miss_diagnostic_counts": dict(sorted(miss_diagnostic_counts.items())),
         "variants": variant_summary,
         "requests": rows,
         "misses": misses,
@@ -448,9 +509,18 @@ def sync_dataset_with_evaluation(
                     "omitted_count": int(row.get("omitted_count") or 0),
                     "source_rank": row.get("source_rank"),
                     "miss_reason": _clean_text(row.get("miss_reason")) or None,
+                    "miss_reason_detail": _clean_text(row.get("miss_reason_detail")) or None,
+                    "miss_diagnostics": list(row.get("miss_diagnostics") or []),
+                    "source_candidate_pool_status": _clean_text(row.get("source_candidate_pool_status")) or None,
                     "source_block_title": _clean_text(row.get("source_block_title")) or None,
                     "source_prompt_excerpt": _clean_text(row.get("source_prompt_excerpt")) or None,
                     "source_reasons": list(row.get("source_reasons") or []),
+                    "source_evidence_types": list(row.get("source_evidence_types") or []),
+                    "source_evidence_priority": dict(row.get("source_evidence_priority") or {}),
+                    "source_evidence_type_match": row.get("source_evidence_type_match"),
+                    "source_event_contract_status": _clean_text(row.get("source_event_contract_status")) or None,
+                    "source_artifact_status": _clean_text(row.get("source_artifact_status")) or None,
+                    "source_artifact_reasons": list(row.get("source_artifact_reasons") or []),
                     "source_selected_via_group": bool(row.get("source_selected_via_group")),
                     "source_grouped_by": _clean_text(row.get("source_grouped_by")) or None,
                     "source_group_event_id": _clean_text(row.get("source_group_event_id")) or None,
@@ -503,6 +573,14 @@ def compare_evaluation_summaries(
         if count_delta:
             miss_reason_delta[miss_reason] = count_delta
 
+    current_miss_diagnostic_counts = dict(current.get("miss_diagnostic_counts") or {})
+    previous_miss_diagnostic_counts = dict(previous_summary.get("miss_diagnostic_counts") or {})
+    miss_diagnostic_delta: dict[str, int] = {}
+    for diagnostic in sorted(set(current_miss_diagnostic_counts) | set(previous_miss_diagnostic_counts)):
+        count_delta = int(current_miss_diagnostic_counts.get(diagnostic) or 0) - int(previous_miss_diagnostic_counts.get(diagnostic) or 0)
+        if count_delta:
+            miss_diagnostic_delta[diagnostic] = count_delta
+
     return {
         "request_count_delta": int(current.get("request_count") or 0) - int(previous_summary.get("request_count") or 0),
         "source_hits_delta": int(current.get("source_hits") or 0) - int(previous_summary.get("source_hits") or 0),
@@ -513,6 +591,7 @@ def compare_evaluation_summaries(
         ),
         "variants": variant_deltas,
         "miss_reason_counts": miss_reason_delta,
+        "miss_diagnostic_counts": miss_diagnostic_delta,
     }
 
 
@@ -569,6 +648,11 @@ def format_evaluation_report(
         lines.extend(("", "Miss reasons:"))
         for miss_reason, count in miss_reason_counts.items():
             lines.append(f"- {miss_reason}: {count}")
+    miss_diagnostic_counts = dict(summary.get("miss_diagnostic_counts") or {})
+    if miss_diagnostic_counts:
+        lines.extend(("", "Miss diagnostics:"))
+        for diagnostic, count in miss_diagnostic_counts.items():
+            lines.append(f"- {diagnostic}: {count}")
     variants = dict(summary.get("variants") or {})
     if variants:
         lines.extend(("", "By variant:"))
@@ -596,6 +680,9 @@ def format_evaluation_report(
                 f"misses {int(payload.get('source_misses_delta') or 0):+d}, "
                 f"rate {float(payload.get('hit_rate_delta') or 0.0):+.3f}"
             )
+        diagnostic_delta = dict(delta.get("miss_diagnostic_counts") or {})
+        for diagnostic, value in sorted(diagnostic_delta.items()):
+            lines.append(f"- diagnostic {diagnostic}: {int(value):+d}")
     return "\n".join(lines)
 
 
@@ -623,6 +710,27 @@ def format_miss_report(
             f"rank={row.get('source_rank') if row.get('source_rank') is not None else '-'} "
             f"status={_clean_text(row.get('source_status')) or '-'}"
         )
+        pool_status = _clean_text(row.get("source_candidate_pool_status"))
+        contract_status = _clean_text(row.get("source_event_contract_status"))
+        artifact_status = _clean_text(row.get("source_artifact_status"))
+        evidence_types = [
+            _clean_text(item)
+            for item in (row.get("source_evidence_types") or [])
+            if _clean_text(item)
+        ]
+        if pool_status or contract_status or artifact_status or evidence_types:
+            details = []
+            if pool_status:
+                details.append(f"pool={pool_status}")
+            if row.get("source_evidence_type_match") is not None:
+                details.append(f"type_match={'yes' if row.get('source_evidence_type_match') else 'no'}")
+            if contract_status:
+                details.append(f"contract={contract_status}")
+            if artifact_status:
+                details.append(f"artifact={artifact_status}")
+            if evidence_types:
+                details.append(f"evidence={','.join(evidence_types)}")
+            lines[-1] += f" {' '.join(details)}"
         variant = _clean_text(row.get("request_variant")) or BASELINE_REQUEST_VARIANT
         if variant != BASELINE_REQUEST_VARIANT:
             lines[-1] += f" variant={variant}"
@@ -630,6 +738,24 @@ def format_miss_report(
         source_prompt_excerpt = _clean_text(row.get("source_prompt_excerpt"))
         if source_prompt_excerpt:
             lines.append(f"    source: {_truncate(source_prompt_excerpt, limit=120)}")
+        miss_reason_detail = _clean_text(row.get("miss_reason_detail"))
+        if miss_reason_detail:
+            lines.append(f"    detail: {_truncate(miss_reason_detail, limit=160)}")
+        source_reasons = [
+            _clean_text(reason)
+            for reason in (row.get("source_reasons") or [])
+            if _clean_text(reason)
+        ][:5]
+        if source_reasons:
+            lines.append(f"    source reasons: {', '.join(source_reasons)}")
+        top_selected = [item for item in (row.get("top_selected") or []) if isinstance(item, Mapping)]
+        if top_selected:
+            leader = top_selected[0]
+            reasons = ", ".join(str(reason) for reason in (leader.get("reasons") or [])[:5])
+            lines.append(
+                f"    top selected: {_clean_text(leader.get('event_id')) or '-'} "
+                f"score={leader.get('score')} reasons={reasons or '-'}"
+            )
     return "\n".join(lines)
 
 
@@ -669,6 +795,32 @@ def build_bundle_report(
             lines.append(f"Source rank: {int(source_evaluation.get('source_rank') or 0)}")
         if source_evaluation.get("miss_reason"):
             lines.append(f"Miss reason: {_clean_text(source_evaluation.get('miss_reason'))}")
+        miss_reason_detail = _clean_text(source_evaluation.get("miss_reason_detail"))
+        if miss_reason_detail:
+            lines.append(f"Miss detail: {_truncate(miss_reason_detail, limit=180)}")
+        pool_status = _clean_text(source_evaluation.get("source_candidate_pool_status"))
+        contract_status = _clean_text(source_evaluation.get("source_event_contract_status"))
+        artifact_status = _clean_text(source_evaluation.get("source_artifact_status"))
+        evidence_types = [
+            _clean_text(item)
+            for item in (source_evaluation.get("source_evidence_types") or [])
+            if _clean_text(item)
+        ]
+        if pool_status or contract_status or artifact_status or evidence_types:
+            diagnostics = []
+            if pool_status:
+                diagnostics.append(f"pool={pool_status}")
+            if source_evaluation.get("source_evidence_type_match") is not None:
+                diagnostics.append(
+                    f"type_match={'yes' if source_evaluation.get('source_evidence_type_match') else 'no'}"
+                )
+            if contract_status:
+                diagnostics.append(f"contract={contract_status}")
+            if artifact_status:
+                diagnostics.append(f"artifact={artifact_status}")
+            if evidence_types:
+                diagnostics.append(f"evidence={','.join(evidence_types)}")
+            lines.append("Source diagnostics: " + " ".join(diagnostics))
         source_group = _format_group_members(
             source_evaluation,
             count_key="source_group_member_count",
@@ -703,6 +855,17 @@ def build_bundle_report(
             reasons = ", ".join(str(reason) for reason in (item.get("reasons") or []))
             if reasons:
                 lines.append(f"   reasons: {reasons}")
+            evidence_priority = dict(item.get("evidence_priority") or {})
+            priority_types = [
+                _clean_text(value)
+                for value in (evidence_priority.get("matched_evidence_types") or [])
+                if _clean_text(value)
+            ]
+            if priority_types:
+                lines.append(
+                    f"   priority: {_clean_text(evidence_priority.get('task_kind')) or '-'} "
+                    f"{','.join(priority_types)}"
+                )
             prompt_excerpt = _clean_text(item.get("prompt_excerpt"))
             if prompt_excerpt:
                 lines.append(f"   prompt: {prompt_excerpt}")
@@ -723,6 +886,146 @@ def build_bundle_report(
                 status = _clean_text(item.get("status")) or "-"
                 score = item.get("score")
                 lines.append(f"  * status={status} score={score}: {summary}")
+    return "\n".join(lines)
+
+
+def _selected_event_ids(bundle: Mapping[str, Any]) -> list[str]:
+    selected: list[str] = []
+    for item in bundle.get("selected_candidates") or []:
+        if not isinstance(item, Mapping):
+            continue
+        event_id = _clean_text(item.get("event_id"))
+        if event_id:
+            selected.append(event_id)
+    return selected
+
+
+def build_pinned_event_compare(
+    request_payload: Mapping[str, Any],
+    *,
+    pinned_event_ids: list[str],
+    root: Path,
+    workspace_id: str,
+    index_path: Path | None = None,
+) -> dict[str, Any]:
+    pins = [_clean_text(item) for item in pinned_event_ids if _clean_text(item)]
+    if not pins:
+        raise ValueError("Pinned event compare requires at least one pinned event id.")
+
+    base_request = dict(request_payload)
+    base_request["pinned_event_ids"] = []
+    pinned_request = dict(request_payload)
+    pinned_request["pinned_event_ids"] = pins
+
+    normal_bundle = build_context_bundle(
+        base_request,
+        root=root,
+        workspace_id=workspace_id,
+        index_path=index_path,
+    )
+    pinned_bundle = build_context_bundle(
+        pinned_request,
+        root=root,
+        workspace_id=workspace_id,
+        index_path=index_path,
+    )
+    normal_selected = _selected_event_ids(normal_bundle)
+    pinned_selected = _selected_event_ids(pinned_bundle)
+
+    pinned_events: list[dict[str, Any]] = []
+    for event_id in pins:
+        normal_probe_request = dict(base_request)
+        normal_probe_request["source_event_id"] = event_id
+        pinned_probe_request = dict(pinned_request)
+        pinned_probe_request["source_event_id"] = event_id
+        normal_probe = build_context_bundle(
+            normal_probe_request,
+            root=root,
+            workspace_id=workspace_id,
+            index_path=index_path,
+        )
+        pinned_probe = build_context_bundle(
+            pinned_probe_request,
+            root=root,
+            workspace_id=workspace_id,
+            index_path=index_path,
+        )
+        normal_source = bundle_source_evaluation(normal_probe)
+        pinned_source = bundle_source_evaluation(pinned_probe)
+        pinned_events.append(
+            {
+                "event_id": event_id,
+                "normal_source_selected": bool(normal_source.get("source_selected")),
+                "pinned_source_selected": bool(pinned_source.get("source_selected")),
+                "normal_source_rank": normal_source.get("source_rank"),
+                "pinned_source_rank": pinned_source.get("source_rank"),
+                "normal_miss_reason": _clean_text(normal_source.get("miss_reason")) or None,
+                "pinned_miss_reason": _clean_text(pinned_source.get("miss_reason")) or None,
+                "normal_candidate_pool_status": _clean_text(normal_source.get("source_candidate_pool_status")) or None,
+                "pinned_candidate_pool_status": _clean_text(pinned_source.get("source_candidate_pool_status")) or None,
+                "normal_source_reasons": list(normal_source.get("source_reasons") or []),
+                "pinned_source_reasons": list(pinned_source.get("source_reasons") or []),
+                "source_event_contract_status": _clean_text(pinned_source.get("source_event_contract_status")) or None,
+                "source_artifact_status": _clean_text(pinned_source.get("source_artifact_status")) or None,
+                "source_artifact_reasons": list(pinned_source.get("source_artifact_reasons") or []),
+            }
+        )
+
+    return {
+        "task_kind": _clean_text(request_payload.get("task_kind")),
+        "query_text": _clean_text(request_payload.get("query_text")),
+        "pinned_event_ids": pins,
+        "pin_policy": "inspection-only; pins are injected into the candidate pool without a score boost",
+        "normal_selected_event_ids": normal_selected,
+        "pinned_selected_event_ids": pinned_selected,
+        "selected_added_event_ids": [event_id for event_id in pinned_selected if event_id not in normal_selected],
+        "selected_removed_event_ids": [event_id for event_id in normal_selected if event_id not in pinned_selected],
+        "normal_selected_count": int(normal_bundle.get("selected_count") or 0),
+        "pinned_selected_count": int(pinned_bundle.get("selected_count") or 0),
+        "pinned_events": pinned_events,
+    }
+
+
+def format_pinned_event_compare_report(compare: Mapping[str, Any]) -> str:
+    lines = [
+        "Pinned event compare",
+        f"Task: {_clean_text(compare.get('task_kind'))}",
+        f"Query: {_clean_text(compare.get('query_text'))}",
+        f"Policy: {_clean_text(compare.get('pin_policy'))}",
+        (
+            "Selected count: "
+            f"normal={int(compare.get('normal_selected_count') or 0)} "
+            f"pinned={int(compare.get('pinned_selected_count') or 0)}"
+        ),
+    ]
+    added = [_clean_text(item) for item in (compare.get("selected_added_event_ids") or []) if _clean_text(item)]
+    removed = [_clean_text(item) for item in (compare.get("selected_removed_event_ids") or []) if _clean_text(item)]
+    lines.append(f"Selected added: {', '.join(added) if added else '-'}")
+    lines.append(f"Selected removed: {', '.join(removed) if removed else '-'}")
+    pinned_events = [item for item in (compare.get("pinned_events") or []) if isinstance(item, Mapping)]
+    if pinned_events:
+        lines.extend(("", "Pinned events:"))
+        for item in pinned_events:
+            lines.append(
+                f"- {_clean_text(item.get('event_id'))}: "
+                f"normal_selected={'yes' if item.get('normal_source_selected') else 'no'} "
+                f"pinned_selected={'yes' if item.get('pinned_source_selected') else 'no'} "
+                f"normal_rank={item.get('normal_source_rank') if item.get('normal_source_rank') is not None else '-'} "
+                f"pinned_rank={item.get('pinned_source_rank') if item.get('pinned_source_rank') is not None else '-'} "
+                f"normal_miss={_clean_text(item.get('normal_miss_reason')) or '-'} "
+                f"pinned_miss={_clean_text(item.get('pinned_miss_reason')) or '-'}"
+            )
+            reasons = [
+                _clean_text(reason)
+                for reason in (item.get("pinned_source_reasons") or [])
+                if _clean_text(reason)
+            ][:6]
+            if reasons:
+                lines.append(f"  pinned reasons: {', '.join(reasons)}")
+            contract_status = _clean_text(item.get("source_event_contract_status"))
+            artifact_status = _clean_text(item.get("source_artifact_status"))
+            if contract_status or artifact_status:
+                lines.append(f"  source contract: {contract_status or '-'} artifact={artifact_status or '-'}")
     return "\n".join(lines)
 
 
@@ -813,6 +1116,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Optional manual status filter. Repeat to add more than one.",
+    )
+    parser.add_argument(
+        "--pin-event-id",
+        action="append",
+        default=[],
+        help="Event id to inject into recall for inspection. Repeat to add more than one.",
+    )
+    parser.add_argument(
+        "--pin-compare",
+        action="store_true",
+        help="Compare normal ranking with pinned-event inspection without promoting the pinned event.",
     )
     parser.add_argument(
         "--limit",
@@ -915,6 +1229,7 @@ def main() -> int:
                     "request_count": summary.get("request_count"),
                     "source_misses": summary.get("source_misses"),
                     "miss_reason_counts": summary.get("miss_reason_counts"),
+                    "miss_diagnostic_counts": summary.get("miss_diagnostic_counts"),
                     "misses": summary.get("misses"),
                     "evaluated_at_utc": summary.get("evaluated_at_utc"),
                     "evaluation_latest_path": summary.get("evaluation_latest_path"),
@@ -967,19 +1282,43 @@ def main() -> int:
             "file_hints": args.file_hint,
             "surface_filters": args.surface_filter,
             "status_filters": args.status_filter,
+            "pinned_event_ids": args.pin_event_id,
             "limit": args.limit,
             "context_budget_chars": args.context_budget_chars,
         }
 
+    if args.pin_event_id:
+        request_payload = dict(request_payload)
+        request_payload["pinned_event_ids"] = list(args.pin_event_id)
+
+    if args.pin_compare:
+        try:
+            compare = build_pinned_event_compare(
+                request_payload,
+                pinned_event_ids=list(args.pin_event_id),
+                root=resolved_root,
+                workspace_id=args.workspace_id,
+                index_path=effective_index_path,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.out is not None:
+            write_json(args.out, compare)
+        if args.format == "json":
+            print(json.dumps(compare, ensure_ascii=False, indent=2))
+        else:
+            print(format_pinned_event_compare_report(compare))
+        return 0
+
     bundle_path = dataset_bundle_path(entry) if args.request_index is not None else None
-    if args.request_index is not None:
+    if args.request_index is not None and not args.pin_event_id:
         bundle = build_bundle_for_dataset_entry(
             entry,
             root=resolved_root,
             workspace_id=args.workspace_id,
             index_path=effective_index_path,
         )
-    elif bundle_path is not None and effective_index_path is None and bundle_path.exists():
+    elif bundle_path is not None and effective_index_path is None and bundle_path.exists() and not args.pin_event_id:
         bundle = read_bundle(bundle_path)
     else:
         bundle = build_context_bundle(

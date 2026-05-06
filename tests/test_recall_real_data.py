@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,22 @@ from prepare_recall_real_data import (  # noqa: E402
 )
 from software_work_events import iter_capability_matrix_events  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
+
+
+def _write_placeholder(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("{}", encoding="utf-8")
+
+
+def _materialize_workspace_artifacts(root: Path) -> None:
+    sessions_root = root / "artifacts" / "workspaces" / "local-default" / "sessions"
+    for session_path in sessions_root.glob("*.json"):
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        for artifact_ref in payload.get("artifact_refs") or []:
+            artifact_path = artifact_ref.get("artifact_path")
+            if isinstance(artifact_path, str) and artifact_path.strip():
+                _write_placeholder(Path(artifact_path))
 
 
 class RecallRealDataTests(unittest.TestCase):
@@ -171,6 +188,7 @@ class RecallRealDataTests(unittest.TestCase):
                 },
             )
             write_artifact(matrix_path, payload)
+            _materialize_workspace_artifacts(root)
 
             dataset = build_real_recall_dataset(
                 root=root,
@@ -208,6 +226,7 @@ class RecallRealDataTests(unittest.TestCase):
                     notes=["review accepted"],
                 )
 
+            _materialize_workspace_artifacts(root)
             dataset = build_real_recall_dataset(
                 root=root,
                 output_dir=root / "artifacts" / "recall_data" / "local-default",
@@ -265,6 +284,7 @@ class RecallRealDataTests(unittest.TestCase):
                 },
             )
             write_artifact(matrix_path, payload)
+            _write_placeholder(root / "artifacts" / "thinking" / "thinking.json")
 
             store = WorkspaceSessionStore(root=root)
             for index in range(9):
@@ -284,6 +304,7 @@ class RecallRealDataTests(unittest.TestCase):
                     notes=["review accepted"],
                 )
 
+            _materialize_workspace_artifacts(root)
             dataset = build_real_recall_dataset(
                 root=root,
                 output_dir=root / "artifacts" / "recall_data" / "local-default",
@@ -357,6 +378,8 @@ class RecallRealDataTests(unittest.TestCase):
                 },
             )
             write_artifact(matrix_path, payload)
+            _write_placeholder(root / "artifacts" / "text" / "translate.json")
+            _write_placeholder(root / "artifacts" / "thinking" / "thinking.json")
 
             dataset = build_real_recall_dataset(
                 root=root,
