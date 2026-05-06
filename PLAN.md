@@ -434,6 +434,7 @@ Current baseline:
 
 - learning dataset preview remains `preview_only`, human-gated, and downstream of evaluation/curation evidence
 - `review_queue` records every source curation candidate as a typed inspection item with queue state, priority, next action, blocked reason, and lifecycle summary
+- learning preview report now summarizes queue states, next actions, and blocked reasons so operators can inspect the queue without treating it as a training export
 - `export_policy_confirmed` records human export-policy confirmation as explicit file-first evidence without enabling trainable export
 - human-selected candidate lists are now explicit preview-only learning artifacts, so a human shortlist can be preserved without silently promoting candidates or copying supervised example text
 - JSONL training export dry-runs now write only preview-only manifest / validation reports, so likely future export targets can be inspected without producing `.jsonl`, trainable datasets, or training jobs

@@ -444,6 +444,18 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(learning_preview["counts"]["review_queue_count"], 2)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["ready"], 1)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["blocked"], 1)
+        self.assertEqual(
+            learning_preview["counts"]["review_queue_next_actions"]["confirm_export_policy"],
+            1,
+        )
+        self.assertEqual(
+            learning_preview["counts"]["review_queue_next_actions"]["repair_or_follow_up_failure"],
+            1,
+        )
+        self.assertEqual(
+            learning_preview["counts"]["review_queue_blocked_reasons"]["test_fail"],
+            1,
+        )
         self.assertEqual(direct_preview["counts"]["eligible_candidate_count"], 1)
         self.assertFalse(read_json_called)
         self.assertEqual(candidate["event_id"], pass_event_id)
@@ -474,6 +486,9 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("- accepted patch keeps the loop green", report)
         self.assertNotIn("- accepted patch\nkeeps the loop green", report)
         self.assertIn("Learning review queue:", report)
+        self.assertIn("Queue next actions: confirm_export_policy=1", report)
+        self.assertIn("Queue blocked reasons:", report)
+        self.assertIn("test_fail=1", report)
         self.assertIn("next=confirm_export_policy", report)
         self.assertIn("blocking_or_noisy_signal", learning_preview["counts"]["exclusion_reasons"])
 
@@ -2005,6 +2020,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(preview["review_queue"][0]["queue_state"], "needs_review")
         self.assertEqual(preview["review_queue"][0]["next_action"], "record_test_pass")
         self.assertIn("missing_test_pass_trace", preview["excluded_candidates"][0]["excluded_by"])
+        self.assertIn("missing_accepted_trace", preview["excluded_candidates"][0]["excluded_by"])
         self.assertIn("missing_selection_trace", preview["excluded_candidates"][0]["excluded_by"])
         self.assertEqual(
             preview["review_queue"][0]["lifecycle_summary"]["test_state"],
@@ -2014,6 +2030,177 @@ class EvaluationLoopTests(unittest.TestCase):
             preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
             "missing_trace",
         )
+
+    def test_learning_preview_requires_claimed_review_resolution_trace(self) -> None:
+        event = {
+            "event_id": "claimed-review-resolution",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep claimed review resolution traceable.",
+                "output_text": "Acceptance alone should not stand in for review resolution.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_review_trace",
+                    "pass_definition": "Derived test pass remains traceable.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="claimed-review-resolution",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:claimed-review:accepted",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "claimed-review-resolution",
+                        "state": "ready",
+                        "label": "Claimed review resolution",
+                        "reasons": ["review_resolved", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"claimed-review-resolution": event},
+            explicit_signals=[accepted_signal],
+            comparisons=[],
+        )
+        excluded = preview["excluded_candidates"][0]
+        queue_item = preview["review_queue"][0]
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(queue_item["queue_state"], "needs_review")
+        self.assertIn("missing_review_resolved_trace", excluded["excluded_by"])
+        self.assertEqual(queue_item["next_action"], "record_acceptance_or_review_resolution")
+        self.assertEqual(queue_item["lifecycle_summary"]["review_state"], "missing_trace")
+        self.assertEqual(queue_item["lifecycle_summary"]["selection_state"], "selected")
+
+    def test_learning_preview_requires_claimed_comparison_winner_trace(self) -> None:
+        event = {
+            "event_id": "claimed-comparison-winner",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep claimed comparison winners traceable.",
+                "output_text": "Acceptance alone should not stand in for a comparison winner.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_comparison_trace",
+                    "pass_definition": "Derived test pass remains traceable.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        accepted_signal = build_evaluation_signal(
+            signal_kind="acceptance",
+            source_event_id="claimed-comparison-winner",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:claimed-comparison:accepted",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "claimed-comparison-winner",
+                        "state": "ready",
+                        "label": "Claimed comparison winner",
+                        "reasons": ["comparison_winner", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"claimed-comparison-winner": event},
+            explicit_signals=[accepted_signal],
+            comparisons=[],
+        )
+        excluded = preview["excluded_candidates"][0]
+        queue_item = preview["review_queue"][0]
+
+        self.assertEqual(preview["supervised_example_candidates"], [])
+        self.assertEqual(queue_item["queue_state"], "needs_review")
+        self.assertIn("missing_comparison_winner_trace", excluded["excluded_by"])
+        self.assertEqual(queue_item["next_action"], "record_comparison_winner_trace")
+        self.assertEqual(queue_item["lifecycle_summary"]["selection_state"], "missing_trace")
+
+    def test_learning_preview_keeps_traceable_comparison_winner_candidate(self) -> None:
+        event = {
+            "event_id": "traceable-comparison-winner",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep traceable comparison winners eligible.",
+                "output_text": "The winner trace and test trace are both present.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_comparison_trace",
+                    "pass_definition": "Comparison winner trace is present.",
+                },
+            },
+            "source_refs": readable_test_source_refs(),
+        }
+        test_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="traceable-comparison-winner",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:traceable-comparison:test-pass",
+        )
+        comparison = build_evaluation_comparison(
+            candidate_event_ids=["traceable-comparison-winner", "traceable-comparison-loser"],
+            winner_event_id="traceable-comparison-winner",
+            recorded_at_utc="2026-04-01T00:02:00+00:00",
+            comparison_id="local-default:compare:traceable-comparison",
+            task_label="choose traceable learning candidate",
+            criteria=["passing check", "winner trace"],
+            rationale="Winner trace is present and should keep the candidate eligible.",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "traceable-comparison-winner",
+                        "state": "ready",
+                        "label": "Traceable comparison winner",
+                        "reasons": ["comparison_winner", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"traceable-comparison-winner": event},
+            explicit_signals=[test_signal],
+            comparisons=[comparison],
+        )
+        candidate = preview["supervised_example_candidates"][0]
+
+        self.assertEqual(preview["excluded_candidates"], [])
+        self.assertEqual(candidate["event_id"], "traceable-comparison-winner")
+        self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["selection_state"], "selected")
+        self.assertEqual(candidate["evidence"]["comparisons"][0]["role"], "winner")
 
     def test_learning_preview_blocks_stale_ready_candidate_with_negative_trace(self) -> None:
         event = {
