@@ -2917,6 +2917,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("stale_test_pass_trace", excluded["excluded_by"])
         self.assertIn("rejected_trace", excluded["excluded_by"])
         self.assertIn("stale_accepted_trace", excluded["excluded_by"])
+        self.assertNotIn("missing_accepted_trace", excluded["excluded_by"])
         self.assertIn("review_unresolved_trace", excluded["excluded_by"])
         self.assertIn("stale_review_resolved_trace", excluded["excluded_by"])
         self.assertEqual(excluded["blocked_reason"], "review_unresolved")

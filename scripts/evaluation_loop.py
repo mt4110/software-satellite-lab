@@ -2903,9 +2903,9 @@ def _learning_traceability_exclusions(
         signal_list,
         signal_kinds={"acceptance", "rejection", "review_resolved", "review_unresolved"},
     )
-    latest_acceptance_signal = _learning_latest_signal_kind_from_traces(
-        signal_list,
-        signal_kinds={"acceptance", "rejection"},
+    has_acceptance_trace = any(
+        _clean_text(signal.get("signal_kind")) == "acceptance"
+        for signal in signal_list
     )
     latest_review_signal = _learning_latest_review_signal_kind_from_traces(signal_list)
     has_selection_signal = latest_selection_signal in {"acceptance", "review_resolved"}
@@ -2919,7 +2919,7 @@ def _learning_traceability_exclusions(
     exclusions: list[str] = []
     if latest_test_signal is None:
         exclusions.append("missing_test_pass_trace")
-    if "accepted" in reasons and latest_acceptance_signal != "acceptance":
+    if "accepted" in reasons and not has_acceptance_trace:
         exclusions.append("missing_accepted_trace")
     if "review_resolved" in reasons and latest_review_signal is None:
         exclusions.append("missing_review_resolved_trace")
