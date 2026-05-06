@@ -2564,6 +2564,8 @@ def _learning_next_action(
         return "record_test_pass"
     if "missing_comparison_winner_trace" in exclusions:
         return "record_comparison_winner_trace"
+    if "missing_accepted_trace" in exclusions or "missing_review_resolved_trace" in exclusions:
+        return "record_acceptance_or_review_resolution"
     if (
         "comparison_winner_missing_source_event" in exclusions
         or "comparison_winner_missing_source_artifact" in exclusions
@@ -2604,10 +2606,10 @@ def _learning_lifecycle_summary(
         test_state = "missing_trace"
     elif "test_fail_trace" in exclusions or "stale_test_pass_trace" in exclusions:
         test_state = "failed"
-    elif "missing_test_pass_trace" in exclusions:
-        test_state = "missing_trace"
     elif "test_fail" in reasons or "failed" in reasons:
         test_state = "failed"
+    elif "missing_test_pass_trace" in exclusions:
+        test_state = "missing_trace"
     elif "test_pass" in reasons:
         test_state = "passed"
     else:
@@ -2616,7 +2618,10 @@ def _learning_lifecycle_summary(
         review_state = "unknown"
     elif "review_unresolved_trace" in exclusions or "stale_review_resolved_trace" in exclusions:
         review_state = "unresolved"
-    elif "missing_selection_trace" in exclusions and "review_resolved" in reasons:
+    elif (
+        "missing_review_resolved_trace" in exclusions
+        or ("missing_selection_trace" in exclusions and "review_resolved" in reasons)
+    ):
         review_state = "missing_trace"
     elif "review_unresolved" in reasons:
         review_state = "unresolved"
@@ -2630,7 +2635,11 @@ def _learning_lifecycle_summary(
         selection_state = "rejected"
     elif "rejected" in reasons:
         selection_state = "rejected"
-    elif "missing_selection_trace" in exclusions:
+    elif (
+        "missing_selection_trace" in exclusions
+        or "missing_accepted_trace" in exclusions
+        or "missing_comparison_winner_trace" in exclusions
+    ):
         selection_state = "missing_trace"
     elif reasons & LEARNING_SELECTION_REASONS:
         selection_state = "selected"
@@ -2843,6 +2852,8 @@ def _learning_consistency_exclusions(consistency_item: Mapping[str, Any] | None)
     if "test_pass" in stale_reasons:
         exclusions.append("stale_test_pass_trace")
     for missing_trace in (
+        "missing_accepted_trace",
+        "missing_review_resolved_trace",
         "missing_comparison_winner_trace",
         "comparison_winner_missing_source_event",
         "comparison_winner_missing_source_artifact",
@@ -2892,7 +2903,11 @@ def _learning_traceability_exclusions(
         signal_list,
         signal_kinds={"acceptance", "rejection", "review_resolved", "review_unresolved"},
     )
-    has_test_pass = latest_test_signal == "test_pass"
+    has_acceptance_trace = any(
+        _clean_text(signal.get("signal_kind")) == "acceptance"
+        for signal in signal_list
+    )
+    latest_review_signal = _learning_latest_review_signal_kind_from_traces(signal_list)
     has_selection_signal = latest_selection_signal in {"acceptance", "review_resolved"}
     has_comparison_winner = any(
         _clean_text(comparison.get("role")) == "winner"
@@ -2902,8 +2917,12 @@ def _learning_traceability_exclusions(
     )
     reasons = set(_string_list(list(expected_reasons or [])))
     exclusions: list[str] = []
-    if not has_test_pass:
+    if latest_test_signal is None:
         exclusions.append("missing_test_pass_trace")
+    if "accepted" in reasons and not has_acceptance_trace:
+        exclusions.append("missing_accepted_trace")
+    if "review_resolved" in reasons and latest_review_signal is None:
+        exclusions.append("missing_review_resolved_trace")
     if "comparison_winner" in reasons and not has_comparison_winner:
         exclusions.append("missing_comparison_winner_trace")
     if not (has_selection_signal or has_comparison_winner):
@@ -3161,14 +3180,13 @@ def build_learning_dataset_preview(
             exclusions.extend(
                 _learning_consistency_exclusions(consistency_by_event_id.get(event_id))
             )
-            if not exclusions:
-                exclusions.extend(
-                    _learning_traceability_exclusions(
-                        signals=signal_traces,
-                        comparisons=comparison_traces,
-                        expected_reasons=candidate.get("reasons"),
-                    )
+            exclusions.extend(
+                _learning_traceability_exclusions(
+                    signals=signal_traces,
+                    comparisons=comparison_traces,
+                    expected_reasons=candidate.get("reasons"),
                 )
+            )
         exclusions = _deduplicate_strings(exclusions)
 
         queue_item = _learning_review_queue_item(
@@ -3223,6 +3241,15 @@ def build_learning_dataset_preview(
         str(_mapping_dict(item.get("queue_priority")).get("bucket") or "unknown")
         for item in review_queue
     )
+    review_queue_next_action_counts = Counter(
+        str(item.get("next_action") or "review_candidate")
+        for item in review_queue
+    )
+    review_queue_blocked_reason_counts = Counter(
+        reason
+        for item in review_queue
+        for reason in _string_list(item.get("blocked_reasons"))
+    )
     policy_confirmed_candidate_count = sum(
         1
         for item in review_queue
@@ -3261,6 +3288,14 @@ def build_learning_dataset_preview(
             "review_queue_priorities": {
                 key: int(value)
                 for key, value in sorted(review_queue_priority_counts.items())
+            },
+            "review_queue_next_actions": {
+                key: int(value)
+                for key, value in sorted(review_queue_next_action_counts.items())
+            },
+            "review_queue_blocked_reasons": {
+                key: int(value)
+                for key, value in sorted(review_queue_blocked_reason_counts.items())
             },
             "policy_confirmed_candidate_count": policy_confirmed_candidate_count,
             "policy_pending_candidate_count": policy_pending_candidate_count,
@@ -4584,6 +4619,14 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
         ordered_states.extend(sorted(set(queue_states) - set(ordered_states)))
         parts = [f"{state}={int(queue_states.get(state) or 0)}" for state in ordered_states]
         lines.append(f"Review queue: {'; '.join(parts)}")
+    queue_next_actions = _mapping_dict(counts.get("review_queue_next_actions"))
+    if queue_next_actions:
+        parts = [f"{key}={int(value)}" for key, value in queue_next_actions.items()]
+        lines.append(f"Queue next actions: {'; '.join(parts)}")
+    queue_blocked_reasons = _mapping_dict(counts.get("review_queue_blocked_reasons"))
+    if queue_blocked_reasons:
+        parts = [f"{key}={int(value)}" for key, value in queue_blocked_reasons.items()]
+        lines.append(f"Queue blocked reasons: {'; '.join(parts)}")
     candidates = [
         item
         for item in preview.get("supervised_example_candidates") or []
