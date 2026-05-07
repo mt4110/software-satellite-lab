@@ -830,14 +830,14 @@ class LocalUiControllerTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "confirm_export_policy",
                     "blocked_reason": None,
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "export_policy_confirmation": {"confirmed": "false"},
                     "comparison_evidence": {"roles": ["winner"]},
                     "backend_metadata": {"backend_id": "mock-careful-local"},
                     "source_paths": {
                         "source_learning_preview_path": str(preview_path),
                         "source_artifact_path": str(source_artifact_path),
                     },
-                    "policy": {"export_policy_confirmed": False},
+                    "policy": {"export_policy_confirmed": "false"},
                 }
             ],
         }
@@ -935,14 +935,15 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertEqual(review["counts"]["jsonl_record_write_count"], 0)
         self.assertEqual(review["counts"]["candidate_row_count"], 4)
         self.assertIn("training-ready=0", build_learning_candidate_review_state(review))
-        self.assertIn("jsonl-written=0", build_learning_candidate_review_state(review))
+        self.assertIn("jsonl-would-write=0", build_learning_candidate_review_state(review))
         self.assertIn("Learning candidate review: read-only", report)
-        self.assertIn("JSONL records written: 0", report)
+        self.assertIn("JSONL records that would be written: 0", report)
         self.assertEqual(rows[0]["queue_state"], "ready")
         self.assertEqual(rows[0]["policy_state"], "pending_confirmation")
         self.assertEqual(rows[0]["comparison_role"], "winner")
         self.assertEqual(rows[0]["backend_id"], "mock-careful-local")
         self.assertEqual(rows[0]["source_path"], str(source_artifact_path))
+        self.assertEqual(rows[1]["policy_state"], "pending_confirmation")
 
     def test_learning_candidate_review_reports_missing_latest_artifacts(self) -> None:
         controller, _store, _root = self.make_controller()
@@ -967,8 +968,8 @@ class LocalUiControllerTests(unittest.TestCase):
                     "schema_version": 1,
                     "workspace_id": "local-default",
                     "export_mode": "dry_run",
-                    "training_export_ready": "unknown",
-                    "human_gate_required": "false",
+                    "training_export_ready": "true",
+                    "human_gate_required": "required",
                     "counts": {"would_write_jsonl_record_count": "2"},
                     "export_policy": {"jsonl_file_written": "unknown"},
                     "candidates": [],
@@ -985,8 +986,8 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertEqual(review["counts"]["training_ready_artifact_count"], 1)
         self.assertEqual(review["counts"]["jsonl_record_write_count"], 2)
         self.assertIn("JSONL dry-run reports export_mode=dry_run", review["policy_warnings"])
-        self.assertIn("JSONL dry-run reports human_gate_required=false", review["policy_warnings"])
-        self.assertIn("JSONL dry-run reports jsonl_file_written=true", review["policy_warnings"])
+        self.assertIn("JSONL dry-run reports human_gate_required=required (unparseable)", review["policy_warnings"])
+        self.assertIn("JSONL dry-run reports jsonl_file_written=unknown (unparseable)", review["policy_warnings"])
         self.assertIn("JSONL dry-run reports training_export_ready=true", review["policy_warnings"])
 
     def test_build_recall_bundle_prefers_stored_dataset_bundle(self) -> None:

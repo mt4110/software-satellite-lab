@@ -2604,8 +2604,21 @@ def _ui_bool(value: Any) -> bool:
             return True
         if normalized in {"0", "false", "no", "off"}:
             return False
-        return True
-    return bool(value)
+        return False
+    if isinstance(value, int):
+        return value != 0
+    return False
+
+
+def _ui_unparseable_bool_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        return None
+    return value.strip()
 
 
 def _ui_string_list(value: Any) -> list[str]:
@@ -2679,7 +2692,7 @@ def _learning_candidate_policy_state(item: Mapping[str, Any], queue_summary: Map
         item.get("export_policy_confirmation")
     )
     policy = _ui_mapping(item.get("policy"))
-    if confirmation.get("confirmed") or policy.get("export_policy_confirmed"):
+    if _ui_bool(confirmation.get("confirmed")) or _ui_bool(policy.get("export_policy_confirmed")):
         return "confirmed"
     if _ui_clean_text(queue_summary.get("queue_state")) == "ready":
         return "pending_confirmation"
@@ -2915,13 +2928,19 @@ def build_learning_candidate_review_snapshot(
         jsonl_written = _ui_int(counts.get("would_write_jsonl_record_count"))
         if export_mode != "preview_only":
             policy_warnings.append(f"{artifact_label} reports export_mode={export_mode}")
-        if not human_gate_required:
+        if unparseable := _ui_unparseable_bool_text(payload.get("human_gate_required")):
+            policy_warnings.append(f"{artifact_label} reports human_gate_required={unparseable} (unparseable)")
+        elif not human_gate_required:
             policy_warnings.append(f"{artifact_label} reports human_gate_required=false")
-        if _ui_bool(export_policy.get("jsonl_file_written")):
+        if unparseable := _ui_unparseable_bool_text(export_policy.get("jsonl_file_written")):
+            policy_warnings.append(f"{artifact_label} reports jsonl_file_written={unparseable} (unparseable)")
+        elif _ui_bool(export_policy.get("jsonl_file_written")):
             policy_warnings.append(f"{artifact_label} reports jsonl_file_written=true")
         if jsonl_written:
             policy_warnings.append(f"{artifact_label} reports {jsonl_written} JSONL record(s) would be written")
-        if training_export_ready:
+        if unparseable := _ui_unparseable_bool_text(payload.get("training_export_ready")):
+            policy_warnings.append(f"{artifact_label} reports training_export_ready={unparseable} (unparseable)")
+        elif training_export_ready:
             policy_warnings.append(f"{artifact_label} reports training_export_ready=true")
         artifact_record.update(
             {
@@ -2993,7 +3012,7 @@ def build_learning_candidate_review_state(review: Mapping[str, Any] | None) -> s
         f"preview-only={_ui_int(counts.get('preview_only_artifact_count'))}; "
         f"human-gated={_ui_int(counts.get('human_gate_required_artifact_count'))}; "
         f"training-ready={_ui_int(counts.get('training_ready_artifact_count'))}; "
-        f"jsonl-written={_ui_int(counts.get('jsonl_record_write_count'))}; "
+        f"jsonl-would-write={_ui_int(counts.get('jsonl_record_write_count'))}; "
         f"missing={_ui_int(counts.get('missing_artifact_count'))}"
     )
 
@@ -3026,7 +3045,7 @@ def build_learning_candidate_review_report(review: Mapping[str, Any] | None) -> 
         ),
         f"Candidate rows: {_ui_int(counts.get('candidate_row_count'))}",
         f"Training export ready artifacts: {_ui_int(counts.get('training_ready_artifact_count'))}",
-        f"JSONL records written: {_ui_int(counts.get('jsonl_record_write_count'))}",
+        f"JSONL records that would be written: {_ui_int(counts.get('jsonl_record_write_count'))}",
     ]
     queue_states = _ui_mapping(counts.get("queue_states"))
     if queue_states:
