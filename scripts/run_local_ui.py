@@ -8,7 +8,7 @@ import queue
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -48,6 +48,10 @@ from evaluation_loop import (
     CURATION_STATES,
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
+    human_selected_candidates_latest_path,
+    jsonl_training_export_dry_run_latest_path,
+    learning_candidate_diff_summary_latest_path,
+    learning_dataset_preview_latest_path,
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_review_resolution_signal,
@@ -168,6 +172,12 @@ RECALL_WINNER_CHIP_COLORS = {
     "source_only": {"background": "#FFF4E5", "foreground": "#B45309"},
     "pending": {"background": "#EEF2F7", "foreground": "#64748B"},
 }
+LEARNING_CANDIDATE_REVIEW_ARTIFACTS = (
+    ("learning_preview", "Learning preview", learning_dataset_preview_latest_path),
+    ("human_selected", "Human-selected", human_selected_candidates_latest_path),
+    ("jsonl_dry_run", "JSONL dry-run", jsonl_training_export_dry_run_latest_path),
+    ("candidate_diff", "Candidate diff", learning_candidate_diff_summary_latest_path),
+)
 DEFAULT_ACTION_TIMEOUT_SECONDS = {
     "chat": 120.0,
     "vision": 240.0,
@@ -2563,6 +2573,513 @@ def build_evaluation_curation_rows(preview: Mapping[str, Any] | None, *, limit: 
     return rows
 
 
+def _ui_clean_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _ui_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _ui_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ui_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return True
+    return bool(value)
+
+
+def _ui_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        cleaned = _ui_clean_text(value)
+        return [cleaned] if cleaned is not None else []
+    if not isinstance(value, list):
+        return []
+    return [cleaned for item in value if (cleaned := _ui_clean_text(item)) is not None]
+
+
+def _read_json_mapping(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(payload, Mapping):
+        return None, "artifact root is not a JSON object"
+    return dict(payload), None
+
+
+def _learning_candidate_counts_text(payload: Mapping[str, Any]) -> str:
+    counts = _ui_mapping(payload.get("counts"))
+    keys = [
+        "source_candidate_count",
+        "review_queue_count",
+        "eligible_candidate_count",
+        "previewed_candidate_count",
+        "excluded_candidate_count",
+        "requested_candidate_count",
+        "matched_candidate_count",
+        "selected_candidate_count",
+        "inspected_candidate_count",
+        "future_jsonl_candidate_if_separately_approved_count",
+        "would_write_jsonl_record_count",
+        "base_candidate_count",
+        "target_candidate_count",
+        "added_candidate_count",
+        "removed_candidate_count",
+        "changed_candidate_count",
+    ]
+    parts = [
+        f"{key}={_ui_int(counts.get(key))}"
+        for key in keys
+        if key in counts
+    ]
+    return "; ".join(parts) if parts else "counts=n/a"
+
+
+def _learning_candidate_pick(
+    key: str,
+    item: Mapping[str, Any],
+    queue: Mapping[str, Any],
+    *,
+    default: str = "n/a",
+) -> str:
+    return _ui_clean_text(queue.get(key)) or _ui_clean_text(item.get(key)) or default
+
+
+def _learning_candidate_policy_state(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    for source in (
+        item,
+        queue_summary,
+        _ui_mapping(item.get("lifecycle_summary")),
+        _ui_mapping(queue_summary.get("lifecycle_summary")),
+    ):
+        state = _ui_clean_text(source.get("policy_state"))
+        if state is not None:
+            return state
+    confirmation = _ui_mapping(queue_summary.get("export_policy_confirmation")) or _ui_mapping(
+        item.get("export_policy_confirmation")
+    )
+    policy = _ui_mapping(item.get("policy"))
+    if confirmation.get("confirmed") or policy.get("export_policy_confirmed"):
+        return "confirmed"
+    if _ui_clean_text(queue_summary.get("queue_state")) == "ready":
+        return "pending_confirmation"
+    return "unknown"
+
+
+def _learning_candidate_comparison_role(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    roles: list[str] = []
+    for source in (item, queue_summary):
+        roles.extend(_ui_string_list(source.get("comparison_roles")))
+        direct_role = _ui_clean_text(source.get("comparison_role"))
+        if direct_role and direct_role != "none":
+            roles.extend(role.strip() for role in direct_role.split(",") if role.strip())
+        roles.extend(_ui_string_list(_ui_mapping(source.get("comparison_evidence")).get("roles")))
+    evidence_summary = _ui_mapping(item.get("evidence_summary"))
+    roles.extend(_ui_string_list(evidence_summary.get("comparison_roles")))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for role in roles:
+        if role in seen:
+            continue
+        seen.add(role)
+        deduped.append(role)
+    return ",".join(deduped) if deduped else "n/a"
+
+
+def _learning_candidate_backend_id(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    backend_metadata = _ui_mapping(item.get("backend_metadata")) or _ui_mapping(
+        queue_summary.get("backend_metadata")
+    )
+    return (
+        _ui_clean_text(item.get("backend_id"))
+        or _ui_clean_text(backend_metadata.get("backend_id"))
+        or _ui_clean_text(backend_metadata.get("model_id"))
+        or "n/a"
+    )
+
+
+def _learning_candidate_source_path(
+    item: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    *,
+    artifact_path: str,
+) -> str:
+    source_event = _ui_mapping(item.get("source_event"))
+    path_sources = (
+        _ui_mapping(item.get("source_paths")),
+        source_event,
+        _ui_mapping(artifact.get("source_paths")),
+        _ui_mapping(artifact.get("paths")),
+        artifact,
+    )
+    path_keys = (
+        "source_artifact_path",
+        "artifact_path",
+        "source_learning_preview_path",
+        "source_human_selected_candidates_path",
+        "learning_preview_run_path",
+        "learning_preview_latest_path",
+        "human_selected_run_path",
+        "human_selected_latest_path",
+        "jsonl_export_dry_run_run_path",
+        "jsonl_export_dry_run_latest_path",
+        "base_artifact_path",
+        "target_artifact_path",
+        "candidate_diff_run_path",
+        "candidate_diff_latest_path",
+    )
+    for source in path_sources:
+        for key in path_keys:
+            path = _ui_clean_text(source.get(key))
+            if path is not None:
+                return path
+    return artifact_path
+
+
+def _learning_candidate_row(
+    item: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    *,
+    artifact_key: str,
+    artifact_label: str,
+    artifact_path: str,
+    source_collection: str,
+    source_index: int,
+) -> dict[str, str]:
+    queue_summary = _ui_mapping(item.get("review_queue")) or dict(item)
+    event_id = _ui_clean_text(item.get("event_id")) or f"{artifact_key}-{source_index}"
+    blocked_reasons = _ui_string_list(item.get("blocked_reasons")) or _ui_string_list(
+        queue_summary.get("blocked_reasons")
+    )
+    blocked_reason = (
+        _ui_clean_text(queue_summary.get("blocked_reason"))
+        or _ui_clean_text(item.get("blocked_reason"))
+        or (blocked_reasons[0] if blocked_reasons else "n/a")
+    )
+    label = (
+        _ui_clean_text(item.get("label"))
+        or _ui_clean_text(_ui_mapping(item.get("source_event")).get("prompt_excerpt"))
+        or event_id
+    )
+    return {
+        "row_id": f"{artifact_key}:{source_collection}:{source_index}:{event_id}",
+        "artifact": artifact_label,
+        "artifact_key": artifact_key,
+        "event_id": event_id,
+        "queue_state": _learning_candidate_pick("queue_state", item, queue_summary, default="unknown"),
+        "blocked_reason": blocked_reason,
+        "next_action": _learning_candidate_pick("next_action", item, queue_summary, default="review_candidate"),
+        "policy_state": _learning_candidate_policy_state(item, queue_summary),
+        "comparison_role": _learning_candidate_comparison_role(item, queue_summary),
+        "backend_id": _learning_candidate_backend_id(item, queue_summary),
+        "source_path": _learning_candidate_source_path(item, artifact, artifact_path=artifact_path),
+        "label": summarize_text_preview(label, limit=140),
+    }
+
+
+def _learning_candidate_review_rows_for_artifact(
+    artifact: Mapping[str, Any],
+    *,
+    artifact_key: str,
+    artifact_label: str,
+    artifact_path: str,
+) -> list[dict[str, str]]:
+    if artifact_key == "learning_preview":
+        source_items = artifact.get("review_queue") or []
+        source_collection = "review_queue"
+        if not source_items:
+            source_items = list(artifact.get("supervised_example_candidates") or []) + list(
+                artifact.get("excluded_candidates") or []
+            )
+            source_collection = "learning_candidates"
+    elif artifact_key == "human_selected":
+        source_items = artifact.get("selected_candidates") or []
+        source_collection = "selected_candidates"
+    elif artifact_key == "jsonl_dry_run":
+        source_items = artifact.get("candidates") or []
+        source_collection = "dry_run_candidates"
+    elif artifact_key == "candidate_diff":
+        rows: list[dict[str, str]] = []
+        for index, change in enumerate(artifact.get("changes") or [], start=1):
+            if not isinstance(change, Mapping):
+                continue
+            change_type = _ui_clean_text(change.get("change_type")) or "changed"
+            record = _ui_mapping(change.get("after")) or _ui_mapping(change.get("before"))
+            if not record:
+                continue
+            event_id = _ui_clean_text(change.get("event_id"))
+            if event_id is not None and not _ui_clean_text(record.get("event_id")):
+                record = {**record, "event_id": event_id}
+            row = _learning_candidate_row(
+                record,
+                artifact,
+                artifact_key=artifact_key,
+                artifact_label=artifact_label,
+                artifact_path=artifact_path,
+                source_collection="changes",
+                source_index=index,
+            )
+            row["label"] = summarize_text_preview(f"{change_type}: {row['label']}", limit=140)
+            rows.append(row)
+        return rows
+    else:
+        source_items = artifact.get("candidates") or []
+        source_collection = "candidates"
+
+    rows = []
+    for index, item in enumerate(source_items, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            _learning_candidate_row(
+                item,
+                artifact,
+                artifact_key=artifact_key,
+                artifact_label=artifact_label,
+                artifact_path=artifact_path,
+                source_collection=source_collection,
+                source_index=index,
+            )
+        )
+    return rows
+
+
+def build_learning_candidate_review_snapshot(
+    *,
+    root: Path,
+    workspace_id: str,
+) -> dict[str, Any]:
+    resolved_root = Path(root).resolve()
+    artifacts: list[dict[str, Any]] = []
+    rows: list[dict[str, str]] = []
+    policy_warnings: list[str] = []
+    for artifact_key, artifact_label, path_builder in LEARNING_CANDIDATE_REVIEW_ARTIFACTS:
+        path = path_builder(workspace_id=workspace_id, root=resolved_root)
+        artifact_record: dict[str, Any] = {
+            "artifact_key": artifact_key,
+            "label": artifact_label,
+            "path": str(path),
+            "exists": path.exists(),
+            "loaded": False,
+            "status": "missing",
+            "counts_text": "counts=n/a",
+            "candidate_count": 0,
+        }
+        if not path.exists():
+            artifacts.append(artifact_record)
+            continue
+
+        payload, error = _read_json_mapping(path)
+        if payload is None:
+            artifact_record.update(
+                {
+                    "status": "unreadable",
+                    "error": error or "artifact could not be read",
+                }
+            )
+            artifacts.append(artifact_record)
+            continue
+
+        artifact_rows = _learning_candidate_review_rows_for_artifact(
+            payload,
+            artifact_key=artifact_key,
+            artifact_label=artifact_label,
+            artifact_path=str(path),
+        )
+        rows.extend(artifact_rows)
+        counts = _ui_mapping(payload.get("counts"))
+        export_policy = _ui_mapping(payload.get("export_policy"))
+        export_mode = _ui_clean_text(payload.get("export_mode")) or "unknown"
+        training_export_ready = _ui_bool(payload.get("training_export_ready"))
+        human_gate_required = _ui_bool(payload.get("human_gate_required"))
+        jsonl_written = _ui_int(counts.get("would_write_jsonl_record_count"))
+        if export_mode != "preview_only":
+            policy_warnings.append(f"{artifact_label} reports export_mode={export_mode}")
+        if not human_gate_required:
+            policy_warnings.append(f"{artifact_label} reports human_gate_required=false")
+        if _ui_bool(export_policy.get("jsonl_file_written")):
+            policy_warnings.append(f"{artifact_label} reports jsonl_file_written=true")
+        if jsonl_written:
+            policy_warnings.append(f"{artifact_label} reports {jsonl_written} JSONL record(s) would be written")
+        if training_export_ready:
+            policy_warnings.append(f"{artifact_label} reports training_export_ready=true")
+        artifact_record.update(
+            {
+                "loaded": True,
+                "status": "loaded",
+                "schema_name": _ui_clean_text(payload.get("schema_name")),
+                "schema_version": payload.get("schema_version"),
+                "artifact_kind": artifact_key,
+                "generated_at_utc": _ui_clean_text(payload.get("generated_at_utc")),
+                "export_mode": export_mode,
+                "training_export_ready": training_export_ready,
+                "human_gate_required": human_gate_required,
+                "counts": counts,
+                "counts_text": _learning_candidate_counts_text(payload),
+                "candidate_count": len(artifact_rows),
+                "jsonl_record_write_count": jsonl_written,
+            }
+        )
+        artifacts.append(artifact_record)
+
+    row_state_counts = Counter(row["queue_state"] for row in rows)
+    row_next_action_counts = Counter(row["next_action"] for row in rows)
+    row_blocked_reason_counts = Counter(
+        row["blocked_reason"] for row in rows if row["blocked_reason"] != "n/a"
+    )
+    loaded_artifacts = [artifact for artifact in artifacts if artifact.get("loaded")]
+    counts = {
+        "expected_artifact_count": len(artifacts),
+        "loaded_artifact_count": len(loaded_artifacts),
+        "missing_artifact_count": sum(1 for artifact in artifacts if artifact.get("status") == "missing"),
+        "unreadable_artifact_count": sum(1 for artifact in artifacts if artifact.get("status") == "unreadable"),
+        "candidate_row_count": len(rows),
+        "preview_only_artifact_count": sum(
+            1 for artifact in loaded_artifacts if artifact.get("export_mode") == "preview_only"
+        ),
+        "human_gate_required_artifact_count": sum(
+            1 for artifact in loaded_artifacts if artifact.get("human_gate_required")
+        ),
+        "training_ready_artifact_count": sum(
+            1 for artifact in loaded_artifacts if artifact.get("training_export_ready")
+        ),
+        "jsonl_record_write_count": sum(
+            _ui_int(artifact.get("jsonl_record_write_count"))
+            for artifact in loaded_artifacts
+        ),
+        "queue_states": {key: _ui_int(value) for key, value in sorted(row_state_counts.items())},
+        "next_actions": {key: _ui_int(value) for key, value in sorted(row_next_action_counts.items())},
+        "blocked_reasons": {key: _ui_int(value) for key, value in sorted(row_blocked_reason_counts.items())},
+    }
+    return {
+        "workspace_id": workspace_id,
+        "mode": "read_only_latest_artifacts",
+        "root": str(resolved_root),
+        "counts": counts,
+        "artifacts": artifacts,
+        "rows": rows,
+        "policy_warnings": policy_warnings,
+    }
+
+
+def build_learning_candidate_review_state(review: Mapping[str, Any] | None) -> str:
+    if not review:
+        return "No learning candidate artifacts loaded yet."
+    counts = _ui_mapping(review.get("counts"))
+    return (
+        f"latest artifacts loaded={_ui_int(counts.get('loaded_artifact_count'))}/"
+        f"{_ui_int(counts.get('expected_artifact_count'))}; "
+        f"rows={_ui_int(counts.get('candidate_row_count'))}; "
+        f"preview-only={_ui_int(counts.get('preview_only_artifact_count'))}; "
+        f"human-gated={_ui_int(counts.get('human_gate_required_artifact_count'))}; "
+        f"training-ready={_ui_int(counts.get('training_ready_artifact_count'))}; "
+        f"jsonl-written={_ui_int(counts.get('jsonl_record_write_count'))}; "
+        f"missing={_ui_int(counts.get('missing_artifact_count'))}"
+    )
+
+
+def build_learning_candidate_review_rows(
+    review: Mapping[str, Any] | None,
+    *,
+    limit: int = 32,
+) -> list[dict[str, str]]:
+    if not review:
+        return []
+    rows = [
+        dict(row)
+        for row in review.get("rows") or []
+        if isinstance(row, Mapping)
+    ]
+    return rows[:limit]
+
+
+def build_learning_candidate_review_report(review: Mapping[str, Any] | None) -> str:
+    if not review:
+        return "Learning candidate review: read-only\nNo latest learning artifacts were inspected."
+    counts = _ui_mapping(review.get("counts"))
+    lines = [
+        "Learning candidate review: read-only",
+        "Source: latest file-first learning artifacts",
+        (
+            f"Artifacts loaded: {_ui_int(counts.get('loaded_artifact_count'))}/"
+            f"{_ui_int(counts.get('expected_artifact_count'))}"
+        ),
+        f"Candidate rows: {_ui_int(counts.get('candidate_row_count'))}",
+        f"Training export ready artifacts: {_ui_int(counts.get('training_ready_artifact_count'))}",
+        f"JSONL records written: {_ui_int(counts.get('jsonl_record_write_count'))}",
+    ]
+    queue_states = _ui_mapping(counts.get("queue_states"))
+    if queue_states:
+        lines.append(
+            "Queue states: "
+            + "; ".join(f"{key}={_ui_int(value)}" for key, value in queue_states.items())
+        )
+    next_actions = _ui_mapping(counts.get("next_actions"))
+    if next_actions:
+        lines.append(
+            "Next actions: "
+            + "; ".join(f"{key}={_ui_int(value)}" for key, value in next_actions.items())
+        )
+    blocked_reasons = _ui_mapping(counts.get("blocked_reasons"))
+    if blocked_reasons:
+        lines.append(
+            "Blocked reasons: "
+            + "; ".join(f"{key}={_ui_int(value)}" for key, value in blocked_reasons.items())
+        )
+    warnings = _ui_string_list(review.get("policy_warnings"))
+    if warnings:
+        lines.extend(["", "Policy warnings:", *[f"- {warning}" for warning in warnings]])
+    else:
+        lines.append("Policy boundary: preview-only / human-gated; no JSONL output.")
+
+    artifacts = [
+        artifact
+        for artifact in review.get("artifacts") or []
+        if isinstance(artifact, Mapping)
+    ]
+    if artifacts:
+        lines.extend(["", "Artifacts:"])
+        for artifact in artifacts:
+            status = _ui_clean_text(artifact.get("status")) or "unknown"
+            label = _ui_clean_text(artifact.get("label")) or "artifact"
+            counts_text = _ui_clean_text(artifact.get("counts_text")) or "counts=n/a"
+            path = _ui_clean_text(artifact.get("path")) or "n/a"
+            lines.append(f"- {label}: {status}; {counts_text}; source={path}")
+
+    rows = build_learning_candidate_review_rows(review, limit=12)
+    if rows:
+        lines.extend(["", "Inspection rows:"])
+        for row in rows:
+            lines.append(
+                f"- {row['artifact']} {row['event_id']} "
+                f"state={row['queue_state']} blocked={row['blocked_reason']} "
+                f"next={row['next_action']} policy={row['policy_state']} "
+                f"comparison={row['comparison_role']} backend={row['backend_id']} "
+                f"source={row['source_path']}"
+            )
+    return "\n".join(lines)
+
+
 def build_evaluation_signal_rows(snapshot: Mapping[str, Any] | None, *, limit: int = 12) -> list[dict[str, str]]:
     if not snapshot:
         return []
@@ -3324,6 +3841,14 @@ class LocalUiController:
             "report": report,
         }
 
+    def build_learning_candidate_review(self) -> dict[str, Any]:
+        review = build_learning_candidate_review_snapshot(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+        )
+        review["report"] = build_learning_candidate_review_report(review)
+        return review
+
     def record_evaluation_review_resolution(
         self,
         *,
@@ -4016,6 +4541,9 @@ class LocalUiApp:
         self.evaluation_adoption_var = tk.StringVar(
             value="No adoption preview loaded yet."
         )
+        self.learning_candidate_review_var = tk.StringVar(
+            value="No learning candidate artifacts loaded yet."
+        )
         self.evaluation_curation_state_filter = tk.StringVar(value="all")
         self.evaluation_curation_decision_filter = tk.StringVar(value="all")
         self.evaluation_curation_reason_filter = tk.StringVar(value="")
@@ -4035,6 +4563,7 @@ class LocalUiApp:
         self.recall_eval_winner_chip_labels: list[dict[str, Any]] = [{} for _ in range(RECALL_TOP_SELECTED_COMPARE_LIMIT)]
         self._evaluation_signal_rows: dict[str, dict[str, str]] = {}
         self._evaluation_curation_rows: dict[str, dict[str, str]] = {}
+        self._learning_candidate_review_rows: dict[str, dict[str, str]] = {}
         self.recall_eval_winner_buttons: list[Any] = []
         self._recall_candidate_rows: dict[str, dict[str, Any]] = {}
         self._recall_selected_candidate_event_id: str | None = None
@@ -4684,6 +5213,7 @@ class LocalUiApp:
         frame.grid_rowconfigure(9, weight=1)
         frame.grid_rowconfigure(11, weight=1)
         frame.grid_rowconfigure(13, weight=1)
+        frame.grid_rowconfigure(15, weight=1)
         notebook.add(frame, text="Evaluation")
 
         header = ttk.Frame(frame, style="Card.TFrame")
@@ -4787,10 +5317,44 @@ class LocalUiApp:
         )
         self.mark_review_unresolved_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
 
-        ttk.Label(frame, text="Signals", style="Section.TLabel").grid(row=8, column=0, sticky="w", pady=(14, 0))
-        self.evaluation_signals_tree = self._build_treeview(
+        learning_header = ttk.Frame(frame, style="Card.TFrame")
+        learning_header.grid(row=8, column=0, sticky="ew", pady=(14, 0))
+        learning_header.grid_columnconfigure(1, weight=1)
+        ttk.Label(learning_header, text="Learning Candidate Review", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            learning_header,
+            textvariable=self.learning_candidate_review_var,
+            style="Subtitle.TLabel",
+            wraplength=760,
+        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.refresh_candidate_review_button = ttk.Button(
+            learning_header,
+            text="Refresh Review",
+            style="Lab.TButton",
+            command=self.refresh_learning_candidate_review,
+        )
+        self.refresh_candidate_review_button.grid(row=0, column=2, sticky="e")
+        self.learning_candidate_review_tree = self._build_treeview(
             frame,
             row=9,
+            columns=("artifact", "event", "state", "blocked", "next", "policy", "role", "backend", "source"),
+            headings=("Artifact", "Event", "State", "Blocked", "Next", "Policy", "Role", "Backend", "Source Path"),
+            height=5,
+        )
+        self.learning_candidate_review_tree.column("artifact", width=130, stretch=False)
+        self.learning_candidate_review_tree.column("event", width=180, stretch=False)
+        self.learning_candidate_review_tree.column("state", width=120, stretch=False)
+        self.learning_candidate_review_tree.column("blocked", width=160, stretch=False)
+        self.learning_candidate_review_tree.column("next", width=210, stretch=False)
+        self.learning_candidate_review_tree.column("policy", width=150, stretch=False)
+        self.learning_candidate_review_tree.column("role", width=110, stretch=False)
+        self.learning_candidate_review_tree.column("backend", width=150, stretch=False)
+        self.learning_candidate_review_tree.column("source", width=320, stretch=True)
+
+        ttk.Label(frame, text="Signals", style="Section.TLabel").grid(row=10, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_signals_tree = self._build_treeview(
+            frame,
+            row=11,
             columns=("kind", "source", "relation", "status", "label"),
             headings=("Kind", "Source", "Relation", "Status", "Label"),
             height=7,
@@ -4801,11 +5365,11 @@ class LocalUiApp:
         self.evaluation_signals_tree.column("status", width=110, stretch=False)
         self.evaluation_signals_tree.column("label", width=420, stretch=True)
 
-        ttk.Label(frame, text="Details", style="Section.TLabel").grid(row=10, column=0, sticky="w", pady=(14, 0))
-        self.evaluation_detail_output = self._readonly_text(frame, row=11, height=8)
+        ttk.Label(frame, text="Details", style="Section.TLabel").grid(row=12, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_detail_output = self._readonly_text(frame, row=13, height=8)
 
-        ttk.Label(frame, text="Report", style="Section.TLabel").grid(row=12, column=0, sticky="w", pady=(14, 0))
-        self.evaluation_output = self._readonly_text(frame, row=13, height=10)
+        ttk.Label(frame, text="Report", style="Section.TLabel").grid(row=14, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_output = self._readonly_text(frame, row=15, height=10)
         return frame
 
     def _build_forensics_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -6290,6 +6854,72 @@ class LocalUiApp:
                 ),
             )
 
+    def _populate_learning_candidate_review(self, review: Mapping[str, Any] | None) -> None:
+        rows = build_learning_candidate_review_rows(review)
+        self._learning_candidate_review_rows = {row["row_id"]: row for row in rows}
+        children = self.learning_candidate_review_tree.get_children()
+        if children:
+            self.learning_candidate_review_tree.delete(*children)
+        root = self.controller.workspace_store.root
+        for row in rows:
+            self.learning_candidate_review_tree.insert(
+                "",
+                tk.END,
+                iid=row["row_id"],
+                values=(
+                    row["artifact"],
+                    summarize_text_preview(row["event_id"], limit=48),
+                    row["queue_state"],
+                    summarize_text_preview(row["blocked_reason"], limit=46),
+                    summarize_text_preview(row["next_action"], limit=60),
+                    summarize_text_preview(row["policy_state"], limit=44),
+                    summarize_text_preview(row["comparison_role"], limit=36),
+                    summarize_text_preview(row["backend_id"], limit=44),
+                    summarize_text_preview(
+                        summarize_workspace_path(row["source_path"], root=root),
+                        limit=96,
+                    ),
+                ),
+            )
+
+    def _apply_learning_candidate_review(self, review: Mapping[str, Any], *, status_message: str) -> None:
+        self.learning_candidate_review_var.set(build_learning_candidate_review_state(review))
+        self._populate_learning_candidate_review(review)
+        report = str(review.get("report") or build_learning_candidate_review_report(review))
+        self._set_output(self.evaluation_detail_output, report)
+        self._set_output(self.evaluation_output, report)
+        self.status_var.set(status_message)
+        self.backend_var.set("Backend: local-learning-inspection")
+        self.device_var.set("Device: local files")
+        artifact_paths = [
+            str(artifact.get("path"))
+            for artifact in review.get("artifacts") or []
+            if isinstance(artifact, Mapping) and artifact.get("loaded")
+        ]
+        self.artifact_var.set(
+            "Learning candidate artifacts: " + ("; ".join(artifact_paths) if artifact_paths else "none loaded")
+        )
+        self.hint_var.set("Read-only latest artifacts: preview, human-selected, JSONL dry-run, and candidate diff.")
+
+    def refresh_learning_candidate_review(self) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Candidate review is disabled while a worker job is running.")
+            return
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Refreshing candidate review...")
+        try:
+            review = self.controller.build_learning_candidate_review()
+            self._apply_learning_candidate_review(
+                review,
+                status_message="Learning candidate review is ready.",
+            )
+        except Exception as exc:
+            self.status_var.set(f"Candidate review failed: {type(exc).__name__}: {exc}")
+            self.hint_var.set("")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
     def _record_selected_evaluation_review(self, *, resolved: bool) -> None:
         if self.job_runner.has_pending_work():
             self.status_var.set("Review signal recording is disabled while a worker job is running.")
@@ -6705,6 +7335,7 @@ class LocalUiApp:
             "apply_evaluation_filter_button",
             "mark_review_resolved_button",
             "mark_review_unresolved_button",
+            "refresh_candidate_review_button",
         ):
             button = getattr(self, button_name, None)
             if button is not None:
