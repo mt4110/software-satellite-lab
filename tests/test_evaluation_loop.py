@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
+import evaluation_loop as evaluation_loop_module  # noqa: E402
 from evaluation_loop import (  # noqa: E402
     EVALUATION_SIGNAL_SCHEMA_NAME,
     EVALUATION_SIGNAL_SCHEMA_VERSION,
@@ -2200,7 +2201,271 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["event_id"], "traceable-comparison-winner")
         self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
         self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["selection_state"], "selected")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["comparison_state"], "winner")
         self.assertEqual(candidate["evidence"]["comparisons"][0]["role"], "winner")
+        self.assertEqual(candidate["evidence"]["comparisons"][0]["comparison_role"], "winner")
+
+    def test_learning_preview_enriches_legacy_comparison_backend_metadata(self) -> None:
+        source_refs = readable_test_source_refs()
+        source_refs["backend_ref"] = {
+            "backend_id": "legacy-backend",
+            "adapter_kind": "mock",
+            "model_id": "legacy/model-v1",
+            "compatibility_status": "compatible",
+        }
+        event = {
+            "event_id": "legacy-comparison-winner",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {
+                "surface": "agent_lane",
+                "mode": "patch_plan_verify",
+                "selected_model_id": "legacy/model-v1",
+            },
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep legacy comparison logs explainable.",
+                "output_text": "The backend metadata is recovered from the source event.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_legacy_comparison",
+                    "pass_definition": "Legacy comparison metadata is enriched.",
+                },
+            },
+            "source_refs": source_refs,
+        }
+        test_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="legacy-comparison-winner",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:legacy-comparison:test-pass",
+        )
+        legacy_comparison = build_evaluation_comparison(
+            candidate_event_ids=["legacy-comparison-winner", "legacy-comparison-loser"],
+            winner_event_id="legacy-comparison-winner",
+            recorded_at_utc="2026-04-01T00:02:00+00:00",
+            comparison_id="local-default:compare:legacy-comparison",
+            task_label="legacy comparison log",
+            criteria=["winner trace"],
+            rationale="Simulate a pre-S5 comparison record without backend metadata.",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "legacy-comparison-winner",
+                        "state": "ready",
+                        "label": "Legacy comparison winner",
+                        "reasons": ["comparison_winner", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"legacy-comparison-winner": event},
+            explicit_signals=[test_signal],
+            comparisons=[legacy_comparison],
+        )
+        comparison_trace = preview["supervised_example_candidates"][0]["evidence"]["comparisons"][0]
+
+        self.assertEqual(comparison_trace["backend_metadata"]["backend_id"], "legacy-backend")
+        self.assertEqual(comparison_trace["backend_metadata"]["model_id"], "legacy/model-v1")
+        self.assertEqual(comparison_trace["backend_comparison"]["backend_count"], 1)
+
+    def test_learning_preview_reuses_backend_metadata_artifact_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_path = root / "artifacts" / "agent_runs" / "cached-backend.json"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "backend": {
+                            "backend_id": "cached-backend",
+                            "display_name": "Cached backend",
+                            "adapter_kind": "mock",
+                            "model_id": "cached/model-v1",
+                            "capabilities": {"chat": True},
+                            "limits": {"context_tokens": 8192},
+                            "metadata": {"provider": "local"},
+                        },
+                        "compatibility": {
+                            "status": "compatible",
+                            "schema_name": "backend-compatibility",
+                            "schema_version": 1,
+                            "backend_id": "cached-backend",
+                            "adapter_kind": "mock",
+                            "model_id": "cached/model-v1",
+                            "workflow_kind": "learning_preview",
+                            "required_capabilities": ["chat"],
+                            "optional_capabilities": [],
+                            "missing_capabilities": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            event = {
+                "event_id": "cached-backend-winner",
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+                "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+                "content": {
+                    "prompt": "Keep repeated backend metadata reads cached.",
+                    "output_text": "The same agent_run artifact backs comparison and review evidence.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_backend_metadata_cache",
+                        "pass_definition": "Backend metadata artifact is reused in one preview build.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(artifact_path),
+                    }
+                },
+            }
+            test_signal = build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id="cached-backend-winner",
+                source_event=event,
+                recorded_at_utc="2026-04-01T00:01:00+00:00",
+                signal_id="local-default:eval:cached-backend:test-pass",
+            )
+            comparison = build_evaluation_comparison(
+                candidate_event_ids=["cached-backend-winner", "cached-backend-loser"],
+                winner_event_id="cached-backend-winner",
+                recorded_at_utc="2026-04-01T00:02:00+00:00",
+                comparison_id="local-default:compare:cached-backend",
+                task_label="cached backend metadata",
+                criteria=["winner trace", "backend metadata"],
+                rationale="The winner metadata should be read once per preview build.",
+            )
+
+            with patch(
+                "evaluation_loop._read_json_object",
+                wraps=evaluation_loop_module._read_json_object,
+            ) as read_json_mock:
+                preview = build_learning_dataset_preview(
+                    {
+                        "workspace_id": "local-default",
+                        "paths": {
+                            "event_log_path": str(
+                                root / "artifacts" / "event_logs" / "events.jsonl"
+                            )
+                        },
+                    },
+                    {
+                        "candidates": [
+                            {
+                                "event_id": "cached-backend-winner",
+                                "state": "ready",
+                                "label": "Cached backend winner",
+                                "reasons": ["comparison_winner", "test_pass"],
+                                "blocked_by": [],
+                                "export_decision": "include_when_approved",
+                                "ready_for_policy": True,
+                            }
+                        ]
+                    },
+                    events_by_id={"cached-backend-winner": event},
+                    explicit_signals=[test_signal],
+                    comparisons=[comparison],
+                )
+                read_count = read_json_mock.call_count
+
+        candidate = preview["supervised_example_candidates"][0]
+        comparison_trace = candidate["evidence"]["comparisons"][0]
+
+        self.assertEqual(read_count, 1)
+        self.assertEqual(candidate["backend_metadata"]["backend_id"], "cached-backend")
+        self.assertEqual(candidate["review_queue"]["backend_metadata"]["model_id"], "cached/model-v1")
+        self.assertEqual(comparison_trace["backend_metadata"]["adapter_kind"], "mock")
+        self.assertEqual(comparison_trace["backend_metadata"]["compatibility_status"], "compatible")
+
+    def test_backend_metadata_uses_complete_event_payload_without_artifact_read(self) -> None:
+        event = {
+            "event_id": "complete-backend-metadata",
+            "event_kind": "agent_task_run",
+            "session": {"selected_model_id": "event/model-v1"},
+            "outcome": {"status": "ok", "model_id": "event/model-v1"},
+            "content": {"options": {}},
+            "source_refs": {
+                "artifact_ref": {
+                    "artifact_kind": "agent_run",
+                    "artifact_path": "/tmp/should-not-be-read.json",
+                },
+                "backend_ref": {
+                    "backend_id": "event-backend",
+                    "display_name": "Event backend",
+                    "adapter_kind": "mock",
+                    "model_id": "event/model-v1",
+                    "compatibility_status": "compatible",
+                    "compatibility": {
+                        "status": "compatible",
+                        "schema_name": "backend-compatibility",
+                        "schema_version": 1,
+                        "backend_id": "event-backend",
+                        "adapter_kind": "mock",
+                        "model_id": "event/model-v1",
+                        "workflow_kind": "learning_preview",
+                        "required_capabilities": ["chat"],
+                        "optional_capabilities": [],
+                        "missing_capabilities": [],
+                    },
+                    "capabilities": {"chat": True},
+                    "limits": {"context_tokens": 4096},
+                    "metadata": {"source": "event"},
+                },
+            },
+        }
+
+        with patch("evaluation_loop._read_json_object") as read_json_mock:
+            metadata = evaluation_loop_module._backend_metadata_from_event(event)
+
+        self.assertFalse(read_json_mock.called)
+        self.assertEqual(metadata["backend_id"], "event-backend")
+        self.assertEqual(metadata["display_name"], "Event backend")
+        self.assertEqual(metadata["limits"]["context_tokens"], 4096)
+        self.assertEqual(metadata["metadata"]["source"], "event")
+        self.assertEqual(metadata["compatibility"]["workflow_kind"], "learning_preview")
+
+    def test_enrich_comparison_preserves_existing_backend_metadata_without_event(self) -> None:
+        comparison = {
+            "comparison_id": "local-default:compare:archival-backend",
+            "recorded_at_utc": "2026-04-01T00:02:00+00:00",
+            "outcome": "winner_selected",
+            "winner_event_id": "archival-winner",
+            "candidates": [
+                {
+                    "event_id": "archival-winner",
+                    "backend_metadata": {
+                        "backend_id": "archival-backend",
+                        "display_name": "Archival backend",
+                        "adapter_kind": "mock",
+                        "model_id": "archival/model-v1",
+                        "compatibility_status": "compatible",
+                        "capabilities": {"chat": True},
+                    },
+                }
+            ],
+        }
+
+        enriched = evaluation_loop_module._enrich_comparison(comparison, {})
+        metadata = enriched["candidates"][0]["backend_metadata"]
+
+        self.assertEqual(metadata["backend_id"], "archival-backend")
+        self.assertEqual(metadata["display_name"], "Archival backend")
+        self.assertEqual(metadata["adapter_kind"], "mock")
+        self.assertEqual(metadata["model_id"], "archival/model-v1")
+        self.assertEqual(metadata["compatibility_status"], "compatible")
+        self.assertEqual(metadata["capabilities"]["chat"], True)
 
     def test_learning_preview_blocks_stale_ready_candidate_with_negative_trace(self) -> None:
         event = {

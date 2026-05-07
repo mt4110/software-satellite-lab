@@ -734,6 +734,46 @@ def _comparison_decision(results: list[dict[str, Any]]) -> tuple[str, str | None
     return "needs_follow_up", None, "One or more selected backends need follow-up before adoption."
 
 
+def _backend_result_comparison_role(
+    result: Mapping[str, Any],
+    *,
+    outcome: str,
+    winner_event_id: str | None,
+) -> str:
+    event_id = _clean_text(result.get("event_id"))
+    if outcome == "winner_selected":
+        return "winner" if event_id is not None and event_id == winner_event_id else "loser"
+    return "candidate"
+
+
+def _backend_comparison_result_summary(
+    results: Iterable[Mapping[str, Any]],
+    *,
+    outcome: str,
+    winner_event_id: str | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "event_id": _clean_text(result.get("event_id")),
+            "backend_id": _clean_text(result.get("backend_id")),
+            "adapter_kind": _clean_text(result.get("adapter_kind")),
+            "model_id": _clean_text(result.get("model_id")),
+            "compatibility_status": _clean_text(_mapping_dict(result.get("compatibility")).get("status")),
+            "run_status": _clean_text(result.get("run_status")),
+            "quality_status": _clean_text(result.get("quality_status")),
+            "execution_status": _clean_text(result.get("execution_status")),
+            "comparison_role": _backend_result_comparison_role(
+                result,
+                outcome=outcome,
+                winner_event_id=winner_event_id,
+            ),
+            "run_artifact_path": _clean_text(result.get("run_artifact_path")),
+        }
+        for result in results
+        if isinstance(result, Mapping)
+    ]
+
+
 def _load_selected_backend_configs(
     *,
     root: Path,
@@ -998,6 +1038,12 @@ def run_backend_swap_harness(
         if isinstance(event, Mapping) and event.get("event_id")
     }
     comparison_outcome, winner_event_id, comparison_rationale = _comparison_decision(backend_results)
+    for result in backend_results:
+        result["comparison_role"] = _backend_result_comparison_role(
+            result,
+            outcome=comparison_outcome,
+            winner_event_id=winner_event_id,
+        )
     comparison = build_evaluation_comparison(
         workspace_id=workspace_id,
         candidate_event_ids=[str(result["event_id"]) for result in backend_results],
@@ -1057,6 +1103,11 @@ def run_backend_swap_harness(
             "outcome": comparison["outcome"],
             "winner_event_id": comparison["winner_event_id"],
             "candidate_event_ids": [str(result["event_id"]) for result in backend_results],
+            "backend_summary": _backend_comparison_result_summary(
+                backend_results,
+                outcome=comparison_outcome,
+                winner_event_id=winner_event_id,
+            ),
         },
         "index_summary": index_summary,
         "evaluation_counts": copy.deepcopy(evaluation_snapshot.get("counts") or {}),
@@ -1087,6 +1138,19 @@ def format_backend_harness_report(run: Mapping[str, Any]) -> str:
     winner = _clean_text(comparison.get("winner_event_id"))
     if winner:
         lines.append(f"Winner event: {winner}")
+    backend_summary = [
+        item
+        for item in comparison.get("backend_summary") or []
+        if isinstance(item, Mapping)
+    ]
+    if backend_summary:
+        role_counts = Counter(
+            _clean_text(item.get("comparison_role")) or "candidate"
+            for item in backend_summary
+        )
+        role_parts = [f"{key}={int(value)}" for key, value in sorted(role_counts.items())]
+        lines.extend(("", "Backend comparison summary:"))
+        lines.append(f"Roles: {'; '.join(role_parts)}")
     results = [item for item in run.get("backend_results") or [] if isinstance(item, Mapping)]
     if results:
         lines.extend(("", "Backends:"))
@@ -1095,6 +1159,9 @@ def format_backend_harness_report(run: Mapping[str, Any]) -> str:
                 "- "
                 + f"{_clean_text(result.get('backend_id')) or 'backend'} "
                 + f"model={_clean_text(result.get('model_id')) or 'n/a'} "
+                + f"adapter={_clean_text(result.get('adapter_kind')) or 'n/a'} "
+                + f"compatibility={_clean_text(_mapping_dict(result.get('compatibility')).get('status')) or 'n/a'} "
+                + f"role={_clean_text(result.get('comparison_role')) or 'candidate'} "
                 + f"run={_clean_text(result.get('run_status')) or 'n/a'} "
                 + f"event={_clean_text(result.get('event_id')) or 'n/a'}"
             )

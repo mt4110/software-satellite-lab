@@ -404,6 +404,7 @@ Current baseline:
 - external backend config JSON files can be loaded into the workspace config log through `scripts/run_backend_swap.py --backend-config-json`
 - compatibility checks require text generation, agent-lane support, verification commands, and file-first artifact support before a backend enters the shared workflow
 - `scripts/run_backend_swap.py` runs the same M5 patch-plan-verify path across at least two backend configs, records backend metadata on the agent-lane run, rebuilds the memory index, and appends an M4 comparison record
+- backend comparison records now carry candidate backend/model metadata, compatibility status, and explicit comparison roles, so winner/candidate/loser evidence can be followed from backend swap through evaluation and learning preview
 - backend swap results flow into software-work events, SQLite memory search, evaluation snapshots, and curation candidates through the existing M4 / M5 path
 
 M6 checkpoint scope:
@@ -434,6 +435,7 @@ Current baseline:
 
 - learning dataset preview remains `preview_only`, human-gated, and downstream of evaluation/curation evidence
 - `review_queue` records every source curation candidate as a typed inspection item with queue state, priority, next action, blocked reason, and lifecycle summary
+- `review_queue` and supervised candidates expose backend metadata plus comparison role evidence, preserving preview-only boundaries while making backend-swap winners and losers explainable
 - learning preview report now summarizes queue states, next actions, and blocked reasons so operators can inspect the queue without treating it as a training export
 - `export_policy_confirmed` records human export-policy confirmation as explicit file-first evidence without enabling trainable export
 - human-selected candidate lists are now explicit preview-only learning artifacts, so a human shortlist can be preserved without silently promoting candidates or copying supervised example text

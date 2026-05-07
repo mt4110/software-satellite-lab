@@ -31,6 +31,7 @@ from evaluation_loop import (  # noqa: E402
     append_evaluation_signal,
     build_evaluation_signal,
     evaluation_signal_log_path,
+    format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
@@ -74,8 +75,17 @@ class BackendSwapTests(unittest.TestCase):
         self.assertEqual(harness_run["status"], "completed")
         self.assertEqual(len(harness_run["backend_results"]), 2)
         self.assertEqual(harness_run["comparison"]["outcome"], "tie")
+        self.assertEqual(
+            {result["comparison_role"] for result in harness_run["backend_results"]},
+            {"candidate"},
+        )
+        self.assertEqual(len(harness_run["comparison"]["backend_summary"]), 2)
         self.assertEqual(harness_run["evaluation_counts"]["test_pass"], 2)
         self.assertEqual(harness_run["evaluation_counts"]["comparisons"], 1)
+        self.assertEqual(
+            evaluation_snapshot["comparisons"][0]["backend_comparison"]["backend_count"],
+            2,
+        )
         self.assertEqual(evaluation_snapshot["counts"]["test_pass"], 2)
         self.assertEqual(evaluation_snapshot["counts"]["comparisons"], 1)
         self.assertEqual(len(backend_events), 2)
@@ -127,11 +137,21 @@ class BackendSwapTests(unittest.TestCase):
                 curation_preview=curation_preview,
             )
             candidate = learning_preview["supervised_example_candidates"][0]
+            report = format_learning_dataset_preview_report(learning_preview)
 
         self.assertEqual(candidate["event_id"], selected_result["event_id"])
         self.assertEqual(candidate["backend_metadata"]["backend_id"], selected_result["backend_id"])
         self.assertEqual(candidate["backend_metadata"]["model_id"], selected_result["model_id"])
         self.assertEqual(candidate["backend_metadata"]["compatibility_status"], "compatible")
+        self.assertEqual(candidate["evidence"]["comparisons"][0]["comparison_role"], "candidate")
+        self.assertEqual(
+            candidate["evidence"]["comparisons"][0]["backend_comparison"]["backend_count"],
+            2,
+        )
+        self.assertEqual(
+            candidate["review_queue"]["comparison_evidence"]["latest_role"],
+            "candidate",
+        )
         self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
         self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
         self.assertIn("latency_profile", candidate["backend_metadata"]["metadata"])
@@ -139,6 +159,8 @@ class BackendSwapTests(unittest.TestCase):
             candidate["backend_metadata"]["metadata_source_artifact_path"],
             selected_result["run_artifact_path"],
         )
+        self.assertIn("Backend comparison summary:", report)
+        self.assertIn("comparison=candidate", report)
 
     def test_compatibility_check_reports_missing_required_capability(self) -> None:
         config = build_backend_config(
@@ -313,6 +335,84 @@ class BackendSwapTests(unittest.TestCase):
         self.assertEqual(by_backend["mock-failing-local"]["run_status"], "failed")
         self.assertEqual(harness_run["evaluation_counts"]["test_pass"], 1)
         self.assertEqual(harness_run["evaluation_counts"]["test_fail"], 1)
+
+    def test_learning_preview_traces_backend_comparison_winner_and_loser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failing_config = build_backend_config(
+                backend_id="mock-loser-local",
+                display_name="Mock Loser Local",
+                adapter_kind="mock",
+                model_id="mock/loser-local-v1",
+                capabilities={
+                    "text_generation": {"supported": True},
+                    "agent_lane": {"supported": True},
+                    "verification_commands": {"supported": True},
+                    "file_first_artifacts": {"supported": True},
+                },
+                adapter_options={"force_status": "failed"},
+                metadata={"comparison_role": "failure-biased local dry run"},
+            )
+            append_backend_config(
+                backend_config_log_path(root=root),
+                failing_config,
+                workspace_id="local-default",
+            )
+            harness_run, _harness_path = run_backend_swap_harness(
+                root=root,
+                task_title="Backend comparison winner loser",
+                goal="Keep winner and loser roles traceable from backend swap.",
+                plan_steps=["Load config."],
+                verification_commands=[f"{sys.executable} -c \"print('winner loser trace ok')\""],
+                backend_ids=["mock-fast-local", "mock-loser-local"],
+                timeout_seconds=10,
+            )
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            by_backend = {
+                result["backend_id"]: result
+                for result in harness_run["backend_results"]
+            }
+            supervised_by_event = {
+                candidate["event_id"]: candidate
+                for candidate in learning_preview["supervised_example_candidates"]
+            }
+            queue_by_event = {
+                item["event_id"]: item
+                for item in learning_preview["review_queue"]
+            }
+            excluded_by_event = {
+                item["event_id"]: item
+                for item in learning_preview["excluded_candidates"]
+            }
+
+        winner_event_id = by_backend["mock-fast-local"]["event_id"]
+        loser_event_id = by_backend["mock-loser-local"]["event_id"]
+        winner_candidate = supervised_by_event[winner_event_id]
+        loser_queue_item = queue_by_event[loser_event_id]
+        loser_excluded = excluded_by_event[loser_event_id]
+
+        self.assertEqual(by_backend["mock-fast-local"]["comparison_role"], "winner")
+        self.assertEqual(by_backend["mock-loser-local"]["comparison_role"], "loser")
+        self.assertEqual(winner_candidate["evidence"]["comparisons"][0]["comparison_role"], "winner")
+        self.assertEqual(
+            winner_candidate["review_queue"]["lifecycle_summary"]["comparison_state"],
+            "winner",
+        )
+        self.assertEqual(loser_queue_item["comparison_evidence"]["latest_role"], "loser")
+        self.assertEqual(loser_queue_item["backend_metadata"]["backend_id"], "mock-loser-local")
+        self.assertEqual(loser_queue_item["lifecycle_summary"]["comparison_state"], "loser")
+        self.assertEqual(loser_excluded["comparison_evidence"]["latest_role"], "loser")
+        self.assertEqual(loser_excluded["blocked_reason"], "test_fail")
+        self.assertFalse(learning_preview["training_export_ready"])
 
     def test_backend_invocation_failure_preserves_verification_failure_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

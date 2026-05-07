@@ -2492,10 +2492,18 @@ def build_evaluation_comparison_text(snapshot: Mapping[str, Any] | None) -> str:
     if not snapshot:
         return "No comparison records loaded yet."
     counts = dict(snapshot.get("counts") or {})
+    backend_comparison_count = sum(
+        1
+        for item in snapshot.get("comparisons") or []
+        if isinstance(item, Mapping)
+        if isinstance(item.get("backend_comparison"), Mapping)
+        and item["backend_comparison"].get("backend_count")
+    )
     return (
         f"comparisons={int(counts.get('comparisons') or 0)}; "
         f"winners={int(counts.get('comparison_winners') or 0)}; "
-        f"open={int(counts.get('unresolved_comparisons') or 0)}"
+        f"open={int(counts.get('unresolved_comparisons') or 0)}; "
+        f"backend={backend_comparison_count}"
     )
 
 
