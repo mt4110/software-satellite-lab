@@ -848,6 +848,55 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(change["before"]["backend_id"], "backend-a")
         self.assertEqual(change["after"]["backend_id"], "backend-b")
 
+    def test_candidate_diff_normalizes_legacy_lifecycle_fallbacks(self) -> None:
+        preview = {
+            "schema_name": "software-satellite-learning-dataset-preview",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "review_queue": [
+                {
+                    "event_id": "paused-without-lifecycle",
+                    "label": "Paused legacy candidate",
+                    "queue_state": "ready",
+                    "next_action": "complete_adoption_checklist",
+                    "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                },
+                {
+                    "event_id": "invalid-lifecycle",
+                    "label": "Invalid lifecycle candidate",
+                    "queue_state": "ready",
+                    "next_action": "confirm_export_policy",
+                    "lifecycle_summary": {
+                        "lifecycle_state": "almost_done",
+                        "policy_state": "pending_confirmation",
+                    },
+                },
+                {
+                    "event_id": "blocked-policy",
+                    "label": "Blocked wins over policy",
+                    "queue_state": "missing_source",
+                    "next_action": "restore_source_event",
+                    "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                },
+            ],
+            "supervised_example_candidates": [],
+            "excluded_candidates": [],
+        }
+
+        diff = build_learning_candidate_diff_summary(
+            preview,
+            preview,
+            base_label="legacy",
+            target_label="legacy",
+        )
+
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["paused"], 1)
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["blocked"], 1)
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["unknown"], 1)
+
     def test_jsonl_export_dry_run_from_human_selected_candidates_writes_manifest_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

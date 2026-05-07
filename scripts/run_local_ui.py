@@ -2723,6 +2723,8 @@ def _learning_candidate_lifecycle_state(item: Mapping[str, Any], queue_summary: 
         return "completed"
     if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
         return "blocked"
+    if policy_state == "confirmed_but_not_ready":
+        return "paused"
     if queue_state in {"ready", "needs_review"}:
         return "queued"
     return "unknown"

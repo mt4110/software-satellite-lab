@@ -4005,6 +4005,8 @@ def _learning_candidate_diff_lifecycle_state(item: Mapping[str, Any], queue_summ
         return "completed"
     if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
         return "blocked"
+    if policy_state == "confirmed_but_not_ready":
+        return "paused"
     return "queued" if queue_state in {"ready", "needs_review"} else "unknown"
 
 
@@ -5779,7 +5781,9 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
                 or "candidate"
             )
             state = _clean_text(item.get("queue_state")) or "needs_review"
-            lifecycle = _clean_text(_mapping_dict(item.get("lifecycle_summary")).get("lifecycle_state")) or "queued"
+            lifecycle = _learning_normalized_lifecycle_state(
+                _mapping_dict(item.get("lifecycle_summary")).get("lifecycle_state")
+            )
             next_action = _clean_text(item.get("next_action")) or "review_candidate"
             blocked_reason = _clean_text(item.get("blocked_reason")) or "n/a"
             lines.append(

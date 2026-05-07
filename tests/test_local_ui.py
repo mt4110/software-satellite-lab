@@ -968,6 +968,64 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertIn("missing=4", build_learning_candidate_review_state(review))
         self.assertIn("source=", build_learning_candidate_review_report(review))
 
+    def test_learning_candidate_review_normalizes_legacy_lifecycle_fallbacks(self) -> None:
+        controller, _store, root = self.make_controller()
+        learning_root = root / "artifacts" / "evaluation" / "local-default" / "learning"
+        learning_root.mkdir(parents=True)
+        preview_path = learning_root / "preview-latest.json"
+        preview_path.write_text(
+            json.dumps(
+                {
+                    "schema_name": "software-satellite-learning-dataset-preview",
+                    "schema_version": 1,
+                    "workspace_id": "local-default",
+                    "export_mode": "preview_only",
+                    "training_export_ready": False,
+                    "human_gate_required": True,
+                    "counts": {"review_queue_count": 3},
+                    "review_queue": [
+                        {
+                            "event_id": "paused-without-lifecycle",
+                            "queue_state": "ready",
+                            "next_action": "complete_adoption_checklist",
+                            "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                        },
+                        {
+                            "event_id": "invalid-lifecycle",
+                            "queue_state": "ready",
+                            "next_action": "confirm_export_policy",
+                            "lifecycle_summary": {
+                                "lifecycle_state": "almost_done",
+                                "policy_state": "pending_confirmation",
+                            },
+                        },
+                        {
+                            "event_id": "blocked-policy",
+                            "queue_state": "missing_source",
+                            "next_action": "restore_source_event",
+                            "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        review = controller.build_learning_candidate_review()
+        rows_by_event = {
+            row["event_id"]: row
+            for row in build_learning_candidate_review_rows(review)
+        }
+
+        self.assertEqual(rows_by_event["paused-without-lifecycle"]["lifecycle_state"], "paused")
+        self.assertEqual(rows_by_event["invalid-lifecycle"]["lifecycle_state"], "unknown")
+        self.assertEqual(rows_by_event["blocked-policy"]["lifecycle_state"], "blocked")
+        self.assertEqual(review["counts"]["lifecycle_states"]["paused"], 1)
+        self.assertEqual(review["counts"]["lifecycle_states"]["unknown"], 1)
+        self.assertEqual(review["counts"]["lifecycle_states"]["blocked"], 1)
+
     def test_learning_candidate_review_flags_unsafe_policy_strings(self) -> None:
         controller, _store, root = self.make_controller()
         learning_root = root / "artifacts" / "evaluation" / "local-default" / "learning"
