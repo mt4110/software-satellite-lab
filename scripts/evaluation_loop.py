@@ -17,6 +17,9 @@ from software_work_events import build_event_contract_check, build_event_contrac
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
+BackendMetadataCache = dict[tuple[str | None, str | None], dict[str, Any]]
+
+
 EVALUATION_SIGNAL_SCHEMA_NAME = "software-satellite-evaluation-signal"
 EVALUATION_SIGNAL_SCHEMA_VERSION = 1
 EVALUATION_SIGNAL_LOG_SCHEMA_NAME = "software-satellite-evaluation-signal-log"
@@ -335,7 +338,28 @@ def _read_json_object(path: Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _backend_metadata_from_event(event: Mapping[str, Any] | None) -> dict[str, Any]:
+def _backend_metadata_cache_key(event: Mapping[str, Any] | None) -> tuple[str | None, str | None] | None:
+    if not isinstance(event, Mapping):
+        return None
+    event_payload = _mapping_dict(event)
+    source_refs = _mapping_dict(event_payload.get("source_refs"))
+    artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    event_id = _clean_text(event_payload.get("event_id"))
+    artifact_path = _clean_text(artifact_ref.get("artifact_path"))
+    if event_id is None and artifact_path is None:
+        return None
+    return (event_id, artifact_path)
+
+
+def _backend_metadata_from_event(
+    event: Mapping[str, Any] | None,
+    *,
+    metadata_cache: BackendMetadataCache | None = None,
+) -> dict[str, Any]:
+    cache_key = _backend_metadata_cache_key(event)
+    if metadata_cache is not None and cache_key is not None and cache_key in metadata_cache:
+        return copy.deepcopy(metadata_cache[cache_key])
+
     event_payload = _mapping_dict(event)
     session = _mapping_dict(event_payload.get("session"))
     content = _mapping_dict(event_payload.get("content"))
@@ -344,52 +368,103 @@ def _backend_metadata_from_event(event: Mapping[str, Any] | None) -> dict[str, A
     source_refs = _mapping_dict(event_payload.get("source_refs"))
     backend_ref = _mapping_dict(source_refs.get("backend_ref"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
-    artifact_payload: dict[str, Any] = {}
-    if _clean_text(artifact_ref.get("artifact_kind")) == "agent_run":
-        artifact_payload = _read_json_object(_path_from_text(artifact_ref.get("artifact_path")))
-    run_backend = _mapping_dict(artifact_payload.get("backend"))
-    run_compatibility = _mapping_dict(artifact_payload.get("compatibility"))
-    compatibility_status = (
-        _clean_text(run_compatibility.get("status"))
-        or _clean_text(backend_ref.get("compatibility_status"))
-        or _clean_text(options.get("backend_compatibility_status"))
+    event_compatibility = (
+        _mapping_dict(backend_ref.get("compatibility"))
+        or _mapping_dict(options.get("backend_compatibility"))
     )
-    capabilities = (
-        run_backend.get("capabilities")
-        if isinstance(run_backend.get("capabilities"), Mapping)
-        else backend_ref.get("capabilities")
+    event_capabilities = (
+        backend_ref.get("capabilities")
         if isinstance(backend_ref.get("capabilities"), Mapping)
         else options.get("backend_capabilities")
         if isinstance(options.get("backend_capabilities"), Mapping)
         else {}
     )
+    event_limits = (
+        _mapping_dict(backend_ref.get("limits"))
+        or _mapping_dict(options.get("backend_limits"))
+    )
+    event_metadata = (
+        _mapping_dict(backend_ref.get("metadata"))
+        or _mapping_dict(options.get("backend_metadata"))
+    )
+    event_backend_id = (
+        _clean_text(backend_ref.get("backend_id"))
+        or _clean_text(options.get("backend_id"))
+        or _clean_text(outcome.get("backend_id"))
+    )
+    event_display_name = (
+        _clean_text(backend_ref.get("display_name"))
+        or _clean_text(options.get("backend_display_name"))
+    )
+    event_adapter_kind = (
+        _clean_text(backend_ref.get("adapter_kind"))
+        or _clean_text(options.get("backend_adapter_kind"))
+    )
+    event_model_id = (
+        _clean_text(backend_ref.get("model_id"))
+        or _clean_text(options.get("model_id"))
+        or _clean_text(session.get("selected_model_id"))
+        or _clean_text(outcome.get("model_id"))
+    )
+    event_compatibility_status = (
+        _clean_text(event_compatibility.get("status"))
+        or _clean_text(backend_ref.get("compatibility_status"))
+        or _clean_text(options.get("backend_compatibility_status"))
+    )
+    event_metadata_complete = (
+        all(
+            value is not None
+            for value in (
+                event_backend_id,
+                event_display_name,
+                event_adapter_kind,
+                event_model_id,
+                event_compatibility_status,
+            )
+        )
+        and bool(event_capabilities)
+        and bool(event_limits)
+        and bool(event_metadata)
+        and bool(event_compatibility)
+    )
+    artifact_payload: dict[str, Any] = {}
+    if _clean_text(artifact_ref.get("artifact_kind")) == "agent_run" and not event_metadata_complete:
+        artifact_payload = _read_json_object(_path_from_text(artifact_ref.get("artifact_path")))
+    run_backend = _mapping_dict(artifact_payload.get("backend"))
+    run_compatibility = _mapping_dict(artifact_payload.get("compatibility"))
+    compatibility_payload = run_compatibility or event_compatibility
+    compatibility_status = (
+        _clean_text(run_compatibility.get("status"))
+        or event_compatibility_status
+    )
+    capabilities = (
+        run_backend.get("capabilities")
+        if isinstance(run_backend.get("capabilities"), Mapping)
+        else event_capabilities
+    )
+    limits = _mapping_dict(run_backend.get("limits")) or event_limits
+    metadata_payload = _mapping_dict(run_backend.get("metadata")) or event_metadata
     metadata = {
         "backend_id": (
             _clean_text(run_backend.get("backend_id"))
-            or _clean_text(backend_ref.get("backend_id"))
-            or _clean_text(options.get("backend_id"))
-            or _clean_text(outcome.get("backend_id"))
+            or event_backend_id
         ),
         "display_name": (
             _clean_text(run_backend.get("display_name"))
-            or _clean_text(options.get("backend_display_name"))
+            or event_display_name
         ),
         "adapter_kind": (
             _clean_text(run_backend.get("adapter_kind"))
-            or _clean_text(backend_ref.get("adapter_kind"))
-            or _clean_text(options.get("backend_adapter_kind"))
+            or event_adapter_kind
         ),
         "model_id": (
             _clean_text(run_backend.get("model_id"))
-            or _clean_text(backend_ref.get("model_id"))
-            or _clean_text(options.get("model_id"))
-            or _clean_text(session.get("selected_model_id"))
-            or _clean_text(outcome.get("model_id"))
+            or event_model_id
         ),
         "compatibility_status": compatibility_status,
         "compatibility": {
             key: copy.deepcopy(value)
-            for key, value in run_compatibility.items()
+            for key, value in compatibility_payload.items()
             if key
             in {
                 "schema_name",
@@ -405,15 +480,42 @@ def _backend_metadata_from_event(event: Mapping[str, Any] | None) -> dict[str, A
             }
         },
         "capabilities": copy.deepcopy(dict(capabilities)),
-        "limits": copy.deepcopy(_mapping_dict(run_backend.get("limits"))),
-        "metadata": copy.deepcopy(_mapping_dict(run_backend.get("metadata"))),
+        "limits": copy.deepcopy(limits),
+        "metadata": copy.deepcopy(metadata_payload),
         "metadata_source_artifact_path": (
             _clean_text(artifact_ref.get("artifact_path"))
             if run_backend
             else None
         ),
     }
+    if metadata_cache is not None and cache_key is not None:
+        metadata_cache[cache_key] = copy.deepcopy(metadata)
     return metadata
+
+
+def _backend_metadata_value_present(value: Any) -> bool:
+    if isinstance(value, str):
+        return _clean_text(value) is not None
+    if isinstance(value, Mapping):
+        return bool(value)
+    if isinstance(value, (list, tuple, set)):
+        return bool(value)
+    return value is not None
+
+
+def _merge_backend_metadata(
+    existing_metadata: Mapping[str, Any] | None,
+    derived_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    existing = _mapping_dict(existing_metadata)
+    derived = _mapping_dict(derived_metadata)
+    if not existing:
+        return copy.deepcopy(derived)
+    merged = copy.deepcopy(existing)
+    for key, value in derived.items():
+        if _backend_metadata_value_present(value) or key not in merged:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def _validate_evaluation_signal(signal: Mapping[str, Any], *, path: Path | None = None) -> dict[str, Any]:
@@ -494,6 +596,7 @@ def _comparison_candidate_record(
     event_id: str,
     *,
     events_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    backend_metadata_cache: BackendMetadataCache | None = None,
 ) -> dict[str, Any]:
     event = (events_by_id or {}).get(event_id)
     return {
@@ -502,7 +605,10 @@ def _comparison_candidate_record(
             event,
             source_event_id=event_id,
         ),
-        "backend_metadata": _backend_metadata_from_event(event),
+        "backend_metadata": _backend_metadata_from_event(
+            event,
+            metadata_cache=backend_metadata_cache,
+        ),
     }
 
 
@@ -536,6 +642,7 @@ def build_evaluation_comparison(
     if normalized_outcome == "winner_selected" and winner is None:
         raise ValueError("Evaluation comparison winner_selected outcome requires winner_event_id.")
 
+    backend_metadata_cache: BackendMetadataCache = {}
     return {
         "schema_name": EVALUATION_COMPARISON_SCHEMA_NAME,
         "schema_version": EVALUATION_COMPARISON_SCHEMA_VERSION,
@@ -548,7 +655,11 @@ def build_evaluation_comparison(
         "winner_event_id": winner,
         "candidate_count": len(candidates),
         "candidates": [
-            _comparison_candidate_record(event_id, events_by_id=events_by_id)
+            _comparison_candidate_record(
+                event_id,
+                events_by_id=events_by_id,
+                backend_metadata_cache=backend_metadata_cache,
+            )
             for event_id in candidates
         ],
         "criteria": _string_list(list(criteria or [])),
@@ -881,7 +992,12 @@ def _enrich_explicit_signal(signal: Mapping[str, Any], events_by_id: Mapping[str
     return enriched
 
 
-def _enrich_comparison(comparison: Mapping[str, Any], events_by_id: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+def _enrich_comparison(
+    comparison: Mapping[str, Any],
+    events_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    backend_metadata_cache: BackendMetadataCache | None = None,
+) -> dict[str, Any]:
     enriched = copy.deepcopy(dict(comparison))
     candidates: list[dict[str, Any]] = []
     for item in enriched.get("candidates") or []:
@@ -893,7 +1009,14 @@ def _enrich_comparison(comparison: Mapping[str, Any], events_by_id: Mapping[str,
         candidate = dict(item)
         event = events_by_id.get(event_id)
         candidate["source"] = _event_source_record(event, source_event_id=event_id)
-        candidate["backend_metadata"] = _backend_metadata_from_event(event)
+        derived_backend_metadata = _backend_metadata_from_event(
+            event,
+            metadata_cache=backend_metadata_cache,
+        )
+        candidate["backend_metadata"] = _merge_backend_metadata(
+            _mapping_dict(item.get("backend_metadata")),
+            derived_backend_metadata,
+        )
         candidates.append(candidate)
     enriched["candidates"] = candidates
     enriched["candidate_count"] = len(candidates)
@@ -1685,8 +1808,13 @@ def build_evaluation_snapshot(
         _enrich_explicit_signal(signal, events_by_id)
         for signal in read_evaluation_signals(resolved_signal_log_path)
     ]
+    backend_metadata_cache: BackendMetadataCache = {}
     comparisons = [
-        _enrich_comparison(comparison, events_by_id)
+        _enrich_comparison(
+            comparison,
+            events_by_id,
+            backend_metadata_cache=backend_metadata_cache,
+        )
         for comparison in read_evaluation_comparisons(resolved_comparison_log_path)
     ]
     comparison_summaries = sorted(
@@ -2343,8 +2471,12 @@ def _learning_review_queue_source_event_record(event: Mapping[str, Any], *, even
     return record
 
 
-def _learning_backend_metadata(event: Mapping[str, Any]) -> dict[str, Any]:
-    return _backend_metadata_from_event(event)
+def _learning_backend_metadata(
+    event: Mapping[str, Any],
+    *,
+    backend_metadata_cache: BackendMetadataCache | None = None,
+) -> dict[str, Any]:
+    return _backend_metadata_from_event(event, metadata_cache=backend_metadata_cache)
 
 
 def _learning_supervised_example(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -2868,6 +3000,7 @@ def _learning_review_queue_item(
     source_contract: Mapping[str, Any] | None = None,
     comparison_traces: Iterable[Mapping[str, Any]] | None = None,
     source_index: int,
+    backend_metadata_cache: BackendMetadataCache | None = None,
 ) -> dict[str, Any]:
     event_id = _clean_text(candidate.get("event_id"))
     exclusions = _string_list(list(excluded_by))
@@ -2938,7 +3071,14 @@ def _learning_review_queue_item(
         ),
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(policy_confirmation)),
         "event_contract": copy.deepcopy(_mapping_dict(source_contract)),
-        "backend_metadata": _learning_backend_metadata(event) if event is not None else {},
+        "backend_metadata": (
+            _learning_backend_metadata(
+                event,
+                backend_metadata_cache=backend_metadata_cache,
+            )
+            if event is not None
+            else {}
+        ),
         "comparison_evidence": _learning_comparison_evidence_summary(comparison_trace_items),
         "source_event": source_event,
         "curation": {
@@ -3249,7 +3389,7 @@ def _build_supervised_example_candidate(
             "signals": list(signals),
             "comparisons": list(comparisons),
         },
-        "backend_metadata": _learning_backend_metadata(event),
+        "backend_metadata": queue_summary["backend_metadata"],
         "review_queue": queue_summary,
         "event_contract": queue_summary["event_contract"],
         "source_paths": {
@@ -3307,8 +3447,13 @@ def build_learning_dataset_preview(
         if comparisons is not None
         else _read_comparisons_from_snapshot(snapshot)
     )
+    backend_metadata_cache: BackendMetadataCache = {}
     resolved_comparisons = [
-        _enrich_comparison(comparison, resolved_events_by_id)
+        _enrich_comparison(
+            comparison,
+            resolved_events_by_id,
+            backend_metadata_cache=backend_metadata_cache,
+        )
         for comparison in raw_resolved_comparisons
     ]
 
@@ -3392,6 +3537,7 @@ def build_learning_dataset_preview(
             source_contract=source_contract,
             comparison_traces=comparison_traces,
             source_index=source_index,
+            backend_metadata_cache=backend_metadata_cache,
         )
         review_queue.append(queue_item)
         if exclusions:
@@ -4013,8 +4159,13 @@ def build_human_selected_candidate_list(
         if comparisons is not None
         else []
     )
+    backend_metadata_cache: BackendMetadataCache = {}
     resolved_comparisons = [
-        _enrich_comparison(comparison, resolved_events_by_id)
+        _enrich_comparison(
+            comparison,
+            resolved_events_by_id,
+            backend_metadata_cache=backend_metadata_cache,
+        )
         for comparison in raw_resolved_comparisons
     ]
     selected_candidates = [
