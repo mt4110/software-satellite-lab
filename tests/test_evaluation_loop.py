@@ -448,6 +448,8 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(learning_preview["counts"]["review_queue_count"], 2)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["ready"], 1)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["blocked"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_lifecycle_states"]["queued"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_lifecycle_states"]["failed"], 1)
         self.assertEqual(
             learning_preview["counts"]["review_queue_next_actions"]["confirm_export_policy"],
             1,
@@ -468,6 +470,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
         self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
         self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_unconfirmed")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["lifecycle_state"], "queued")
         self.assertTrue(candidate["review_queue"]["eligible_for_supervised_candidate"])
         self.assertEqual(candidate["review_queue"]["excluded_by"], [])
         self.assertFalse(candidate["policy"]["raw_log_export_allowed"])
@@ -481,6 +484,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("comparison_log_path", candidate["source_paths"])
         self.assertEqual(first_queue_item["event_id"], fail_event_id)
         self.assertEqual(first_queue_item["queue_priority"]["bucket"], "blocked_first")
+        self.assertEqual(first_queue_item["lifecycle_summary"]["lifecycle_state"], "failed")
         self.assertNotIn("output_excerpt", first_queue_item["source_event"])
         self.assertEqual(excluded_by_event[fail_event_id]["queue_state"], "blocked")
         self.assertFalse(excluded_by_event[fail_event_id]["eligible_for_supervised_candidate"])
@@ -490,6 +494,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("- accepted patch keeps the loop green", report)
         self.assertNotIn("- accepted patch\nkeeps the loop green", report)
         self.assertIn("Learning review queue:", report)
+        self.assertIn("Lifecycle states: queued=1; failed=1", report)
         self.assertIn("Queue next actions: confirm_export_policy=1", report)
         self.assertIn("Queue blocked reasons:", report)
         self.assertIn("test_fail=1", report)
@@ -566,6 +571,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("export_policy_confirmed", signal_kinds)
         self.assertEqual(candidate["review_queue"]["next_action"], "review_downstream_export_policy")
         self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_confirmed")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["lifecycle_state"], "completed")
         self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["policy_state"], "confirmed")
         self.assertTrue(candidate["review_queue"]["export_policy_confirmation"]["confirmed"])
         self.assertTrue(candidate["policy"]["export_policy_confirmed"])
@@ -787,7 +793,10 @@ class EvaluationLoopTests(unittest.TestCase):
                     "queue_state": "needs_review",
                     "next_action": "record_acceptance_or_review_resolution",
                     "blocked_reasons": [],
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "backend_metadata": {"backend_id": "backend-a", "model_id": "model-a"},
                     "comparison_evidence": {"roles": ["candidate"]},
                     "eligible_for_supervised_candidate": False,
@@ -805,7 +814,10 @@ class EvaluationLoopTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "review_downstream_export_policy",
                     "blocked_reasons": [],
-                    "lifecycle_summary": {"policy_state": "confirmed"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "completed",
+                        "policy_state": "confirmed",
+                    },
                     "backend_metadata": {"backend_id": "backend-b", "model_id": "model-b"},
                     "comparison_evidence": {"roles": ["winner"]},
                     "eligible_for_supervised_candidate": True,
@@ -824,11 +836,13 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(diff["counts"]["changed_candidate_count"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["queue_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["next_action"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["lifecycle_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["policy_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["comparison_role"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["backend_id"], 1)
         self.assertEqual(change["event_id"], "candidate-a")
         self.assertIn("queue_state", change["changed_fields"])
+        self.assertIn("lifecycle_state", change["changed_fields"])
         self.assertEqual(change["before"]["comparison_role"], "candidate")
         self.assertEqual(change["after"]["comparison_role"], "winner")
         self.assertEqual(change["before"]["backend_id"], "backend-a")
@@ -1672,7 +1686,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "outcome": {
                     "status": "ok",
                     "quality_status": "pass",
-                    "execution_status": "ok",
+                    "execution_status": "running",
                 },
                 "content": {
                     "prompt": "Keep the queue typed.",
@@ -1835,6 +1849,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(queue_item["next_action"], "restore_source_artifact")
         self.assertEqual(queue_item["blocked_reason"], "missing_source_artifact")
         self.assertIn("missing_source_artifact", excluded["excluded_by"])
+        self.assertEqual(queue_item["lifecycle_summary"]["lifecycle_state"], "blocked")
         self.assertEqual(queue_item["lifecycle_summary"]["source_state"], "missing_source")
         self.assertEqual(queue_item["lifecycle_summary"]["test_state"], "passed")
         self.assertEqual(queue_item["lifecycle_summary"]["selection_state"], "selected")
@@ -2113,6 +2128,10 @@ class EvaluationLoopTests(unittest.TestCase):
 
         self.assertEqual(preview["supervised_example_candidates"], [])
         self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "rejected")
+        self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["lifecycle_state"],
+            "blocked",
+        )
         self.assertEqual(
             preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
             "rejected",

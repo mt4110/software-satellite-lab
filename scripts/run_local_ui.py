@@ -46,6 +46,7 @@ from doctor import assets_summary, probe_optional_modules, probe_torch, probe_tr
 from evaluation_loop import (
     CURATION_EXPORT_DECISIONS,
     CURATION_STATES,
+    LEARNING_LIFECYCLE_STATES,
     format_curation_export_preview_report,
     format_evaluation_snapshot_report,
     human_selected_candidates_latest_path,
@@ -2630,6 +2631,13 @@ def _ui_string_list(value: Any) -> list[str]:
     return [cleaned for item in value if (cleaned := _ui_clean_text(item)) is not None]
 
 
+def _ui_lifecycle_state(value: Any, *, default: str = "unknown") -> str:
+    state = _ui_clean_text(value)
+    if state in LEARNING_LIFECYCLE_STATES:
+        return state
+    return default
+
+
 def _read_json_mapping(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2696,6 +2704,27 @@ def _learning_candidate_policy_state(item: Mapping[str, Any], queue_summary: Map
         return "confirmed"
     if _ui_clean_text(queue_summary.get("queue_state")) == "ready":
         return "pending_confirmation"
+    return "unknown"
+
+
+def _learning_candidate_lifecycle_state(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    for source in (
+        _ui_mapping(queue_summary.get("lifecycle_summary")),
+        _ui_mapping(item.get("lifecycle_summary")),
+        queue_summary,
+        item,
+    ):
+        state = _ui_clean_text(source.get("lifecycle_state"))
+        if state is not None:
+            return _ui_lifecycle_state(state)
+    queue_state = _ui_clean_text(queue_summary.get("queue_state")) or _ui_clean_text(item.get("queue_state"))
+    policy_state = _learning_candidate_policy_state(item, queue_summary)
+    if queue_state == "ready" and policy_state == "confirmed":
+        return "completed"
+    if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
+        return "blocked"
+    if queue_state in {"ready", "needs_review"}:
+        return "queued"
     return "unknown"
 
 
@@ -2800,6 +2829,7 @@ def _learning_candidate_row(
         "artifact_key": artifact_key,
         "event_id": event_id,
         "queue_state": _learning_candidate_pick("queue_state", item, queue_summary, default="unknown"),
+        "lifecycle_state": _learning_candidate_lifecycle_state(item, queue_summary),
         "blocked_reason": blocked_reason,
         "next_action": _learning_candidate_pick("next_action", item, queue_summary, default="review_candidate"),
         "policy_state": _learning_candidate_policy_state(item, queue_summary),
@@ -2962,6 +2992,7 @@ def build_learning_candidate_review_snapshot(
         artifacts.append(artifact_record)
 
     row_state_counts = Counter(row["queue_state"] for row in rows)
+    row_lifecycle_state_counts = Counter(row["lifecycle_state"] for row in rows)
     row_next_action_counts = Counter(row["next_action"] for row in rows)
     row_blocked_reason_counts = Counter(
         row["blocked_reason"] for row in rows if row["blocked_reason"] != "n/a"
@@ -2987,6 +3018,7 @@ def build_learning_candidate_review_snapshot(
             for artifact in loaded_artifacts
         ),
         "queue_states": {key: _ui_int(value) for key, value in sorted(row_state_counts.items())},
+        "lifecycle_states": {key: _ui_int(value) for key, value in sorted(row_lifecycle_state_counts.items())},
         "next_actions": {key: _ui_int(value) for key, value in sorted(row_next_action_counts.items())},
         "blocked_reasons": {key: _ui_int(value) for key, value in sorted(row_blocked_reason_counts.items())},
     }
@@ -3005,6 +3037,15 @@ def build_learning_candidate_review_state(review: Mapping[str, Any] | None) -> s
     if not review:
         return "No learning candidate artifacts loaded yet."
     counts = _ui_mapping(review.get("counts"))
+    lifecycle_states = _ui_mapping(counts.get("lifecycle_states"))
+    lifecycle_text = ""
+    if lifecycle_states:
+        ordered_states = [state for state in LEARNING_LIFECYCLE_STATES if state in lifecycle_states]
+        ordered_states.extend(sorted(set(lifecycle_states) - set(ordered_states)))
+        lifecycle_text = "; lifecycle=" + ",".join(
+            f"{state}:{_ui_int(lifecycle_states.get(state))}"
+            for state in ordered_states
+        )
     return (
         f"latest artifacts loaded={_ui_int(counts.get('loaded_artifact_count'))}/"
         f"{_ui_int(counts.get('expected_artifact_count'))}; "
@@ -3014,6 +3055,7 @@ def build_learning_candidate_review_state(review: Mapping[str, Any] | None) -> s
         f"training-ready={_ui_int(counts.get('training_ready_artifact_count'))}; "
         f"jsonl-would-write={_ui_int(counts.get('jsonl_record_write_count'))}; "
         f"missing={_ui_int(counts.get('missing_artifact_count'))}"
+        f"{lifecycle_text}"
     )
 
 
@@ -3053,6 +3095,14 @@ def build_learning_candidate_review_report(review: Mapping[str, Any] | None) -> 
             "Queue states: "
             + "; ".join(f"{key}={_ui_int(value)}" for key, value in queue_states.items())
         )
+    lifecycle_states = _ui_mapping(counts.get("lifecycle_states"))
+    if lifecycle_states:
+        ordered_states = [state for state in LEARNING_LIFECYCLE_STATES if state in lifecycle_states]
+        ordered_states.extend(sorted(set(lifecycle_states) - set(ordered_states)))
+        lines.append(
+            "Lifecycle states: "
+            + "; ".join(f"{key}={_ui_int(lifecycle_states.get(key))}" for key in ordered_states)
+        )
     next_actions = _ui_mapping(counts.get("next_actions"))
     if next_actions:
         lines.append(
@@ -3091,7 +3141,7 @@ def build_learning_candidate_review_report(review: Mapping[str, Any] | None) -> 
         for row in rows:
             lines.append(
                 f"- {row['artifact']} {row['event_id']} "
-                f"state={row['queue_state']} blocked={row['blocked_reason']} "
+                f"state={row['queue_state']} lifecycle={row['lifecycle_state']} blocked={row['blocked_reason']} "
                 f"next={row['next_action']} policy={row['policy_state']} "
                 f"comparison={row['comparison_role']} backend={row['backend_id']} "
                 f"source={row['source_path']}"
@@ -5356,13 +5406,14 @@ class LocalUiApp:
         self.learning_candidate_review_tree = self._build_treeview(
             frame,
             row=9,
-            columns=("artifact", "event", "state", "blocked", "next", "policy", "role", "backend", "source"),
-            headings=("Artifact", "Event", "State", "Blocked", "Next", "Policy", "Role", "Backend", "Source Path"),
+            columns=("artifact", "event", "state", "lifecycle", "blocked", "next", "policy", "role", "backend", "source"),
+            headings=("Artifact", "Event", "State", "Lifecycle", "Blocked", "Next", "Policy", "Role", "Backend", "Source Path"),
             height=5,
         )
         self.learning_candidate_review_tree.column("artifact", width=130, stretch=False)
         self.learning_candidate_review_tree.column("event", width=180, stretch=False)
         self.learning_candidate_review_tree.column("state", width=120, stretch=False)
+        self.learning_candidate_review_tree.column("lifecycle", width=110, stretch=False)
         self.learning_candidate_review_tree.column("blocked", width=160, stretch=False)
         self.learning_candidate_review_tree.column("next", width=210, stretch=False)
         self.learning_candidate_review_tree.column("policy", width=150, stretch=False)
@@ -6889,6 +6940,7 @@ class LocalUiApp:
                     row["artifact"],
                     summarize_text_preview(row["event_id"], limit=48),
                     row["queue_state"],
+                    summarize_text_preview(row["lifecycle_state"], limit=32),
                     summarize_text_preview(row["blocked_reason"], limit=46),
                     summarize_text_preview(row["next_action"], limit=60),
                     summarize_text_preview(row["policy_state"], limit=44),

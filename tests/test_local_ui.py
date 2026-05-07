@@ -804,7 +804,10 @@ class LocalUiControllerTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "confirm_export_policy",
                     "blocked_reason": None,
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "comparison_evidence": {"roles": ["winner"]},
                     "backend_metadata": {"backend_id": "mock-careful-local"},
                     "source_paths": {"source_artifact_path": str(source_artifact_path)},
@@ -867,7 +870,10 @@ class LocalUiControllerTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "confirm_export_policy",
                     "blocked_reasons": ["export_policy_not_confirmed"],
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "comparison_evidence": {"roles": ["winner"]},
                     "backend_metadata": {"backend_id": "mock-careful-local"},
                     "source_paths": {"source_artifact_path": str(source_artifact_path)},
@@ -901,6 +907,7 @@ class LocalUiControllerTests(unittest.TestCase):
                     "before": {
                         "event_id": "event-ready",
                         "queue_state": "ready",
+                        "lifecycle_state": "queued",
                         "next_action": "confirm_export_policy",
                         "policy_state": "pending_confirmation",
                         "comparison_role": "winner",
@@ -909,6 +916,7 @@ class LocalUiControllerTests(unittest.TestCase):
                     "after": {
                         "event_id": "event-ready",
                         "queue_state": "ready",
+                        "lifecycle_state": "queued",
                         "next_action": "confirm_export_policy",
                         "policy_state": "pending_confirmation",
                         "comparison_role": "winner",
@@ -934,11 +942,15 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertEqual(review["counts"]["training_ready_artifact_count"], 0)
         self.assertEqual(review["counts"]["jsonl_record_write_count"], 0)
         self.assertEqual(review["counts"]["candidate_row_count"], 4)
+        self.assertEqual(review["counts"]["lifecycle_states"]["queued"], 4)
         self.assertIn("training-ready=0", build_learning_candidate_review_state(review))
         self.assertIn("jsonl-would-write=0", build_learning_candidate_review_state(review))
+        self.assertIn("lifecycle=queued:4", build_learning_candidate_review_state(review))
         self.assertIn("Learning candidate review: read-only", report)
+        self.assertIn("Lifecycle states: queued=4", report)
         self.assertIn("JSONL records that would be written: 0", report)
         self.assertEqual(rows[0]["queue_state"], "ready")
+        self.assertEqual(rows[0]["lifecycle_state"], "queued")
         self.assertEqual(rows[0]["policy_state"], "pending_confirmation")
         self.assertEqual(rows[0]["comparison_role"], "winner")
         self.assertEqual(rows[0]["backend_id"], "mock-careful-local")
