@@ -68,6 +68,9 @@ from run_local_ui import (  # noqa: E402
     build_evaluation_repair_text,
     build_evaluation_snapshot_state,
     build_evaluation_test_text,
+    build_learning_candidate_review_report,
+    build_learning_candidate_review_rows,
+    build_learning_candidate_review_state,
     build_thinking_debug_report,
 )
 from workspace_state import WorkspaceSessionStore, session_manifest_path  # noqa: E402
@@ -768,6 +771,224 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertIn("ready=1", build_evaluation_curation_text(resolved["snapshot"]))
         self.assertIn("ready-for-policy=1", build_evaluation_adoption_text(resolved["curation_preview"]))
         self.assertEqual(resolved["curation_preview"]["filters"]["states"], ["ready"])
+
+    def test_learning_candidate_review_reads_latest_artifacts_only(self) -> None:
+        controller, _store, root = self.make_controller()
+        learning_root = root / "artifacts" / "evaluation" / "local-default" / "learning"
+        learning_root.mkdir(parents=True)
+        source_artifact_path = root / "artifacts" / "agent_lane" / "local-default" / "run.json"
+        preview_path = learning_root / "preview-latest.json"
+        human_selected_path = learning_root / "human-selected-latest.json"
+        dry_run_path = learning_root / "jsonl-export-dry-run-latest.json"
+        diff_path = learning_root / "candidate-diff-latest.json"
+
+        preview = {
+            "schema_name": "software-satellite-learning-dataset-preview",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "counts": {
+                "source_candidate_count": 1,
+                "review_queue_count": 1,
+                "eligible_candidate_count": 1,
+                "previewed_candidate_count": 1,
+                "excluded_candidate_count": 0,
+            },
+            "paths": {"learning_preview_latest_path": str(preview_path)},
+            "review_queue": [
+                {
+                    "event_id": "event-ready",
+                    "label": "Ready candidate",
+                    "queue_state": "ready",
+                    "next_action": "confirm_export_policy",
+                    "blocked_reason": None,
+                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "comparison_evidence": {"roles": ["winner"]},
+                    "backend_metadata": {"backend_id": "mock-careful-local"},
+                    "source_paths": {"source_artifact_path": str(source_artifact_path)},
+                }
+            ],
+        }
+        human_selected = {
+            "schema_name": "software-satellite-human-selected-candidate-list",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "source_learning_preview_path": str(preview_path),
+            "counts": {
+                "requested_candidate_count": 1,
+                "matched_candidate_count": 1,
+                "selected_candidate_count": 1,
+            },
+            "selected_candidates": [
+                {
+                    "event_id": "event-ready",
+                    "queue_state": "ready",
+                    "next_action": "confirm_export_policy",
+                    "blocked_reason": None,
+                    "export_policy_confirmation": {"confirmed": "false"},
+                    "comparison_evidence": {"roles": ["winner"]},
+                    "backend_metadata": {"backend_id": "mock-careful-local"},
+                    "source_paths": {
+                        "source_learning_preview_path": str(preview_path),
+                        "source_artifact_path": str(source_artifact_path),
+                    },
+                    "policy": {"export_policy_confirmed": "false"},
+                }
+            ],
+        }
+        dry_run = {
+            "schema_name": "software-satellite-jsonl-training-export-dry-run",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": "false",
+            "human_gate_required": "true",
+            "not_trainable": True,
+            "source_learning_preview_path": str(preview_path),
+            "counts": {
+                "inspected_candidate_count": 1,
+                "future_jsonl_candidate_if_separately_approved_count": 0,
+                "would_write_jsonl_record_count": "0",
+            },
+            "export_policy": {
+                "jsonl_file_written": "false",
+                "jsonl_training_export_allowed": False,
+                "training_job_allowed": False,
+            },
+            "candidates": [
+                {
+                    "event_id": "event-ready",
+                    "dry_run_status": "export_policy_confirmation_required",
+                    "queue_state": "ready",
+                    "next_action": "confirm_export_policy",
+                    "blocked_reasons": ["export_policy_not_confirmed"],
+                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "comparison_evidence": {"roles": ["winner"]},
+                    "backend_metadata": {"backend_id": "mock-careful-local"},
+                    "source_paths": {"source_artifact_path": str(source_artifact_path)},
+                    "policy": {"export_policy_confirmed": False},
+                }
+            ],
+        }
+        diff = {
+            "schema_name": "software-satellite-learning-candidate-diff-summary",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "counts": {
+                "base_candidate_count": 1,
+                "target_candidate_count": 1,
+                "changed_candidate_count": 1,
+                "field_change_counts": {"policy_state": 1},
+            },
+            "paths": {
+                "candidate_diff_latest_path": str(diff_path),
+                "base_artifact_path": str(preview_path),
+                "target_artifact_path": str(human_selected_path),
+            },
+            "changes": [
+                {
+                    "event_id": "event-ready",
+                    "change_type": "changed",
+                    "changed_fields": ["policy_state"],
+                    "before": {
+                        "event_id": "event-ready",
+                        "queue_state": "ready",
+                        "next_action": "confirm_export_policy",
+                        "policy_state": "pending_confirmation",
+                        "comparison_role": "winner",
+                        "backend_id": "mock-careful-local",
+                    },
+                    "after": {
+                        "event_id": "event-ready",
+                        "queue_state": "ready",
+                        "next_action": "confirm_export_policy",
+                        "policy_state": "pending_confirmation",
+                        "comparison_role": "winner",
+                        "backend_id": "mock-careful-local",
+                    },
+                }
+            ],
+        }
+        for path, payload in (
+            (preview_path, preview),
+            (human_selected_path, human_selected),
+            (dry_run_path, dry_run),
+            (diff_path, diff),
+        ):
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        review = controller.build_learning_candidate_review()
+        rows = build_learning_candidate_review_rows(review)
+        report = build_learning_candidate_review_report(review)
+
+        self.assertEqual(review["mode"], "read_only_latest_artifacts")
+        self.assertEqual(review["counts"]["loaded_artifact_count"], 4)
+        self.assertEqual(review["counts"]["training_ready_artifact_count"], 0)
+        self.assertEqual(review["counts"]["jsonl_record_write_count"], 0)
+        self.assertEqual(review["counts"]["candidate_row_count"], 4)
+        self.assertIn("training-ready=0", build_learning_candidate_review_state(review))
+        self.assertIn("jsonl-would-write=0", build_learning_candidate_review_state(review))
+        self.assertIn("Learning candidate review: read-only", report)
+        self.assertIn("JSONL records that would be written: 0", report)
+        self.assertEqual(rows[0]["queue_state"], "ready")
+        self.assertEqual(rows[0]["policy_state"], "pending_confirmation")
+        self.assertEqual(rows[0]["comparison_role"], "winner")
+        self.assertEqual(rows[0]["backend_id"], "mock-careful-local")
+        self.assertEqual(rows[0]["source_path"], str(source_artifact_path))
+        self.assertEqual(rows[1]["policy_state"], "pending_confirmation")
+
+    def test_learning_candidate_review_reports_missing_latest_artifacts(self) -> None:
+        controller, _store, _root = self.make_controller()
+
+        review = controller.build_learning_candidate_review()
+
+        self.assertEqual(review["counts"]["loaded_artifact_count"], 0)
+        self.assertEqual(review["counts"]["missing_artifact_count"], 4)
+        self.assertEqual(build_learning_candidate_review_rows(review), [])
+        self.assertIn("missing=4", build_learning_candidate_review_state(review))
+        self.assertIn("source=", build_learning_candidate_review_report(review))
+
+    def test_learning_candidate_review_flags_unsafe_policy_strings(self) -> None:
+        controller, _store, root = self.make_controller()
+        learning_root = root / "artifacts" / "evaluation" / "local-default" / "learning"
+        learning_root.mkdir(parents=True)
+        dry_run_path = learning_root / "jsonl-export-dry-run-latest.json"
+        dry_run_path.write_text(
+            json.dumps(
+                {
+                    "schema_name": "software-satellite-jsonl-training-export-dry-run",
+                    "schema_version": 1,
+                    "workspace_id": "local-default",
+                    "export_mode": "dry_run",
+                    "training_export_ready": "true",
+                    "human_gate_required": "required",
+                    "counts": {"would_write_jsonl_record_count": "2"},
+                    "export_policy": {"jsonl_file_written": "unknown"},
+                    "candidates": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        review = controller.build_learning_candidate_review()
+
+        self.assertEqual(review["counts"]["loaded_artifact_count"], 1)
+        self.assertEqual(review["counts"]["training_ready_artifact_count"], 1)
+        self.assertEqual(review["counts"]["jsonl_record_write_count"], 2)
+        self.assertIn("JSONL dry-run reports export_mode=dry_run", review["policy_warnings"])
+        self.assertIn("JSONL dry-run reports human_gate_required=required (unparseable)", review["policy_warnings"])
+        self.assertIn("JSONL dry-run reports jsonl_file_written=unknown (unparseable)", review["policy_warnings"])
+        self.assertIn("JSONL dry-run reports training_export_ready=true", review["policy_warnings"])
 
     def test_build_recall_bundle_prefers_stored_dataset_bundle(self) -> None:
         controller, store, _root = self.make_controller()
