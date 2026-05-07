@@ -26,6 +26,7 @@ from evaluation_loop import (  # noqa: E402
     build_evaluation_signal,
     build_human_selected_candidate_list,
     build_jsonl_training_export_dry_run,
+    build_learning_candidate_diff_summary,
     evaluation_comparison_log_path,
     evaluation_signal_log_path,
     build_curation_export_preview,
@@ -34,11 +35,13 @@ from evaluation_loop import (  # noqa: E402
     format_evaluation_snapshot_report,
     format_human_selected_candidate_list_report,
     format_jsonl_training_export_dry_run_report,
+    format_learning_candidate_diff_summary_report,
     format_learning_dataset_preview_report,
     record_curation_export_preview,
     record_export_policy_confirmation_signal,
     record_human_selected_candidate_list,
     record_jsonl_training_export_dry_run,
+    record_learning_candidate_diff_summary,
     record_review_resolution_signal,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
@@ -697,6 +700,139 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertFalse(selected["eligible_for_supervised_candidate"])
         self.assertIn("missing_learning_preview_candidate", selected["excluded_by"])
         self.assertFalse(preview["training_export_ready"])
+
+    def test_candidate_diff_summary_compares_learning_preview_and_human_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            pass_event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            fail_event_id = "local-default:capability-matrix:matrix:row-2:vision"
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                build_evaluation_signal(
+                    signal_kind="acceptance",
+                    source_event_id=pass_event_id,
+                    rationale="Accepted before candidate diff inspection.",
+                ),
+                workspace_id="local-default",
+            )
+            append_evaluation_signal(
+                evaluation_signal_log_path(root=root),
+                build_evaluation_signal(
+                    signal_kind="rejection",
+                    source_event_id=fail_event_id,
+                    rationale="Rejected candidates should remain visible as removed from the shortlist.",
+                ),
+                workspace_id="local-default",
+            )
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            curation_preview, _curation_latest_path, _curation_run_path = record_curation_export_preview(
+                root=root,
+                snapshot=snapshot,
+            )
+            learning_preview, _learning_latest_path, _learning_run_path = record_learning_dataset_preview(
+                root=root,
+                snapshot=snapshot,
+                curation_preview=curation_preview,
+            )
+            selection, _selection_latest_path, _selection_run_path = record_human_selected_candidate_list(
+                root=root,
+                learning_preview=learning_preview,
+                selected_event_ids=[pass_event_id],
+                rationale="Select one candidate for diff inspection.",
+                origin="test",
+            )
+            diff, diff_latest_path, diff_run_path = record_learning_candidate_diff_summary(
+                root=root,
+                base_artifact=learning_preview,
+                target_artifact=selection,
+                base_label="learning_preview",
+                target_label="human_selected_candidate_list",
+            )
+            report = format_learning_candidate_diff_summary_report(diff)
+            diff_latest_exists = diff_latest_path.exists()
+            diff_run_exists = diff_run_path.exists()
+
+        self.assertTrue(diff_latest_exists)
+        self.assertTrue(diff_run_exists)
+        self.assertEqual(diff["schema_name"], "software-satellite-learning-candidate-diff-summary")
+        self.assertEqual(diff["export_mode"], "preview_only")
+        self.assertFalse(diff["training_export_ready"])
+        self.assertTrue(diff["human_gate_required"])
+        self.assertTrue(diff["inspection_policy"]["diff_does_not_promote_candidate"])
+        self.assertEqual(diff["counts"]["base_candidate_count"], 2)
+        self.assertEqual(diff["counts"]["target_candidate_count"], 1)
+        self.assertEqual(diff["counts"]["removed_candidate_count"], 1)
+        self.assertEqual(diff["counts"]["unchanged_candidate_count"], 1)
+        self.assertEqual(diff["base"]["counts"]["queue_states"]["blocked"], 1)
+        self.assertEqual(diff["base"]["counts"]["queue_states"]["ready"], 1)
+        self.assertEqual(sum(diff["target"]["counts"]["backend_ids"].values()), 1)
+        self.assertIn("Candidate diff summary: preview_only", report)
+        self.assertIn(str(diff_run_path), report)
+        self.assertIn("Removed: 1", report)
+        self.assertIn("Training export ready: no", report)
+
+    def test_candidate_diff_summary_tracks_preview_field_changes(self) -> None:
+        base_preview = {
+            "schema_name": "software-satellite-learning-dataset-preview",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "review_queue": [
+                {
+                    "event_id": "candidate-a",
+                    "label": "Candidate A",
+                    "queue_state": "needs_review",
+                    "next_action": "record_acceptance_or_review_resolution",
+                    "blocked_reasons": [],
+                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "backend_metadata": {"backend_id": "backend-a", "model_id": "model-a"},
+                    "comparison_evidence": {"roles": ["candidate"]},
+                    "eligible_for_supervised_candidate": False,
+                }
+            ],
+            "supervised_example_candidates": [],
+            "excluded_candidates": [],
+        }
+        target_preview = {
+            **base_preview,
+            "review_queue": [
+                {
+                    "event_id": "candidate-a",
+                    "label": "Candidate A",
+                    "queue_state": "ready",
+                    "next_action": "review_downstream_export_policy",
+                    "blocked_reasons": [],
+                    "lifecycle_summary": {"policy_state": "confirmed"},
+                    "backend_metadata": {"backend_id": "backend-b", "model_id": "model-b"},
+                    "comparison_evidence": {"roles": ["winner"]},
+                    "eligible_for_supervised_candidate": True,
+                }
+            ],
+        }
+
+        diff = build_learning_candidate_diff_summary(
+            base_preview,
+            target_preview,
+            base_label="previous_learning_preview",
+            target_label="learning_preview",
+        )
+        change = diff["changes"][0]
+
+        self.assertEqual(diff["counts"]["changed_candidate_count"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["queue_state"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["next_action"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["policy_state"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["comparison_role"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["backend_id"], 1)
+        self.assertEqual(change["event_id"], "candidate-a")
+        self.assertIn("queue_state", change["changed_fields"])
+        self.assertEqual(change["before"]["comparison_role"], "candidate")
+        self.assertEqual(change["after"]["comparison_role"], "winner")
+        self.assertEqual(change["before"]["backend_id"], "backend-a")
+        self.assertEqual(change["after"]["backend_id"], "backend-b")
 
     def test_jsonl_export_dry_run_from_human_selected_candidates_writes_manifest_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3548,7 +3684,9 @@ class EvaluationLoopTests(unittest.TestCase):
                 exit_code = evaluation_main()
             payload = json.loads(stdout.getvalue())
             selection = payload["human_selected_candidates"]
+            diff = payload["candidate_diff_summaries"][0]
             selection_latest_exists = Path(selection["paths"]["human_selected_latest_path"]).exists()
+            diff_run_exists = Path(diff["paths"]["candidate_diff_run_path"]).exists()
             source_learning_exists = Path(selection["source_learning_preview_path"]).exists()
             selected = selection["selected_candidates"][0]
 
@@ -3561,7 +3699,11 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(selection["selection"]["origin"], "cli")
         self.assertEqual(selection["selection"]["rationale"], "Select for M7.3 preview inspection.")
         self.assertTrue(selection_latest_exists)
+        self.assertTrue(diff_run_exists)
         self.assertTrue(source_learning_exists)
+        self.assertEqual(diff["target"]["artifact_kind"], "human_selected_candidate_list")
+        self.assertEqual(diff["counts"]["target_candidate_count"], 1)
+        self.assertFalse(diff["training_export_ready"])
         self.assertNotIn("supervised_example", selected)
         self.assertTrue(selected["evidence_summary"]["traceability"]["accepted"])
         self.assertTrue(selected["evidence_summary"]["traceability"]["test_pass"])
@@ -3605,12 +3747,16 @@ class EvaluationLoopTests(unittest.TestCase):
                 exit_code = evaluation_main()
             payload = json.loads(stdout.getvalue())
             dry_run = payload["jsonl_export_dry_run"]
+            diff = payload["candidate_diff_summaries"][-1]
             dry_run_path = Path(dry_run["paths"]["jsonl_export_dry_run_run_path"])
+            diff_path = Path(diff["paths"]["candidate_diff_run_path"])
             dry_run_path_exists = dry_run_path.exists()
+            diff_path_exists = diff_path.exists()
             candidate = dry_run["candidates"][0]
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(dry_run_path_exists)
+        self.assertTrue(diff_path_exists)
         self.assertEqual(dry_run_path.suffix, ".json")
         self.assertEqual(dry_run["source_mode"], "human_selected_candidate_list")
         self.assertFalse(dry_run["training_export_ready"])
@@ -3623,6 +3769,11 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["dry_run_status"], "future_jsonl_candidate_if_separately_approved")
         self.assertFalse(candidate["would_write_jsonl_record"])
         self.assertTrue(candidate["policy"]["export_policy_confirmed"])
+        self.assertEqual(diff["base"]["artifact_kind"], "human_selected_candidate_list")
+        self.assertEqual(diff["target"]["artifact_kind"], "jsonl_training_export_dry_run")
+        self.assertEqual(diff["counts"]["target_candidate_count"], 1)
+        self.assertFalse(diff["training_export_ready"])
+        self.assertFalse(diff["inspection_policy"]["jsonl_training_export_allowed"])
 
     def test_cli_rejects_selected_candidate_without_human_selected_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

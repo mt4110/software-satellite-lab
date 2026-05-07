@@ -440,6 +440,7 @@ Current baseline:
 - `export_policy_confirmed` records human export-policy confirmation as explicit file-first evidence without enabling trainable export
 - human-selected candidate lists are now explicit preview-only learning artifacts, so a human shortlist can be preserved without silently promoting candidates or copying supervised example text
 - JSONL training export dry-runs now write only preview-only manifest / validation reports, so likely future export targets can be inspected without producing `.jsonl`, trainable datasets, or training jobs
+- candidate diff summaries now compare learning preview / human-selected / JSONL dry-run candidate metadata as preview-only inspection artifacts, including queue state, blocked reason, next action, policy state, comparison role, and backend id changes
 - supervised candidates are still limited to test-passing work with accepted, review-resolved, or comparison-winner evidence
 - rejected, unresolved, noisy, failed, missing-source, and missing-text candidates stay out of supervised examples while preserving exclusion reasons for review
 

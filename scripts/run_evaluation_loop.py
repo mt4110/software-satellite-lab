@@ -24,7 +24,10 @@ from evaluation_loop import (
     format_evaluation_snapshot_report,
     format_human_selected_candidate_list_report,
     format_jsonl_training_export_dry_run_report,
+    format_learning_candidate_diff_summary_report,
     format_learning_dataset_preview_report,
+    learning_dataset_preview_latest_path,
+    record_learning_candidate_diff_summary,
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_human_selected_candidate_list,
@@ -54,6 +57,18 @@ def _events_by_id_and_index_summary(
         if isinstance(event, dict) and event.get("event_id")
     }
     return events_by_id, dict(summary)
+
+
+def _read_json_artifact(path_text: object) -> dict[str, object] | None:
+    if not isinstance(path_text, str) or not path_text.strip():
+        return None
+    path = Path(path_text).expanduser()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -211,8 +226,33 @@ def main() -> int:
     jsonl_export_dry_run: dict[str, object] | None = None
     jsonl_export_dry_run_latest_path: Path | None = None
     jsonl_export_dry_run_run_path: Path | None = None
+    candidate_diff_summaries: list[dict[str, object]] = []
     events_by_id: dict[str, dict[str, object]] | None = None
     index_summary: dict[str, object] | None = None
+    previous_learning_preview = (
+        _read_json_artifact(str(learning_dataset_preview_latest_path(workspace_id=args.workspace_id, root=root)))
+        if args.learning_preview
+        else None
+    )
+
+    def maybe_record_candidate_diff(
+        base_artifact: dict[str, object] | None,
+        target_artifact: dict[str, object] | None,
+        *,
+        base_label: str,
+        target_label: str,
+    ) -> None:
+        if base_artifact is None or target_artifact is None:
+            return
+        diff_summary, _diff_latest_path, _diff_run_path = record_learning_candidate_diff_summary(
+            root=root,
+            workspace_id=args.workspace_id,
+            base_artifact=base_artifact,
+            target_artifact=target_artifact,
+            base_label=base_label,
+            target_label=target_label,
+        )
+        candidate_diff_summaries.append(diff_summary)
 
     try:
         if args.record_signal and args.confirm_export_policy:
@@ -401,6 +441,44 @@ def main() -> int:
             )
         except ValueError as exc:
             parser.error(str(exc))
+    try:
+        if learning_preview is not None and previous_learning_preview is not None:
+            maybe_record_candidate_diff(
+                previous_learning_preview,
+                learning_preview,
+                base_label="previous_learning_preview",
+                target_label="learning_preview",
+            )
+        if human_selected_candidates is not None:
+            source_learning_preview = learning_preview or _read_json_artifact(
+                human_selected_candidates.get("source_learning_preview_path")
+            )
+            maybe_record_candidate_diff(
+                source_learning_preview,
+                human_selected_candidates,
+                base_label="learning_preview",
+                target_label="human_selected_candidate_list",
+            )
+        if jsonl_export_dry_run is not None:
+            if human_selected_candidates is not None:
+                maybe_record_candidate_diff(
+                    human_selected_candidates,
+                    jsonl_export_dry_run,
+                    base_label="human_selected_candidate_list",
+                    target_label="jsonl_training_export_dry_run",
+                )
+            else:
+                source_learning_preview = learning_preview or _read_json_artifact(
+                    jsonl_export_dry_run.get("source_learning_preview_path")
+                )
+                maybe_record_candidate_diff(
+                    source_learning_preview,
+                    jsonl_export_dry_run,
+                    base_label="learning_preview",
+                    target_label="jsonl_training_export_dry_run",
+                )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.format == "json":
         payload: dict[str, object] = {"snapshot": snapshot}
         if recorded_signal is not None:
@@ -415,6 +493,8 @@ def main() -> int:
             payload["human_selected_candidates"] = human_selected_candidates
         if jsonl_export_dry_run is not None:
             payload["jsonl_export_dry_run"] = jsonl_export_dry_run
+        if candidate_diff_summaries:
+            payload["candidate_diff_summaries"] = candidate_diff_summaries
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         blocks: list[str] = []
@@ -461,6 +541,8 @@ def main() -> int:
                 "JSONL export dry-run written: "
                 f"{jsonl_export_dry_run_run_path or jsonl_export_dry_run_latest_path or 'n/a'}"
             )
+        for candidate_diff_summary in candidate_diff_summaries:
+            blocks.append(format_learning_candidate_diff_summary_report(candidate_diff_summary))
         print("\n\n".join(blocks))
     return 0
 
