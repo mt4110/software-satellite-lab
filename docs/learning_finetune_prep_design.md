@@ -94,6 +94,29 @@ M7.4 では、JSONL training export の dry-run も preview-only artifact とし
 この artifact は preview-only で、trainable dataset ではない。
 `training_export_ready` は常に `false` で、`human_gate_required` は常に `true` です。
 
+M7.5 では、learning preview / human-selected candidate list /
+JSONL training export dry-run の候補差分も preview-only inspection artifact として残せる。
+
+保存先:
+
+- `artifacts/evaluation/<workspace>/learning/candidate-diff-latest.json`
+- `artifacts/evaluation/<workspace>/learning/runs/*-candidate-diff.json`
+
+これは候補メタデータの比較であり、supervised candidate の昇格条件を置き換えない。
+比較する field は小さく保つ。
+
+- candidate count
+- `queue_state`
+- `blocked_reason`
+- `next_action`
+- `policy_state`
+- `comparison_role`
+- `backend_id`
+
+candidate diff は、候補がどの artifact から消えたか、どの state / action / policy /
+comparison / backend 表示が変わったかを説明するための inspection report です。
+training export ready にはならず、JSONL も training job も作らない。
+
 ## 候補の採用条件
 
 supervised example candidate に進めるには、curation preview 上で次をすべて満たす必要がある。
@@ -512,6 +535,12 @@ JSONL training export dry-run を記録する場合:
 dry-run manifest / validation report を書くだけです。
 `.jsonl`、trainable dataset、外部 training job は作らない。
 
+candidate diff は、CLI が比較できる source artifact を同じ run で持っている場合に最小で追記される。
+たとえば human-selected candidate list を作る run では source learning preview との差分を、
+JSONL dry-run まで進めた run では human-selected candidate list または learning preview との差分を
+`candidate-diff-*.json` と CLI report に残す。
+learning preview を再生成する run では、既存の latest learning preview があれば前回 preview との差分も残せる。
+
 `--curation-state` や `--curation-reason` は source curation preview のフィルタとして使えるが、
 learning preview 側はさらに安全な採用条件をかける。
 たとえば `blocked` を明示しても、supervised example candidate には進めない。
@@ -525,6 +554,7 @@ M7 の report / Local UI は、派手な dashboard ではなく inspection queue
 - 除外理由の内訳
 - candidate ごとの source event、positive signal、comparison role、backend
 - backend comparison の winner / candidate / loser と compatibility status
+- learning preview / human-selected / dry-run の candidate diff
 - 次に必要な action
   - export policy confirmation
   - human selection
@@ -548,6 +578,7 @@ M7 の次に進むなら、次を小さく足す。
 - JSONL training export の dry-run
   - M7.4 で dry-run manifest / validation report として追加済み
 - candidate diff
+  - M7.5 で preview-only inspection artifact として追加済み
 - candidate review UI
 - typed lifecycle summary
   - queued / running / blocked / paused / completed / failed / cancelled

@@ -50,6 +50,8 @@ JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME = "software-satellite-jsonl-training-e
 JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_VERSION = 1
 JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_NAME = "software-satellite-jsonl-training-export-dry-run-item"
 JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_VERSION = 1
+LEARNING_CANDIDATE_DIFF_SUMMARY_SCHEMA_NAME = "software-satellite-learning-candidate-diff-summary"
+LEARNING_CANDIDATE_DIFF_SUMMARY_SCHEMA_VERSION = 1
 EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND = "export_policy_confirmed"
 HUMAN_SELECTED_SUPPLIED_TRAINING_TEXT_KEYS = {
     "completion",
@@ -88,6 +90,14 @@ CURATION_BLOCKING_REASONS = {"rejected", "review_unresolved", "test_fail", "fail
 LEARNING_BLOCKING_REASONS = CURATION_BLOCKING_REASONS | {"noisy", "unresolved"}
 LEARNING_SELECTION_REASONS = {"accepted", "review_resolved", "comparison_winner"}
 LEARNING_REVIEW_QUEUE_STATES = ("blocked", "missing_source", "missing_supervised_text", "ready", "needs_review")
+LEARNING_CANDIDATE_DIFF_FIELDS = (
+    "queue_state",
+    "blocked_reason",
+    "next_action",
+    "policy_state",
+    "comparison_role",
+    "backend_id",
+)
 LEARNING_MISSING_SOURCE_EXCLUSIONS = {
     "missing_source_event",
     "missing_source_artifact_path",
@@ -230,6 +240,27 @@ def jsonl_training_export_dry_run_run_path(
         / "learning"
         / "runs"
         / f"{timestamp_slug()}-jsonl-export-dry-run.json"
+    )
+
+
+def learning_candidate_diff_summary_latest_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return evaluation_root(workspace_id=workspace_id, root=root) / "learning" / "candidate-diff-latest.json"
+
+
+def learning_candidate_diff_summary_run_path(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return (
+        evaluation_root(workspace_id=workspace_id, root=root)
+        / "learning"
+        / "runs"
+        / f"{timestamp_slug()}-candidate-diff.json"
     )
 
 
@@ -3795,6 +3826,439 @@ def _items_by_event_id(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
     return by_event_id
 
 
+def _learning_candidate_diff_artifact_kind(artifact: Mapping[str, Any]) -> str:
+    schema_name = _clean_text(artifact.get("schema_name"))
+    if schema_name == LEARNING_DATASET_PREVIEW_SCHEMA_NAME:
+        return "learning_preview"
+    if schema_name == HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME:
+        return "human_selected_candidate_list"
+    if schema_name == JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME:
+        return "jsonl_training_export_dry_run"
+    return _clean_text(artifact.get("artifact_kind")) or "unknown_candidate_artifact"
+
+
+def _learning_candidate_diff_artifact_path(artifact: Mapping[str, Any]) -> str | None:
+    paths = _mapping_dict(artifact.get("paths"))
+    schema_name = _clean_text(artifact.get("schema_name"))
+    if schema_name == LEARNING_DATASET_PREVIEW_SCHEMA_NAME:
+        return _learning_preview_artifact_path(artifact)
+    if schema_name == HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME:
+        return (
+            _clean_text(paths.get("human_selected_run_path"))
+            or _clean_text(paths.get("human_selected_latest_path"))
+        )
+    if schema_name == JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME:
+        return (
+            _clean_text(paths.get("jsonl_export_dry_run_run_path"))
+            or _clean_text(paths.get("jsonl_export_dry_run_latest_path"))
+        )
+    return _clean_text(paths.get("run_path")) or _clean_text(paths.get("latest_path"))
+
+
+def _learning_candidate_diff_queue_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    review_queue = _mapping_dict(item.get("review_queue"))
+    if review_queue:
+        return review_queue
+    return dict(item)
+
+
+def _learning_candidate_diff_policy_state(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    lifecycle_summary = _mapping_dict(queue_summary.get("lifecycle_summary"))
+    state = _clean_text(lifecycle_summary.get("policy_state"))
+    if state is not None:
+        return state
+    item_lifecycle_summary = _mapping_dict(item.get("lifecycle_summary"))
+    state = _clean_text(item_lifecycle_summary.get("policy_state"))
+    if state is not None:
+        return state
+    confirmation = _mapping_dict(queue_summary.get("export_policy_confirmation"))
+    policy = _mapping_dict(item.get("policy"))
+    if confirmation.get("confirmed") or policy.get("export_policy_confirmed"):
+        return "confirmed"
+    if _clean_text(queue_summary.get("queue_state")) == "ready":
+        return "pending_confirmation"
+    return "unknown"
+
+
+def _learning_candidate_diff_comparison_roles(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> list[str]:
+    roles: list[str] = []
+    comparison_evidence = _mapping_dict(item.get("comparison_evidence")) or _mapping_dict(
+        queue_summary.get("comparison_evidence")
+    )
+    roles.extend(_string_list(comparison_evidence.get("roles")))
+    evidence_summary = _mapping_dict(item.get("evidence_summary"))
+    roles.extend(_string_list(evidence_summary.get("comparison_roles")))
+    evidence = _mapping_dict(item.get("evidence"))
+    roles.extend(
+        role
+        for comparison in evidence.get("comparisons") or []
+        if isinstance(comparison, Mapping)
+        if (role := _clean_text(comparison.get("comparison_role")) or _clean_text(comparison.get("role"))) is not None
+    )
+    return _deduplicate_strings(roles)
+
+
+def _learning_candidate_diff_backend_metadata(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> dict[str, Any]:
+    backend_metadata = _mapping_dict(item.get("backend_metadata"))
+    if backend_metadata:
+        return backend_metadata
+    return _mapping_dict(queue_summary.get("backend_metadata"))
+
+
+def _learning_candidate_diff_candidate_record(
+    item: Mapping[str, Any],
+    *,
+    source_kind: str,
+    source_collection: str,
+    membership: Mapping[str, Any],
+) -> dict[str, Any]:
+    queue_summary = _learning_candidate_diff_queue_summary(item)
+    event_id = _clean_text(item.get("event_id"))
+    label = (
+        _clean_text(item.get("label"))
+        or _clean_text(_mapping_dict(item.get("source_event")).get("prompt_excerpt"))
+        or event_id
+        or "candidate"
+    )
+    blocked_reasons = _deduplicate_strings(
+        [
+            *_string_list(item.get("blocked_reasons")),
+            *_string_list(queue_summary.get("blocked_reasons")),
+            *(
+                [_clean_text(item.get("blocked_reason"))]
+                if _clean_text(item.get("blocked_reason")) is not None
+                else []
+            ),
+            *(
+                [_clean_text(queue_summary.get("blocked_reason"))]
+                if _clean_text(queue_summary.get("blocked_reason")) is not None
+                else []
+            ),
+        ]
+    )
+    comparison_roles = _learning_candidate_diff_comparison_roles(item, queue_summary)
+    backend_metadata = _learning_candidate_diff_backend_metadata(item, queue_summary)
+    comparison_role = ",".join(comparison_roles) if comparison_roles else "none"
+    backend_id = _clean_text(backend_metadata.get("backend_id")) or "none"
+    return {
+        "event_id": event_id,
+        "label": _preview_excerpt(label, limit=240) or "candidate",
+        "source_kind": source_kind,
+        "source_collection": source_collection,
+        "candidate_membership": copy.deepcopy(dict(membership)),
+        "queue_state": _clean_text(queue_summary.get("queue_state")) or "unknown",
+        "blocked_reason": (
+            _clean_text(queue_summary.get("blocked_reason"))
+            or _clean_text(item.get("blocked_reason"))
+            or (blocked_reasons[0] if blocked_reasons else None)
+        ),
+        "blocked_reasons": blocked_reasons,
+        "next_action": _clean_text(queue_summary.get("next_action")) or "review_candidate",
+        "policy_state": _learning_candidate_diff_policy_state(item, queue_summary),
+        "comparison_role": comparison_role,
+        "comparison_roles": comparison_roles,
+        "backend_id": backend_id,
+        "model_id": _clean_text(backend_metadata.get("model_id")),
+        "adapter_kind": _clean_text(backend_metadata.get("adapter_kind")),
+        "eligible_for_supervised_candidate": bool(
+            item.get("eligible_for_supervised_candidate")
+            or queue_summary.get("eligible_for_supervised_candidate")
+        ),
+        "dry_run_status": _clean_text(item.get("dry_run_status")),
+    }
+
+
+def _learning_candidate_diff_records_by_event_id(artifact: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    source_kind = _learning_candidate_diff_artifact_kind(artifact)
+    records: dict[str, dict[str, Any]] = {}
+    if source_kind == "learning_preview":
+        supervised_by_event = _items_by_event_id(artifact.get("supervised_example_candidates") or [])
+        excluded_by_event = _items_by_event_id(artifact.get("excluded_candidates") or [])
+        seen: set[str] = set()
+        for item in artifact.get("review_queue") or []:
+            if not isinstance(item, Mapping):
+                continue
+            event_id = _clean_text(item.get("event_id"))
+            if event_id is None or event_id in seen:
+                continue
+            seen.add(event_id)
+            records[event_id] = _learning_candidate_diff_candidate_record(
+                item,
+                source_kind=source_kind,
+                source_collection="review_queue",
+                membership={
+                    "in_review_queue": True,
+                    "in_supervised_example_candidates": event_id in supervised_by_event,
+                    "in_excluded_candidates": event_id in excluded_by_event,
+                },
+            )
+        for source_collection, by_event in (
+            ("supervised_example_candidates", supervised_by_event),
+            ("excluded_candidates", excluded_by_event),
+        ):
+            for event_id, item in by_event.items():
+                if event_id in records:
+                    continue
+                records[event_id] = _learning_candidate_diff_candidate_record(
+                    item,
+                    source_kind=source_kind,
+                    source_collection=source_collection,
+                    membership={
+                        "in_review_queue": False,
+                        "in_supervised_example_candidates": source_collection == "supervised_example_candidates",
+                        "in_excluded_candidates": source_collection == "excluded_candidates",
+                    },
+                )
+        return records
+
+    if source_kind == "human_selected_candidate_list":
+        source_candidates = artifact.get("selected_candidates") or []
+        source_collection = "selected_candidates"
+    elif source_kind == "jsonl_training_export_dry_run":
+        source_candidates = artifact.get("candidates") or []
+        source_collection = "dry_run_candidates"
+    else:
+        source_candidates = artifact.get("candidates") or []
+        source_collection = "candidates"
+
+    for item in source_candidates:
+        if not isinstance(item, Mapping):
+            continue
+        event_id = _clean_text(item.get("event_id"))
+        if event_id is None or event_id in records:
+            continue
+        membership = _mapping_dict(item.get("preview_membership"))
+        if source_kind == "human_selected_candidate_list":
+            membership = {
+                **copy.deepcopy(dict(membership)),
+                "in_human_selected_candidates": True,
+            }
+        elif source_kind == "jsonl_training_export_dry_run":
+            membership = {
+                **copy.deepcopy(dict(membership)),
+                "in_jsonl_export_dry_run": True,
+            }
+        records[event_id] = _learning_candidate_diff_candidate_record(
+            item,
+            source_kind=source_kind,
+            source_collection=source_collection,
+            membership=membership,
+        )
+    return records
+
+
+def _learning_candidate_diff_artifact_counts(records: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    queue_state_counts = Counter(
+        _clean_text(record.get("queue_state")) or "unknown"
+        for record in records.values()
+    )
+    blocked_reason_counts = Counter(
+        reason
+        for record in records.values()
+        for reason in (
+            _string_list(record.get("blocked_reasons"))
+            or ([_clean_text(record.get("blocked_reason"))] if _clean_text(record.get("blocked_reason")) else [])
+        )
+    )
+    next_action_counts = Counter(
+        _clean_text(record.get("next_action")) or "review_candidate"
+        for record in records.values()
+    )
+    policy_state_counts = Counter(
+        _clean_text(record.get("policy_state")) or "unknown"
+        for record in records.values()
+    )
+    comparison_role_counts = Counter(
+        role
+        for record in records.values()
+        for role in (_string_list(record.get("comparison_roles")) or [_clean_text(record.get("comparison_role")) or "none"])
+    )
+    backend_id_counts = Counter(
+        _clean_text(record.get("backend_id")) or "none"
+        for record in records.values()
+    )
+    return {
+        "candidate_count": len(records),
+        "queue_states": {key: int(value) for key, value in sorted(queue_state_counts.items())},
+        "blocked_reasons": {key: int(value) for key, value in sorted(blocked_reason_counts.items())},
+        "next_actions": {key: int(value) for key, value in sorted(next_action_counts.items())},
+        "policy_states": {key: int(value) for key, value in sorted(policy_state_counts.items())},
+        "comparison_roles": {key: int(value) for key, value in sorted(comparison_role_counts.items())},
+        "backend_ids": {key: int(value) for key, value in sorted(backend_id_counts.items())},
+    }
+
+
+def _learning_candidate_diff_artifact_summary(
+    artifact: Mapping[str, Any],
+    *,
+    label: str | None,
+    records: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "label": _clean_text(label) or _learning_candidate_diff_artifact_kind(artifact),
+        "schema_name": _clean_text(artifact.get("schema_name")),
+        "schema_version": artifact.get("schema_version"),
+        "artifact_kind": _learning_candidate_diff_artifact_kind(artifact),
+        "artifact_path": _learning_candidate_diff_artifact_path(artifact),
+        "generated_at_utc": _clean_text(artifact.get("generated_at_utc")),
+        "export_mode": _clean_text(artifact.get("export_mode")) or "preview_only",
+        "training_export_ready": bool(artifact.get("training_export_ready")),
+        "human_gate_required": bool(artifact.get("human_gate_required")),
+        "counts": _learning_candidate_diff_artifact_counts(records),
+    }
+
+
+def build_learning_candidate_diff_summary(
+    base_artifact: Mapping[str, Any],
+    target_artifact: Mapping[str, Any],
+    *,
+    workspace_id: str | None = None,
+    base_label: str | None = None,
+    target_label: str | None = None,
+) -> dict[str, Any]:
+    base_records = _learning_candidate_diff_records_by_event_id(base_artifact)
+    target_records = _learning_candidate_diff_records_by_event_id(target_artifact)
+    resolved_workspace_id = (
+        _clean_text(workspace_id)
+        or _clean_text(target_artifact.get("workspace_id"))
+        or _clean_text(base_artifact.get("workspace_id"))
+        or DEFAULT_WORKSPACE_ID
+    )
+    field_change_counts: Counter[str] = Counter()
+    changes: list[dict[str, Any]] = []
+    added_count = 0
+    removed_count = 0
+    changed_count = 0
+    unchanged_count = 0
+    for event_id in sorted(set(base_records) | set(target_records)):
+        before = base_records.get(event_id)
+        after = target_records.get(event_id)
+        if before is None and after is not None:
+            added_count += 1
+            changes.append(
+                {
+                    "event_id": event_id,
+                    "change_type": "added",
+                    "changed_fields": [],
+                    "before": None,
+                    "after": copy.deepcopy(after),
+                }
+            )
+            continue
+        if before is not None and after is None:
+            removed_count += 1
+            changes.append(
+                {
+                    "event_id": event_id,
+                    "change_type": "removed",
+                    "changed_fields": [],
+                    "before": copy.deepcopy(before),
+                    "after": None,
+                }
+            )
+            continue
+        assert before is not None and after is not None
+        changed_fields = [
+            field
+            for field in LEARNING_CANDIDATE_DIFF_FIELDS
+            if before.get(field) != after.get(field)
+        ]
+        if not changed_fields:
+            unchanged_count += 1
+            continue
+        changed_count += 1
+        for field in changed_fields:
+            field_change_counts[field] += 1
+        changes.append(
+            {
+                "event_id": event_id,
+                "change_type": "changed",
+                "changed_fields": changed_fields,
+                "before": copy.deepcopy(before),
+                "after": copy.deepcopy(after),
+            }
+        )
+    return {
+        "schema_name": LEARNING_CANDIDATE_DIFF_SUMMARY_SCHEMA_NAME,
+        "schema_version": LEARNING_CANDIDATE_DIFF_SUMMARY_SCHEMA_VERSION,
+        "workspace_id": resolved_workspace_id,
+        "generated_at_utc": timestamp_utc(),
+        "export_mode": "preview_only",
+        "artifact_kind": "learning_candidate_diff_inspection_report",
+        "training_export_ready": False,
+        "human_gate_required": True,
+        "base": _learning_candidate_diff_artifact_summary(
+            base_artifact,
+            label=base_label,
+            records=base_records,
+        ),
+        "target": _learning_candidate_diff_artifact_summary(
+            target_artifact,
+            label=target_label,
+            records=target_records,
+        ),
+        "tracked_fields": list(LEARNING_CANDIDATE_DIFF_FIELDS),
+        "counts": {
+            "base_candidate_count": len(base_records),
+            "target_candidate_count": len(target_records),
+            "added_candidate_count": added_count,
+            "removed_candidate_count": removed_count,
+            "changed_candidate_count": changed_count,
+            "unchanged_candidate_count": unchanged_count,
+            "field_change_counts": {
+                field: int(field_change_counts.get(field) or 0)
+                for field in LEARNING_CANDIDATE_DIFF_FIELDS
+            },
+        },
+        "changes": changes,
+        "inspection_policy": {
+            "mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "training_job_allowed": False,
+            "raw_log_export_allowed": False,
+            "jsonl_training_export_allowed": False,
+            "diff_does_not_promote_candidate": True,
+            "human_selection_does_not_promote_candidate": True,
+        },
+        "notes": [
+            "Candidate diff is an inspection report only.",
+            "It compares candidate metadata and does not create or promote training examples.",
+            "Source artifacts, signals, and comparison traces remain the authority for candidate eligibility.",
+        ],
+    }
+
+
+def record_learning_candidate_diff_summary(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    base_artifact: Mapping[str, Any],
+    target_artifact: Mapping[str, Any],
+    base_label: str | None = None,
+    target_label: str | None = None,
+) -> tuple[dict[str, Any], Path, Path]:
+    resolved_root = _resolve_root(root)
+    payload = build_learning_candidate_diff_summary(
+        base_artifact,
+        target_artifact,
+        workspace_id=workspace_id,
+        base_label=base_label,
+        target_label=target_label,
+    )
+    latest_path = learning_candidate_diff_summary_latest_path(workspace_id=workspace_id, root=resolved_root)
+    run_path = learning_candidate_diff_summary_run_path(workspace_id=workspace_id, root=resolved_root)
+    payload["paths"] = {
+        "candidate_diff_latest_path": str(latest_path),
+        "candidate_diff_run_path": str(run_path),
+        "base_artifact_path": _clean_text(payload["base"].get("artifact_path")),
+        "target_artifact_path": _clean_text(payload["target"].get("artifact_path")),
+    }
+    write_json(run_path, payload)
+    write_json(latest_path, payload)
+    return payload, latest_path, run_path
+
+
 def _human_selected_events_by_id_from_learning_preview(preview: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     source_paths = _mapping_dict(preview.get("source_paths"))
     event_log_path = _path_from_text(source_paths.get("event_log_path"))
@@ -4098,6 +4562,8 @@ def _human_selected_candidate_record(
         "excluded_by": _string_list(queue_summary.get("excluded_by")),
         "lifecycle_summary": copy.deepcopy(_mapping_dict(queue_summary.get("lifecycle_summary"))),
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(queue_summary.get("export_policy_confirmation"))),
+        "backend_metadata": copy.deepcopy(_mapping_dict(queue_summary.get("backend_metadata"))),
+        "comparison_evidence": copy.deepcopy(_mapping_dict(queue_summary.get("comparison_evidence"))),
         "evidence_summary": _human_selected_evidence_summary(
             queue_item=queue_item,
             supervised_candidate=supervised_candidate,
@@ -4497,6 +4963,8 @@ def _jsonl_dry_run_candidate_record(
             "eligible_for_supervised_candidate": bool(candidate.get("eligible_for_supervised_candidate")),
             "lifecycle_summary": copy.deepcopy(_mapping_dict(candidate.get("lifecycle_summary"))),
             "export_policy_confirmation": copy.deepcopy(_mapping_dict(candidate.get("export_policy_confirmation"))),
+            "backend_metadata": copy.deepcopy(_mapping_dict(candidate.get("backend_metadata"))),
+            "comparison_evidence": copy.deepcopy(_mapping_dict(candidate.get("comparison_evidence"))),
         }
     policy = _jsonl_dry_run_policy(_mapping_dict(candidate.get("policy")))
     preview_membership = _mapping_dict(candidate.get("preview_membership"))
@@ -4570,6 +5038,11 @@ def _jsonl_dry_run_candidate_record(
         dry_run_status = "missing_required_traceability"
     event_id = _clean_text(candidate.get("event_id"))
     source_paths = _mapping_dict(candidate.get("source_paths"))
+    backend_metadata = _learning_candidate_diff_backend_metadata(candidate, queue_summary)
+    comparison_evidence = (
+        _mapping_dict(candidate.get("comparison_evidence"))
+        or _mapping_dict(queue_summary.get("comparison_evidence"))
+    )
     return {
         "schema_name": JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_NAME,
         "schema_version": JSONL_TRAINING_EXPORT_DRY_RUN_ITEM_SCHEMA_VERSION,
@@ -4603,6 +5076,8 @@ def _jsonl_dry_run_candidate_record(
             "m8_training_job_design",
         ],
         "export_policy_confirmation": copy.deepcopy(_mapping_dict(queue_summary.get("export_policy_confirmation"))),
+        "backend_metadata": copy.deepcopy(backend_metadata),
+        "comparison_evidence": copy.deepcopy(comparison_evidence),
         "evidence_summary": evidence_summary,
         "source_paths": {
             key: copy.deepcopy(value)
@@ -4853,6 +5328,69 @@ def _record_supplied_curation_preview(
     write_json(run_path, payload)
     write_json(latest_path, payload)
     return payload
+
+
+def format_learning_candidate_diff_summary_report(diff: Mapping[str, Any]) -> str:
+    counts = _mapping_dict(diff.get("counts"))
+    base = _mapping_dict(diff.get("base"))
+    target = _mapping_dict(diff.get("target"))
+    paths = _mapping_dict(diff.get("paths"))
+    lines = [
+        "Candidate diff summary: preview_only",
+        (
+            f"Base: {_clean_text(base.get('label')) or _clean_text(base.get('artifact_kind')) or 'base'} "
+            f"({int(counts.get('base_candidate_count') or 0)} candidates)"
+        ),
+        (
+            f"Target: {_clean_text(target.get('label')) or _clean_text(target.get('artifact_kind')) or 'target'} "
+            f"({int(counts.get('target_candidate_count') or 0)} candidates)"
+        ),
+        f"Added: {int(counts.get('added_candidate_count') or 0)}",
+        f"Removed: {int(counts.get('removed_candidate_count') or 0)}",
+        f"Changed: {int(counts.get('changed_candidate_count') or 0)}",
+        f"Unchanged: {int(counts.get('unchanged_candidate_count') or 0)}",
+        "Training export ready: no",
+        "Human gate: required",
+    ]
+    candidate_diff_path = paths.get("candidate_diff_run_path") or paths.get("candidate_diff_latest_path")
+    if candidate_diff_path:
+        lines.append(f"Candidate diff: {candidate_diff_path}")
+    field_counts = _mapping_dict(counts.get("field_change_counts"))
+    changed_field_parts = [
+        f"{field}={int(field_counts.get(field) or 0)}"
+        for field in LEARNING_CANDIDATE_DIFF_FIELDS
+        if int(field_counts.get(field) or 0)
+    ]
+    if changed_field_parts:
+        lines.append(f"Field changes: {'; '.join(changed_field_parts)}")
+    changes = [
+        item
+        for item in diff.get("changes") or []
+        if isinstance(item, Mapping)
+    ]
+    if changes:
+        lines.extend(("", "Candidate changes:"))
+        for item in changes[:5]:
+            event_id = _clean_text(item.get("event_id")) or "candidate"
+            change_type = _clean_text(item.get("change_type")) or "changed"
+            before = _mapping_dict(item.get("before"))
+            after = _mapping_dict(item.get("after"))
+            label = _single_line_report_label(
+                _clean_text(after.get("label"))
+                or _clean_text(before.get("label"))
+                or event_id
+            )
+            changed_fields = _string_list(item.get("changed_fields"))
+            if change_type == "changed" and changed_fields:
+                field_parts = [
+                    f"{field}: {before.get(field) or 'n/a'} -> {after.get(field) or 'n/a'}"
+                    for field in changed_fields[:3]
+                ]
+                suffix = f" ({'; '.join(field_parts)})"
+            else:
+                suffix = ""
+            lines.append(f"- {change_type}: {label}{suffix}")
+    return "\n".join(lines)
 
 
 def format_human_selected_candidate_list_report(selection: Mapping[str, Any]) -> str:
