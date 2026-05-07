@@ -266,6 +266,8 @@ raw log dump を学習候補として保存する設計にはしない。
   - acceptance / review_resolved / test_pass などの signal id、origin、evidence
 - comparison
   - comparison id、winner、criteria、rationale
+  - candidate ごとの `comparison_role` (`winner` / `candidate` / `loser`)
+  - backend id、model id、adapter kind、compatibility status
 - backend metadata
   - backend id、adapter kind、model id、compatibility、limits、metadata
 - file path
@@ -273,6 +275,9 @@ raw log dump を学習候補として保存する設計にはしない。
 
 M6 backend swap 由来の agent-lane event は、source artifact の run JSON から backend metadata を補完する。
 software-work event だけに閉じると metadata が薄くなるため、ここは artifact path を辿る。
+S5 では comparison trace と review queue の両方で同じ metadata を読めるようにする。
+winner だけでなく、同じ backend swap で比較された candidate / loser も inspection item として残す。
+ただし、loser や blocked candidate を supervised example に昇格する条件は追加しない。
 
 Traceability の目的は、あとから「なぜこの候補が学習候補になったのか」を説明できることです。
 そのため、候補 artifact は answer だけではなく、採用理由、除外理由、比較上の役割、
@@ -519,6 +524,7 @@ M7 の report / Local UI は、派手な dashboard ではなく inspection queue
 - candidate が何件あり、何件が supervised example candidate になったか
 - 除外理由の内訳
 - candidate ごとの source event、positive signal、comparison role、backend
+- backend comparison の winner / candidate / loser と compatibility status
 - 次に必要な action
   - export policy confirmation
   - human selection

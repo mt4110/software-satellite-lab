@@ -2200,7 +2200,80 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["event_id"], "traceable-comparison-winner")
         self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
         self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["selection_state"], "selected")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["comparison_state"], "winner")
         self.assertEqual(candidate["evidence"]["comparisons"][0]["role"], "winner")
+        self.assertEqual(candidate["evidence"]["comparisons"][0]["comparison_role"], "winner")
+
+    def test_learning_preview_enriches_legacy_comparison_backend_metadata(self) -> None:
+        source_refs = readable_test_source_refs()
+        source_refs["backend_ref"] = {
+            "backend_id": "legacy-backend",
+            "adapter_kind": "mock",
+            "model_id": "legacy/model-v1",
+            "compatibility_status": "compatible",
+        }
+        event = {
+            "event_id": "legacy-comparison-winner",
+            "event_kind": "agent_task_run",
+            "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+            "session": {
+                "surface": "agent_lane",
+                "mode": "patch_plan_verify",
+                "selected_model_id": "legacy/model-v1",
+            },
+            "outcome": {"status": "ok", "quality_status": "pass", "execution_status": "ok"},
+            "content": {
+                "prompt": "Keep legacy comparison logs explainable.",
+                "output_text": "The backend metadata is recovered from the source event.",
+                "options": {
+                    "validation_mode": "agent_lane",
+                    "validation_command": "python -m unittest tests.test_legacy_comparison",
+                    "pass_definition": "Legacy comparison metadata is enriched.",
+                },
+            },
+            "source_refs": source_refs,
+        }
+        test_signal = build_evaluation_signal(
+            signal_kind="test_pass",
+            source_event_id="legacy-comparison-winner",
+            source_event=event,
+            recorded_at_utc="2026-04-01T00:01:00+00:00",
+            signal_id="local-default:eval:legacy-comparison:test-pass",
+        )
+        legacy_comparison = build_evaluation_comparison(
+            candidate_event_ids=["legacy-comparison-winner", "legacy-comparison-loser"],
+            winner_event_id="legacy-comparison-winner",
+            recorded_at_utc="2026-04-01T00:02:00+00:00",
+            comparison_id="local-default:compare:legacy-comparison",
+            task_label="legacy comparison log",
+            criteria=["winner trace"],
+            rationale="Simulate a pre-S5 comparison record without backend metadata.",
+        )
+
+        preview = build_learning_dataset_preview(
+            {"workspace_id": "local-default", "paths": {}},
+            {
+                "candidates": [
+                    {
+                        "event_id": "legacy-comparison-winner",
+                        "state": "ready",
+                        "label": "Legacy comparison winner",
+                        "reasons": ["comparison_winner", "test_pass"],
+                        "blocked_by": [],
+                        "export_decision": "include_when_approved",
+                        "ready_for_policy": True,
+                    }
+                ]
+            },
+            events_by_id={"legacy-comparison-winner": event},
+            explicit_signals=[test_signal],
+            comparisons=[legacy_comparison],
+        )
+        comparison_trace = preview["supervised_example_candidates"][0]["evidence"]["comparisons"][0]
+
+        self.assertEqual(comparison_trace["backend_metadata"]["backend_id"], "legacy-backend")
+        self.assertEqual(comparison_trace["backend_metadata"]["model_id"], "legacy/model-v1")
+        self.assertEqual(comparison_trace["backend_comparison"]["backend_count"], 1)
 
     def test_learning_preview_blocks_stale_ready_candidate_with_negative_trace(self) -> None:
         event = {
