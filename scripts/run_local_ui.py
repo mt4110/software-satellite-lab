@@ -56,6 +56,7 @@ from evaluation_loop import (
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_review_resolution_signal,
+    record_selection_signal,
 )
 from gemma_core import CancellationSignal, SessionManager
 from gemma_runtime import (
@@ -3944,6 +3945,30 @@ class LocalUiController:
         result["recorded_signal"] = signal
         return result
 
+    def record_evaluation_selection_signal(
+        self,
+        *,
+        source_event_id: str,
+        accepted: bool,
+        decision_summary: str = "",
+        review_id: str = "",
+        review_url: str = "",
+        curation_filters: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        signal = record_selection_signal(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            source_event_id=source_event_id,
+            accepted=accepted,
+            decision_summary=decision_summary,
+            review_id=review_id,
+            review_url=review_url,
+            origin="local_ui",
+        )
+        result = self.build_evaluation_snapshot(curation_filters=curation_filters)
+        result["recorded_signal"] = signal
+        return result
+
     def _ui_recall_bundle_path(self, *, task_kind: str) -> Path:
         return (
             self.workspace_store.root
@@ -5373,20 +5398,36 @@ class LocalUiApp:
         ttk.Entry(review_frame, textvariable=self.evaluation_review_id, width=18).grid(row=0, column=0, sticky="w")
         ttk.Entry(review_frame, textvariable=self.evaluation_review_url, width=28).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Entry(review_frame, textvariable=self.evaluation_review_summary, width=52).grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        signal_button_frame = ttk.Frame(review_frame, style="Card.TFrame")
+        signal_button_frame.grid(row=1, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        self.accept_candidate_button = ttk.Button(
+            signal_button_frame,
+            text="Accept",
+            style="Lab.TButton",
+            command=self.accept_selected_evaluation_candidate,
+        )
+        self.accept_candidate_button.grid(row=0, column=0, sticky="e")
+        self.reject_candidate_button = ttk.Button(
+            signal_button_frame,
+            text="Reject",
+            style="Lab.TButton",
+            command=self.reject_selected_evaluation_candidate,
+        )
+        self.reject_candidate_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.mark_review_resolved_button = ttk.Button(
-            review_frame,
+            signal_button_frame,
             text="Mark Resolved",
             style="Lab.TButton",
             command=self.mark_selected_evaluation_review_resolved,
         )
-        self.mark_review_resolved_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        self.mark_review_resolved_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
         self.mark_review_unresolved_button = ttk.Button(
-            review_frame,
+            signal_button_frame,
             text="Mark Unresolved",
             style="Lab.TButton",
             command=self.mark_selected_evaluation_review_unresolved,
         )
-        self.mark_review_unresolved_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
+        self.mark_review_unresolved_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         learning_header = ttk.Frame(frame, style="Card.TFrame")
         learning_header.grid(row=8, column=0, sticky="ew", pady=(14, 0))
@@ -6993,6 +7034,43 @@ class LocalUiApp:
             self._clear_busy()
             self._resume_startup_prewarm_if_needed()
 
+    def _record_selected_evaluation_selection(self, *, accepted: bool) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Selection signal recording is disabled while a worker job is running.")
+            return
+        event_id = self._selected_evaluation_candidate_event_id()
+        if event_id is None:
+            self.status_var.set("Select a curation candidate first.")
+            return
+
+        summary = self.evaluation_review_summary.get().strip()
+        if not summary:
+            summary = "Accepted from Local UI." if accepted else "Rejected from Local UI."
+            self.evaluation_review_summary.set(summary)
+
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Recording selection signal...")
+        try:
+            result = self.controller.record_evaluation_selection_signal(
+                source_event_id=event_id,
+                accepted=accepted,
+                review_id=self.evaluation_review_id.get(),
+                review_url=self.evaluation_review_url.get(),
+                decision_summary=summary,
+                curation_filters=self._current_evaluation_curation_filters(),
+            )
+            signal = dict(result.get("recorded_signal") or {})
+            self._apply_evaluation_snapshot(
+                result,
+                status_message=f"Recorded {signal.get('signal_kind') or 'selection signal'} for curation candidate.",
+            )
+        except Exception as exc:
+            self.status_var.set(f"Selection signal failed: {type(exc).__name__}: {exc}")
+            self.hint_var.set("")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
     def _record_selected_evaluation_review(self, *, resolved: bool) -> None:
         if self.job_runner.has_pending_work():
             self.status_var.set("Review signal recording is disabled while a worker job is running.")
@@ -7029,6 +7107,12 @@ class LocalUiApp:
         finally:
             self._clear_busy()
             self._resume_startup_prewarm_if_needed()
+
+    def accept_selected_evaluation_candidate(self) -> None:
+        self._record_selected_evaluation_selection(accepted=True)
+
+    def reject_selected_evaluation_candidate(self) -> None:
+        self._record_selected_evaluation_selection(accepted=False)
 
     def mark_selected_evaluation_review_resolved(self) -> None:
         self._record_selected_evaluation_review(resolved=True)
@@ -7406,6 +7490,8 @@ class LocalUiApp:
         self.refresh_evaluation_button.configure(state=run_state)
         for button_name in (
             "apply_evaluation_filter_button",
+            "accept_candidate_button",
+            "reject_candidate_button",
             "mark_review_resolved_button",
             "mark_review_unresolved_button",
             "refresh_candidate_review_button",

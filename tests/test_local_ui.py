@@ -757,6 +757,24 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertIn("ready-for-policy=0", build_evaluation_adoption_text(result["curation_preview"]))
         curation_rows = build_evaluation_curation_rows(result["curation_preview"])
         self.assertEqual(curation_rows[0]["state"], "needs_review")
+        self.assertEqual(
+            result["curation_preview"]["candidates"][0]["signal_capture"]["suggested_signal_kinds"],
+            ["acceptance", "rejection", "review_resolved", "review_unresolved"],
+        )
+
+        accepted = controller.record_evaluation_selection_signal(
+            source_event_id=curation_rows[0]["event_id"],
+            accepted=True,
+            review_id="ui-review-accept",
+            decision_summary="UI accepted this passing candidate.",
+            curation_filters={"states": ["ready"]},
+        )
+
+        self.assertEqual(accepted["recorded_signal"]["signal_kind"], "acceptance")
+        self.assertEqual(accepted["recorded_signal"]["evidence"]["decision_summary"], "UI accepted this passing candidate.")
+        self.assertEqual(accepted["snapshot"]["counts"]["acceptance"], 1)
+        self.assertIn("ready=1", build_evaluation_curation_text(accepted["snapshot"]))
+        self.assertEqual(accepted["curation_preview"]["filters"]["states"], ["ready"])
 
         resolved = controller.record_evaluation_review_resolution(
             source_event_id=curation_rows[0]["event_id"],

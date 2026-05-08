@@ -43,6 +43,7 @@ from evaluation_loop import (  # noqa: E402
     record_jsonl_training_export_dry_run,
     record_learning_candidate_diff_summary,
     record_review_resolution_signal,
+    record_selection_signal,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
 )
@@ -3039,6 +3040,67 @@ class EvaluationLoopTests(unittest.TestCase):
 
         self.assertIn("Unknown review-resolution source_event_id", str(raised.exception))
 
+    def test_record_selection_signal_helper_preserves_blocking_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            event_id = "local-default:capability-matrix:matrix:row-1:chat"
+            rejected = record_selection_signal(
+                root=root,
+                source_event_id=event_id,
+                accepted=False,
+                decision_summary="The patch needs a simpler review path.",
+                origin="test",
+            )
+            accepted = record_selection_signal(
+                root=root,
+                source_event_id=event_id,
+                accepted=True,
+                decision_summary="The recheck passed, but the rejection trace still needs handling.",
+                origin="test",
+            )
+
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            preview = build_curation_export_preview(snapshot)
+
+        candidate = [
+            item
+            for item in preview["candidates"]
+            if item["event_id"] == event_id
+        ][0]
+        self.assertEqual(rejected["signal_kind"], "rejection")
+        self.assertEqual(rejected["evidence"]["decision_summary"], "The patch needs a simpler review path.")
+        self.assertEqual(accepted["signal_kind"], "acceptance")
+        self.assertEqual(snapshot["counts"]["acceptance"], 1)
+        self.assertEqual(snapshot["counts"]["rejection"], 1)
+        self.assertEqual(candidate["state"], "blocked")
+        self.assertIn("accepted", candidate["reasons"])
+        self.assertIn("rejected", candidate["reasons"])
+        self.assertEqual(candidate["signal_capture"]["suggested_signal_kinds"], [])
+        self.assertEqual(candidate["signal_capture"]["blocking_reasons_must_be_repaired"], ["rejected"])
+
+    def test_curation_preview_exposes_signal_capture_hints_for_human_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            snapshot, _latest_path, _run_path = record_evaluation_snapshot(root=root)
+            preview = build_curation_export_preview(snapshot)
+            report = format_curation_export_preview_report(preview)
+
+        candidate = [
+            item
+            for item in preview["candidates"]
+            if item["event_id"] == "local-default:capability-matrix:matrix:row-1:chat"
+        ][0]
+        self.assertEqual(candidate["state"], "needs_review")
+        self.assertEqual(
+            candidate["signal_capture"]["suggested_signal_kinds"],
+            ["acceptance", "rejection", "review_resolved", "review_unresolved"],
+        )
+        self.assertTrue(candidate["signal_capture"]["preview_only"])
+        self.assertFalse(candidate["signal_capture"]["training_export_allowed"])
+        self.assertIn("signals=acceptance,rejection,review_resolved,review_unresolved", report)
+
     def test_recent_comparisons_are_sorted_before_snapshot_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3654,6 +3716,68 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(payload["recorded_signal"]["signal_kind"], "rejection")
         self.assertEqual(payload["snapshot"]["counts"]["rejection"], 1)
         self.assertEqual(payload["snapshot"]["counts"]["test_fail"], 1)
+
+    def test_cli_accept_candidate_shortcut_records_preview_only_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stdout = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--accept-candidate",
+                    "--source-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                    "--rationale",
+                    "The patch is accepted after review.",
+                    "--curation-preview",
+                    "--curation-state",
+                    "ready",
+                    "--format",
+                    "json",
+                ],
+            ), redirect_stdout(stdout):
+                exit_code = evaluation_main()
+            payload = json.loads(stdout.getvalue())
+
+        candidate = payload["curation_preview"]["candidates"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["recorded_signal"]["signal_kind"], "acceptance")
+        self.assertEqual(payload["recorded_signal"]["evidence"]["decision_summary"], "The patch is accepted after review.")
+        self.assertIn("human-selection", payload["recorded_signal"]["tags"])
+        self.assertEqual(payload["snapshot"]["counts"]["acceptance"], 1)
+        self.assertEqual(payload["curation_preview"]["export_mode"], "preview_only")
+        self.assertFalse(payload["curation_preview"]["training_export_ready"])
+        self.assertEqual(candidate["state"], "ready")
+        self.assertFalse(candidate["signal_capture"]["training_export_allowed"])
+
+    def test_cli_rejects_shortcut_signal_kind_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_capability_matrix(root)
+            stderr = io.StringIO()
+            with patch(
+                "sys.argv",
+                [
+                    "run_evaluation_loop.py",
+                    "--root",
+                    str(root),
+                    "--accept-candidate",
+                    "--signal-kind",
+                    "rejection",
+                    "--source-event-id",
+                    "local-default:capability-matrix:matrix:row-1:chat",
+                ],
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    evaluation_main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("Shortcut signal flags cannot be combined with --signal-kind.", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_cli_reuses_prebuilt_index_for_record_and_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

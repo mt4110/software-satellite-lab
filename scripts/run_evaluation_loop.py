@@ -71,6 +71,33 @@ def _read_json_artifact(path_text: object) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _shortcut_signal_kind(args: argparse.Namespace) -> str | None:
+    shortcuts = [
+        (bool(args.accept_candidate), "acceptance", "--accept-candidate"),
+        (bool(args.reject_candidate), "rejection", "--reject-candidate"),
+        (bool(args.mark_review_resolved), "review_resolved", "--mark-review-resolved"),
+        (bool(args.mark_review_unresolved), "review_unresolved", "--mark-review-unresolved"),
+    ]
+    selected = [(kind, flag) for enabled, kind, flag in shortcuts if enabled]
+    if not selected:
+        return None
+    if len(selected) > 1:
+        flags = ", ".join(flag for _kind, flag in selected)
+        raise ValueError(f"Use only one shortcut signal flag at a time: {flags}.")
+    return selected[0][0]
+
+
+def _signal_tags_for_kind(signal_kind: str) -> list[str]:
+    if signal_kind in {"acceptance", "rejection"}:
+        return ["human-selection", "accepted" if signal_kind == "acceptance" else "rejected"]
+    if signal_kind in {"review_resolved", "review_unresolved"}:
+        return [
+            "review-resolution",
+            "resolved" if signal_kind == "review_resolved" else "unresolved",
+        ]
+    return []
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Record M4 evaluation signals and write a local evaluation snapshot.",
@@ -81,6 +108,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--record-signal",
         action="store_true",
         help="Append one explicit evaluation signal before writing the snapshot.",
+    )
+    parser.add_argument(
+        "--accept-candidate",
+        action="store_true",
+        help="Shortcut for --record-signal --signal-kind acceptance.",
+    )
+    parser.add_argument(
+        "--reject-candidate",
+        action="store_true",
+        help="Shortcut for --record-signal --signal-kind rejection.",
+    )
+    parser.add_argument(
+        "--mark-review-resolved",
+        action="store_true",
+        help="Shortcut for --record-signal --signal-kind review_resolved.",
+    )
+    parser.add_argument(
+        "--mark-review-unresolved",
+        action="store_true",
+        help="Shortcut for --record-signal --signal-kind review_unresolved.",
     )
     parser.add_argument(
         "--confirm-export-policy",
@@ -255,8 +302,15 @@ def main() -> int:
         candidate_diff_summaries.append(diff_summary)
 
     try:
+        shortcut_signal_kind = _shortcut_signal_kind(args)
+        if args.record_signal and shortcut_signal_kind is not None:
+            parser.error("--record-signal cannot be combined with shortcut signal flags.")
+        if shortcut_signal_kind is not None and args.signal_kind is not None:
+            parser.error("Shortcut signal flags cannot be combined with --signal-kind.")
         if args.record_signal and args.confirm_export_policy:
             parser.error("--record-signal and --confirm-export-policy cannot be used together.")
+        if args.confirm_export_policy and shortcut_signal_kind is not None:
+            parser.error("Shortcut signal flags and --confirm-export-policy cannot be combined.")
         if args.select_candidate_event_id and not args.human_selected_candidates:
             parser.error("--select-candidate-event-id requires --human-selected-candidates.")
         if args.confirm_export_policy:
@@ -283,12 +337,13 @@ def main() -> int:
                 recorded_signal,
                 workspace_id=args.workspace_id,
             )
-        if args.record_signal:
-            if args.signal_kind is None:
+        if args.record_signal or shortcut_signal_kind is not None:
+            signal_kind = args.signal_kind or shortcut_signal_kind
+            if signal_kind is None:
                 parser.error("--record-signal requires --signal-kind.")
             source_event_id = args.source_event_id.strip()
             if not source_event_id:
-                parser.error("--record-signal requires --source-event-id.")
+                parser.error("Recording an evaluation signal requires --source-event-id.")
             if events_by_id is None:
                 events_by_id, index_summary = _events_by_id_and_index_summary(
                     root=root,
@@ -306,14 +361,19 @@ def main() -> int:
                     "review_id": args.review_id.strip() or None,
                     "review_url": args.review_url.strip() or None,
                     "resolution_summary": args.resolution_summary.strip() or None,
+                    "decision_summary": (
+                        args.rationale.strip()
+                        if signal_kind in {"acceptance", "rejection"} and args.rationale.strip()
+                        else None
+                    ),
                 }.items()
                 if value is not None
             }
-            if args.signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
+            if signal_kind == EXPORT_POLICY_CONFIRMATION_SIGNAL_KIND:
                 evidence = build_export_policy_confirmation_evidence(evidence)
             recorded_signal = build_evaluation_signal(
                 workspace_id=args.workspace_id,
-                signal_kind=args.signal_kind,
+                signal_kind=signal_kind,
                 source_event_id=source_event_id,
                 source_event=source_event,
                 target_event_id=args.target_event_id.strip() or None,
@@ -321,6 +381,7 @@ def main() -> int:
                 rationale=args.rationale.strip() or None,
                 evidence=evidence,
                 origin="cli",
+                tags=_signal_tags_for_kind(signal_kind),
             )
             append_evaluation_signal(
                 evaluation_signal_log_path(workspace_id=args.workspace_id, root=root),
