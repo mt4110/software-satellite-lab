@@ -3053,7 +3053,7 @@ def _learning_lifecycle_summary(
         else "missing"
     )
     quality_status = _clean_text(outcome.get("quality_status"))
-    execution_status = _clean_text(outcome.get("execution_status"))
+    execution_status = _execution_status(event) if event is not None else None
     return {
         "lifecycle_state": _learning_lifecycle_state(
             queue_state=queue_state,

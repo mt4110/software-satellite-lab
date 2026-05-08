@@ -1907,6 +1907,73 @@ class EvaluationLoopTests(unittest.TestCase):
             "missing_source",
         )
 
+    def test_learning_lifecycle_uses_status_when_execution_status_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "running-run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_id = "event-running-status-fallback"
+            event = {
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+                "outcome": {
+                    "status": "RUNNING",
+                    "quality_status": "pass",
+                },
+                "content": {
+                    "prompt": "Keep status fallback visible in lifecycle inspection.",
+                    "output_text": "The candidate is still running according to the legacy status field.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_status_fallback",
+                        "pass_definition": "Lifecycle inspection uses outcome.status when execution_status is absent.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+            }
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            test_signal = build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            preview = build_learning_dataset_preview(
+                {"workspace_id": "local-default", "paths": {}},
+                {
+                    "candidates": [
+                        {
+                            "event_id": event_id,
+                            "state": "ready",
+                            "label": "Running status fallback candidate",
+                            "reasons": ["accepted", "test_pass"],
+                            "blocked_by": [],
+                            "export_decision": "include_when_approved",
+                            "ready_for_policy": True,
+                        }
+                    ]
+                },
+                events_by_id={event_id: event},
+                explicit_signals=[accepted_signal, test_signal],
+                comparisons=[],
+            )
+            queue_item = preview["review_queue"][0]
+
+        self.assertEqual(queue_item["queue_state"], "ready")
+        self.assertEqual(queue_item["lifecycle_summary"]["execution_status"], "RUNNING")
+        self.assertEqual(queue_item["lifecycle_summary"]["lifecycle_state"], "running")
+
     def test_learning_preview_infers_contract_root_from_direct_artifact_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
