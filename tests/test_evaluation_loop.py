@@ -448,6 +448,8 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(learning_preview["counts"]["review_queue_count"], 2)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["ready"], 1)
         self.assertEqual(learning_preview["counts"]["review_queue_states"]["blocked"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_lifecycle_states"]["queued"], 1)
+        self.assertEqual(learning_preview["counts"]["review_queue_lifecycle_states"]["failed"], 1)
         self.assertEqual(
             learning_preview["counts"]["review_queue_next_actions"]["confirm_export_policy"],
             1,
@@ -468,6 +470,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(candidate["review_queue"]["queue_state"], "ready")
         self.assertEqual(candidate["review_queue"]["next_action"], "confirm_export_policy")
         self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_unconfirmed")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["lifecycle_state"], "queued")
         self.assertTrue(candidate["review_queue"]["eligible_for_supervised_candidate"])
         self.assertEqual(candidate["review_queue"]["excluded_by"], [])
         self.assertFalse(candidate["policy"]["raw_log_export_allowed"])
@@ -481,6 +484,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("comparison_log_path", candidate["source_paths"])
         self.assertEqual(first_queue_item["event_id"], fail_event_id)
         self.assertEqual(first_queue_item["queue_priority"]["bucket"], "blocked_first")
+        self.assertEqual(first_queue_item["lifecycle_summary"]["lifecycle_state"], "failed")
         self.assertNotIn("output_excerpt", first_queue_item["source_event"])
         self.assertEqual(excluded_by_event[fail_event_id]["queue_state"], "blocked")
         self.assertFalse(excluded_by_event[fail_event_id]["eligible_for_supervised_candidate"])
@@ -490,6 +494,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("- accepted patch keeps the loop green", report)
         self.assertNotIn("- accepted patch\nkeeps the loop green", report)
         self.assertIn("Learning review queue:", report)
+        self.assertIn("Lifecycle states: queued=1; failed=1", report)
         self.assertIn("Queue next actions: confirm_export_policy=1", report)
         self.assertIn("Queue blocked reasons:", report)
         self.assertIn("test_fail=1", report)
@@ -566,6 +571,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertIn("export_policy_confirmed", signal_kinds)
         self.assertEqual(candidate["review_queue"]["next_action"], "review_downstream_export_policy")
         self.assertEqual(candidate["review_queue"]["queue_priority"]["bucket"], "ready_policy_confirmed")
+        self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["lifecycle_state"], "completed")
         self.assertEqual(candidate["review_queue"]["lifecycle_summary"]["policy_state"], "confirmed")
         self.assertTrue(candidate["review_queue"]["export_policy_confirmation"]["confirmed"])
         self.assertTrue(candidate["policy"]["export_policy_confirmed"])
@@ -787,7 +793,10 @@ class EvaluationLoopTests(unittest.TestCase):
                     "queue_state": "needs_review",
                     "next_action": "record_acceptance_or_review_resolution",
                     "blocked_reasons": [],
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "backend_metadata": {"backend_id": "backend-a", "model_id": "model-a"},
                     "comparison_evidence": {"roles": ["candidate"]},
                     "eligible_for_supervised_candidate": False,
@@ -805,7 +814,10 @@ class EvaluationLoopTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "review_downstream_export_policy",
                     "blocked_reasons": [],
-                    "lifecycle_summary": {"policy_state": "confirmed"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "completed",
+                        "policy_state": "confirmed",
+                    },
                     "backend_metadata": {"backend_id": "backend-b", "model_id": "model-b"},
                     "comparison_evidence": {"roles": ["winner"]},
                     "eligible_for_supervised_candidate": True,
@@ -824,15 +836,66 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(diff["counts"]["changed_candidate_count"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["queue_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["next_action"], 1)
+        self.assertEqual(diff["counts"]["field_change_counts"]["lifecycle_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["policy_state"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["comparison_role"], 1)
         self.assertEqual(diff["counts"]["field_change_counts"]["backend_id"], 1)
         self.assertEqual(change["event_id"], "candidate-a")
         self.assertIn("queue_state", change["changed_fields"])
+        self.assertIn("lifecycle_state", change["changed_fields"])
         self.assertEqual(change["before"]["comparison_role"], "candidate")
         self.assertEqual(change["after"]["comparison_role"], "winner")
         self.assertEqual(change["before"]["backend_id"], "backend-a")
         self.assertEqual(change["after"]["backend_id"], "backend-b")
+
+    def test_candidate_diff_normalizes_legacy_lifecycle_fallbacks(self) -> None:
+        preview = {
+            "schema_name": "software-satellite-learning-dataset-preview",
+            "schema_version": 1,
+            "workspace_id": "local-default",
+            "export_mode": "preview_only",
+            "training_export_ready": False,
+            "human_gate_required": True,
+            "review_queue": [
+                {
+                    "event_id": "paused-without-lifecycle",
+                    "label": "Paused legacy candidate",
+                    "queue_state": "ready",
+                    "next_action": "complete_adoption_checklist",
+                    "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                },
+                {
+                    "event_id": "invalid-lifecycle",
+                    "label": "Invalid lifecycle candidate",
+                    "queue_state": "ready",
+                    "next_action": "confirm_export_policy",
+                    "lifecycle_summary": {
+                        "lifecycle_state": "almost_done",
+                        "policy_state": "pending_confirmation",
+                    },
+                },
+                {
+                    "event_id": "blocked-policy",
+                    "label": "Blocked wins over policy",
+                    "queue_state": "missing_source",
+                    "next_action": "restore_source_event",
+                    "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                },
+            ],
+            "supervised_example_candidates": [],
+            "excluded_candidates": [],
+        }
+
+        diff = build_learning_candidate_diff_summary(
+            preview,
+            preview,
+            base_label="legacy",
+            target_label="legacy",
+        )
+
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["paused"], 1)
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["blocked"], 1)
+        self.assertEqual(diff["base"]["counts"]["lifecycle_states"]["unknown"], 1)
 
     def test_jsonl_export_dry_run_from_human_selected_candidates_writes_manifest_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1672,7 +1735,7 @@ class EvaluationLoopTests(unittest.TestCase):
                 "outcome": {
                     "status": "ok",
                     "quality_status": "pass",
-                    "execution_status": "ok",
+                    "execution_status": "running",
                 },
                 "content": {
                     "prompt": "Keep the queue typed.",
@@ -1835,6 +1898,7 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(queue_item["next_action"], "restore_source_artifact")
         self.assertEqual(queue_item["blocked_reason"], "missing_source_artifact")
         self.assertIn("missing_source_artifact", excluded["excluded_by"])
+        self.assertEqual(queue_item["lifecycle_summary"]["lifecycle_state"], "blocked")
         self.assertEqual(queue_item["lifecycle_summary"]["source_state"], "missing_source")
         self.assertEqual(queue_item["lifecycle_summary"]["test_state"], "passed")
         self.assertEqual(queue_item["lifecycle_summary"]["selection_state"], "selected")
@@ -1842,6 +1906,73 @@ class EvaluationLoopTests(unittest.TestCase):
             queue_item["event_contract"]["source_artifact"]["source_status"],
             "missing_source",
         )
+
+    def test_learning_lifecycle_uses_status_when_execution_status_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_artifact_path = root / "artifacts" / "agent_lane" / "running-run.json"
+            source_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            source_artifact_path.write_text("{}", encoding="utf-8")
+            event_id = "event-running-status-fallback"
+            event = {
+                "event_id": event_id,
+                "event_kind": "agent_task_run",
+                "recorded_at_utc": "2026-04-01T00:00:00+00:00",
+                "session": {"surface": "agent_lane", "mode": "patch_plan_verify"},
+                "outcome": {
+                    "status": "RUNNING",
+                    "quality_status": "pass",
+                },
+                "content": {
+                    "prompt": "Keep status fallback visible in lifecycle inspection.",
+                    "output_text": "The candidate is still running according to the legacy status field.",
+                    "options": {
+                        "validation_mode": "agent_lane",
+                        "validation_command": "python -m unittest tests.test_status_fallback",
+                        "pass_definition": "Lifecycle inspection uses outcome.status when execution_status is absent.",
+                    },
+                },
+                "source_refs": {
+                    "artifact_ref": {
+                        "artifact_kind": "agent_run",
+                        "artifact_path": str(source_artifact_path),
+                    },
+                },
+            }
+            accepted_signal = build_evaluation_signal(
+                signal_kind="acceptance",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            test_signal = build_evaluation_signal(
+                signal_kind="test_pass",
+                source_event_id=event_id,
+                source_event=event,
+            )
+            preview = build_learning_dataset_preview(
+                {"workspace_id": "local-default", "paths": {}},
+                {
+                    "candidates": [
+                        {
+                            "event_id": event_id,
+                            "state": "ready",
+                            "label": "Running status fallback candidate",
+                            "reasons": ["accepted", "test_pass"],
+                            "blocked_by": [],
+                            "export_decision": "include_when_approved",
+                            "ready_for_policy": True,
+                        }
+                    ]
+                },
+                events_by_id={event_id: event},
+                explicit_signals=[accepted_signal, test_signal],
+                comparisons=[],
+            )
+            queue_item = preview["review_queue"][0]
+
+        self.assertEqual(queue_item["queue_state"], "ready")
+        self.assertEqual(queue_item["lifecycle_summary"]["execution_status"], "RUNNING")
+        self.assertEqual(queue_item["lifecycle_summary"]["lifecycle_state"], "running")
 
     def test_learning_preview_infers_contract_root_from_direct_artifact_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2114,8 +2245,54 @@ class EvaluationLoopTests(unittest.TestCase):
         self.assertEqual(preview["supervised_example_candidates"], [])
         self.assertEqual(preview["excluded_candidates"][0]["blocked_reason"], "rejected")
         self.assertEqual(
+            preview["review_queue"][0]["lifecycle_summary"]["lifecycle_state"],
+            "blocked",
+        )
+        self.assertEqual(
             preview["review_queue"][0]["lifecycle_summary"]["selection_state"],
             "rejected",
+        )
+
+    def test_learning_lifecycle_treats_canceled_and_aborted_evidence_as_cancelled(self) -> None:
+        lifecycle_kwargs = {
+            "queue_state": "ready",
+            "curation_state": "ready",
+            "source_state": "available",
+            "test_state": "passed",
+            "review_state": "not_recorded",
+            "selection_state": "selected",
+            "policy_state": "pending_confirmation",
+            "supervised_text_state": "available",
+            "quality_status": "pass",
+            "execution_status": "ok",
+        }
+
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=["canceled"],
+                excluded_by=[],
+                blocked_reasons=[],
+            ),
+            "cancelled",
+        )
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=[],
+                excluded_by=["aborted"],
+                blocked_reasons=[],
+            ),
+            "cancelled",
+        )
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=[],
+                excluded_by=[],
+                blocked_reasons=["CANCELLED"],
+            ),
+            "cancelled",
         )
 
     def test_learning_preview_requires_traceable_test_and_selection_evidence(self) -> None:

@@ -804,7 +804,10 @@ class LocalUiControllerTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "confirm_export_policy",
                     "blocked_reason": None,
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "comparison_evidence": {"roles": ["winner"]},
                     "backend_metadata": {"backend_id": "mock-careful-local"},
                     "source_paths": {"source_artifact_path": str(source_artifact_path)},
@@ -867,7 +870,10 @@ class LocalUiControllerTests(unittest.TestCase):
                     "queue_state": "ready",
                     "next_action": "confirm_export_policy",
                     "blocked_reasons": ["export_policy_not_confirmed"],
-                    "lifecycle_summary": {"policy_state": "pending_confirmation"},
+                    "lifecycle_summary": {
+                        "lifecycle_state": "queued",
+                        "policy_state": "pending_confirmation",
+                    },
                     "comparison_evidence": {"roles": ["winner"]},
                     "backend_metadata": {"backend_id": "mock-careful-local"},
                     "source_paths": {"source_artifact_path": str(source_artifact_path)},
@@ -901,6 +907,7 @@ class LocalUiControllerTests(unittest.TestCase):
                     "before": {
                         "event_id": "event-ready",
                         "queue_state": "ready",
+                        "lifecycle_state": "queued",
                         "next_action": "confirm_export_policy",
                         "policy_state": "pending_confirmation",
                         "comparison_role": "winner",
@@ -909,6 +916,7 @@ class LocalUiControllerTests(unittest.TestCase):
                     "after": {
                         "event_id": "event-ready",
                         "queue_state": "ready",
+                        "lifecycle_state": "queued",
                         "next_action": "confirm_export_policy",
                         "policy_state": "pending_confirmation",
                         "comparison_role": "winner",
@@ -934,11 +942,15 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertEqual(review["counts"]["training_ready_artifact_count"], 0)
         self.assertEqual(review["counts"]["jsonl_record_write_count"], 0)
         self.assertEqual(review["counts"]["candidate_row_count"], 4)
+        self.assertEqual(review["counts"]["lifecycle_states"]["queued"], 4)
         self.assertIn("training-ready=0", build_learning_candidate_review_state(review))
         self.assertIn("jsonl-would-write=0", build_learning_candidate_review_state(review))
+        self.assertIn("lifecycle=queued:4", build_learning_candidate_review_state(review))
         self.assertIn("Learning candidate review: read-only", report)
+        self.assertIn("Lifecycle states: queued=4", report)
         self.assertIn("JSONL records that would be written: 0", report)
         self.assertEqual(rows[0]["queue_state"], "ready")
+        self.assertEqual(rows[0]["lifecycle_state"], "queued")
         self.assertEqual(rows[0]["policy_state"], "pending_confirmation")
         self.assertEqual(rows[0]["comparison_role"], "winner")
         self.assertEqual(rows[0]["backend_id"], "mock-careful-local")
@@ -955,6 +967,64 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertEqual(build_learning_candidate_review_rows(review), [])
         self.assertIn("missing=4", build_learning_candidate_review_state(review))
         self.assertIn("source=", build_learning_candidate_review_report(review))
+
+    def test_learning_candidate_review_normalizes_legacy_lifecycle_fallbacks(self) -> None:
+        controller, _store, root = self.make_controller()
+        learning_root = root / "artifacts" / "evaluation" / "local-default" / "learning"
+        learning_root.mkdir(parents=True)
+        preview_path = learning_root / "preview-latest.json"
+        preview_path.write_text(
+            json.dumps(
+                {
+                    "schema_name": "software-satellite-learning-dataset-preview",
+                    "schema_version": 1,
+                    "workspace_id": "local-default",
+                    "export_mode": "preview_only",
+                    "training_export_ready": False,
+                    "human_gate_required": True,
+                    "counts": {"review_queue_count": 3},
+                    "review_queue": [
+                        {
+                            "event_id": "paused-without-lifecycle",
+                            "queue_state": "ready",
+                            "next_action": "complete_adoption_checklist",
+                            "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                        },
+                        {
+                            "event_id": "invalid-lifecycle",
+                            "queue_state": "ready",
+                            "next_action": "confirm_export_policy",
+                            "lifecycle_summary": {
+                                "lifecycle_state": "almost_done",
+                                "policy_state": "pending_confirmation",
+                            },
+                        },
+                        {
+                            "event_id": "blocked-policy",
+                            "queue_state": "missing_source",
+                            "next_action": "restore_source_event",
+                            "lifecycle_summary": {"policy_state": "confirmed_but_not_ready"},
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        review = controller.build_learning_candidate_review()
+        rows_by_event = {
+            row["event_id"]: row
+            for row in build_learning_candidate_review_rows(review)
+        }
+
+        self.assertEqual(rows_by_event["paused-without-lifecycle"]["lifecycle_state"], "paused")
+        self.assertEqual(rows_by_event["invalid-lifecycle"]["lifecycle_state"], "unknown")
+        self.assertEqual(rows_by_event["blocked-policy"]["lifecycle_state"], "blocked")
+        self.assertEqual(review["counts"]["lifecycle_states"]["paused"], 1)
+        self.assertEqual(review["counts"]["lifecycle_states"]["unknown"], 1)
+        self.assertEqual(review["counts"]["lifecycle_states"]["blocked"], 1)
 
     def test_learning_candidate_review_flags_unsafe_policy_strings(self) -> None:
         controller, _store, root = self.make_controller()

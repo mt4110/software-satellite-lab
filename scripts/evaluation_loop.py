@@ -90,10 +90,12 @@ CURATION_BLOCKING_REASONS = {"rejected", "review_unresolved", "test_fail", "fail
 LEARNING_BLOCKING_REASONS = CURATION_BLOCKING_REASONS | {"noisy", "unresolved"}
 LEARNING_SELECTION_REASONS = {"accepted", "review_resolved", "comparison_winner"}
 LEARNING_REVIEW_QUEUE_STATES = ("blocked", "missing_source", "missing_supervised_text", "ready", "needs_review")
+LEARNING_LIFECYCLE_STATES = ("queued", "running", "blocked", "paused", "completed", "failed", "cancelled")
 LEARNING_CANDIDATE_DIFF_FIELDS = (
     "queue_state",
     "blocked_reason",
     "next_action",
+    "lifecycle_state",
     "policy_state",
     "comparison_role",
     "backend_id",
@@ -113,6 +115,10 @@ LEARNING_MISSING_SOURCE_EXCLUSIONS = {
 PASS_QUALITY_STATUSES = {"pass", "passed", "quality_pass"}
 FAIL_QUALITY_STATUSES = {"fail", "failed", "quality_fail"}
 FAIL_EXECUTION_STATUSES = {"fail", "failed", "blocked", "error", "timeout"}
+RUNNING_EXECUTION_STATUSES = {"in_progress", "processing", "running"}
+QUEUED_EXECUTION_STATUSES = {"pending", "queued", "scheduled"}
+PAUSED_EXECUTION_STATUSES = {"on_hold", "paused"}
+CANCELLED_EXECUTION_STATUSES = {"aborted", "canceled", "cancelled"}
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -2881,11 +2887,77 @@ def _learning_next_action(
     return required_next_steps[0] if required_next_steps else "review_candidate"
 
 
+def _learning_lifecycle_state(
+    *,
+    queue_state: str,
+    curation_state: str,
+    source_state: str,
+    test_state: str,
+    review_state: str,
+    selection_state: str,
+    policy_state: str,
+    supervised_text_state: str,
+    quality_status: str | None,
+    execution_status: str | None,
+    reasons: Iterable[str],
+    excluded_by: Iterable[str],
+    blocked_reasons: Iterable[str],
+) -> str:
+    reason_set = {reason.lower() for reason in _string_list(list(reasons))}
+    exclusion_set = {reason.lower() for reason in _string_list(list(excluded_by))}
+    blocked_set = {reason.lower() for reason in _string_list(list(blocked_reasons))}
+    quality = (_clean_text(quality_status) or "").lower()
+    execution = (_clean_text(execution_status) or "").lower()
+    if (
+        execution in CANCELLED_EXECUTION_STATUSES
+        or bool(reason_set & CANCELLED_EXECUTION_STATUSES)
+        or bool(exclusion_set & CANCELLED_EXECUTION_STATUSES)
+        or bool(blocked_set & CANCELLED_EXECUTION_STATUSES)
+    ):
+        return "cancelled"
+    if execution == "blocked" and test_state != "failed":
+        return "blocked"
+    if (
+        test_state == "failed"
+        or quality in FAIL_QUALITY_STATUSES
+        or execution in FAIL_EXECUTION_STATUSES
+        or bool(blocked_set & {"test_fail", "failed"})
+    ):
+        return "failed"
+    if selection_state == "rejected" or "rejected" in blocked_set:
+        return "blocked"
+    if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
+        return "blocked"
+    if review_state == "unresolved" or source_state in {"missing_source", "missing"}:
+        return "blocked"
+    if supervised_text_state == "missing":
+        return "blocked"
+    if (
+        execution in PAUSED_EXECUTION_STATUSES
+        or curation_state == "paused"
+        or "paused" in reason_set
+        or "paused" in exclusion_set
+        or "paused" in blocked_set
+    ):
+        return "paused"
+    if queue_state == "ready" and policy_state == "confirmed":
+        return "completed"
+    if policy_state == "confirmed_but_not_ready":
+        return "paused"
+    if execution in RUNNING_EXECUTION_STATUSES:
+        return "running"
+    if execution in QUEUED_EXECUTION_STATUSES:
+        return "queued"
+    return "queued"
+
+
 def _learning_lifecycle_summary(
     candidate: Mapping[str, Any],
     *,
     event: Mapping[str, Any] | None,
     excluded_by: Iterable[str],
+    queue_state: str,
+    blocked_reasons: Iterable[str],
     policy_confirmation: Mapping[str, Any],
     source_contract: Mapping[str, Any] | None = None,
     comparison_traces: Iterable[Mapping[str, Any]] | None = None,
@@ -2973,15 +3045,34 @@ def _learning_lifecycle_summary(
         supervised_text_state = "available"
     else:
         supervised_text_state = "unknown"
+    curation_state = _clean_text(candidate.get("state")) or "needs_review"
+    source_state = (
+        "missing_source"
+        if missing_source
+        else "available"
+        if event is not None
+        else "missing"
+    )
+    quality_status = _clean_text(outcome.get("quality_status"))
+    execution_status = _execution_status(event) if event is not None else None
     return {
-        "curation_state": _clean_text(candidate.get("state")) or "needs_review",
-        "source_state": (
-            "missing_source"
-            if missing_source
-            else "available"
-            if event is not None
-            else "missing"
+        "lifecycle_state": _learning_lifecycle_state(
+            queue_state=queue_state,
+            curation_state=curation_state,
+            source_state=source_state,
+            test_state=test_state,
+            review_state=review_state,
+            selection_state=selection_state,
+            policy_state=policy_state,
+            supervised_text_state=supervised_text_state,
+            quality_status=quality_status,
+            execution_status=execution_status,
+            reasons=reasons,
+            excluded_by=exclusions,
+            blocked_reasons=blocked_reasons,
         ),
+        "curation_state": curation_state,
+        "source_state": source_state,
         "source_artifact_state": source_artifact_state,
         "test_state": test_state,
         "review_state": review_state,
@@ -2989,8 +3080,8 @@ def _learning_lifecycle_summary(
         "comparison_state": comparison_state,
         "policy_state": policy_state,
         "supervised_text_state": supervised_text_state,
-        "quality_status": _clean_text(outcome.get("quality_status")),
-        "execution_status": _clean_text(outcome.get("execution_status")),
+        "quality_status": quality_status,
+        "execution_status": execution_status,
     }
 
 
@@ -3096,6 +3187,8 @@ def _learning_review_queue_item(
             candidate,
             event=event,
             excluded_by=exclusions,
+            queue_state=queue_state,
+            blocked_reasons=blocked_reasons,
             policy_confirmation=policy_confirmation,
             source_contract=source_contract,
             comparison_traces=comparison_trace_items,
@@ -3622,6 +3715,12 @@ def build_learning_dataset_preview(
         for item in review_queue
         for reason in _string_list(item.get("blocked_reasons"))
     )
+    review_queue_lifecycle_state_counts = Counter(
+        _learning_normalized_lifecycle_state(
+            _mapping_dict(item.get("lifecycle_summary")).get("lifecycle_state")
+        )
+        for item in review_queue
+    )
     policy_confirmed_candidate_count = sum(
         1
         for item in review_queue
@@ -3668,6 +3767,10 @@ def build_learning_dataset_preview(
             "review_queue_blocked_reasons": {
                 key: int(value)
                 for key, value in sorted(review_queue_blocked_reason_counts.items())
+            },
+            "review_queue_lifecycle_states": {
+                key: int(value)
+                for key, value in sorted(review_queue_lifecycle_state_counts.items())
             },
             "policy_confirmed_candidate_count": policy_confirmed_candidate_count,
             "policy_pending_candidate_count": policy_pending_candidate_count,
@@ -3880,6 +3983,34 @@ def _learning_candidate_diff_policy_state(item: Mapping[str, Any], queue_summary
     return "unknown"
 
 
+def _learning_normalized_lifecycle_state(value: Any, *, default: str = "unknown") -> str:
+    state = _clean_text(value)
+    if state in LEARNING_LIFECYCLE_STATES:
+        return state
+    return default
+
+
+def _learning_candidate_diff_lifecycle_state(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> str:
+    for source in (
+        _mapping_dict(queue_summary.get("lifecycle_summary")),
+        _mapping_dict(item.get("lifecycle_summary")),
+        queue_summary,
+        item,
+    ):
+        state = _clean_text(source.get("lifecycle_state"))
+        if state is not None:
+            return _learning_normalized_lifecycle_state(state)
+    queue_state = _clean_text(queue_summary.get("queue_state"))
+    policy_state = _learning_candidate_diff_policy_state(item, queue_summary)
+    if queue_state == "ready" and policy_state == "confirmed":
+        return "completed"
+    if queue_state in {"blocked", "missing_source", "missing_supervised_text"}:
+        return "blocked"
+    if policy_state == "confirmed_but_not_ready":
+        return "paused"
+    return "queued" if queue_state in {"ready", "needs_review"} else "unknown"
+
+
 def _learning_candidate_diff_comparison_roles(item: Mapping[str, Any], queue_summary: Mapping[str, Any]) -> list[str]:
     roles: list[str] = []
     comparison_evidence = _mapping_dict(item.get("comparison_evidence")) or _mapping_dict(
@@ -3954,6 +4085,7 @@ def _learning_candidate_diff_candidate_record(
         ),
         "blocked_reasons": blocked_reasons,
         "next_action": _clean_text(queue_summary.get("next_action")) or "review_candidate",
+        "lifecycle_state": _learning_candidate_diff_lifecycle_state(item, queue_summary),
         "policy_state": _learning_candidate_diff_policy_state(item, queue_summary),
         "comparison_role": comparison_role,
         "comparison_roles": comparison_roles,
@@ -4068,6 +4200,10 @@ def _learning_candidate_diff_artifact_counts(records: Mapping[str, Mapping[str, 
         _clean_text(record.get("policy_state")) or "unknown"
         for record in records.values()
     )
+    lifecycle_state_counts = Counter(
+        _learning_normalized_lifecycle_state(record.get("lifecycle_state"))
+        for record in records.values()
+    )
     comparison_role_counts = Counter(
         role
         for record in records.values()
@@ -4082,6 +4218,7 @@ def _learning_candidate_diff_artifact_counts(records: Mapping[str, Mapping[str, 
         "queue_states": {key: int(value) for key, value in sorted(queue_state_counts.items())},
         "blocked_reasons": {key: int(value) for key, value in sorted(blocked_reason_counts.items())},
         "next_actions": {key: int(value) for key, value in sorted(next_action_counts.items())},
+        "lifecycle_states": {key: int(value) for key, value in sorted(lifecycle_state_counts.items())},
         "policy_states": {key: int(value) for key, value in sorted(policy_state_counts.items())},
         "comparison_roles": {key: int(value) for key, value in sorted(comparison_role_counts.items())},
         "backend_ids": {key: int(value) for key, value in sorted(backend_id_counts.items())},
@@ -4513,6 +4650,7 @@ def _human_selected_candidate_record(
             "eligible_for_supervised_candidate": False,
             "excluded_by": ["missing_learning_preview_candidate"],
             "lifecycle_summary": {
+                "lifecycle_state": "blocked",
                 "source_state": "missing_from_learning_preview",
                 "test_state": "missing_trace",
                 "review_state": "unknown",
@@ -4680,6 +4818,13 @@ def build_human_selected_candidate_list(
         for candidate in selected_candidates
         if bool(_mapping_dict(candidate.get("policy")).get("export_policy_confirmed"))
     )
+    lifecycle_state_counts = Counter(
+        _learning_candidate_diff_lifecycle_state(
+            candidate,
+            _learning_candidate_diff_queue_summary(candidate),
+        )
+        for candidate in selected_candidates
+    )
     preview_paths = _mapping_dict(learning_preview.get("paths"))
     return {
         "schema_name": HUMAN_SELECTED_CANDIDATE_LIST_SCHEMA_NAME,
@@ -4711,6 +4856,10 @@ def build_human_selected_candidate_list(
             "selected_review_queue_count": len(matched_candidates),
             "selected_not_supervised_candidate_count": len(selected_candidates) - len(supervised_selected),
             "policy_confirmed_selected_count": policy_confirmed_selected_count,
+            "lifecycle_states": {
+                key: int(value)
+                for key, value in sorted(lifecycle_state_counts.items())
+            },
         },
         "selected_candidates": selected_candidates,
         "missing_candidates": missing_candidates,
@@ -5067,6 +5216,7 @@ def _jsonl_dry_run_candidate_record(
         "queue_state": _clean_text(queue_summary.get("queue_state")),
         "queue_priority": copy.deepcopy(_mapping_dict(queue_summary.get("queue_priority"))),
         "next_action": _clean_text(queue_summary.get("next_action")),
+        "lifecycle_summary": copy.deepcopy(_mapping_dict(queue_summary.get("lifecycle_summary"))),
         "blocked_reason": _clean_text(queue_summary.get("blocked_reason")),
         "blocked_reasons": blocked_reasons,
         "required_before_training_export": [
@@ -5178,6 +5328,13 @@ def build_jsonl_training_export_dry_run(
         for candidate in candidates
         if candidate.get("dry_run_status") == "missing_learning_preview_candidate"
     )
+    lifecycle_state_counts = Counter(
+        _learning_candidate_diff_lifecycle_state(
+            candidate,
+            _learning_candidate_diff_queue_summary(candidate),
+        )
+        for candidate in candidates
+    )
     blocked_candidate_count = len(candidates) - future_candidate_count
     return {
         "schema_name": JSONL_TRAINING_EXPORT_DRY_RUN_SCHEMA_NAME,
@@ -5211,6 +5368,10 @@ def build_jsonl_training_export_dry_run(
             "would_write_jsonl_record_count": 0,
             "supervised_example_text_copied_count": 0,
             "raw_log_text_copied_count": 0,
+            "lifecycle_states": {
+                key: int(value)
+                for key, value in sorted(lifecycle_state_counts.items())
+            },
         },
         "candidates": candidates,
         "export_policy": {
@@ -5363,6 +5524,14 @@ def format_learning_candidate_diff_summary_report(diff: Mapping[str, Any]) -> st
     ]
     if changed_field_parts:
         lines.append(f"Field changes: {'; '.join(changed_field_parts)}")
+    for label, summary in (("Base lifecycle states", base), ("Target lifecycle states", target)):
+        lifecycle_states = _mapping_dict(_mapping_dict(summary.get("counts")).get("lifecycle_states"))
+        if not lifecycle_states:
+            continue
+        ordered_states = [state for state in LEARNING_LIFECYCLE_STATES if state in lifecycle_states]
+        ordered_states.extend(sorted(set(lifecycle_states) - set(ordered_states)))
+        parts = [f"{state}={int(lifecycle_states.get(state) or 0)}" for state in ordered_states]
+        lines.append(f"{label}: {'; '.join(parts)}")
     changes = [
         item
         for item in diff.get("changes") or []
@@ -5408,6 +5577,12 @@ def format_human_selected_candidate_list_report(selection: Mapping[str, Any]) ->
     ]
     if paths.get("human_selected_latest_path"):
         lines.append(f"Selection: {paths['human_selected_latest_path']}")
+    lifecycle_states = _mapping_dict(counts.get("lifecycle_states"))
+    if lifecycle_states:
+        ordered_states = [state for state in LEARNING_LIFECYCLE_STATES if state in lifecycle_states]
+        ordered_states.extend(sorted(set(lifecycle_states) - set(ordered_states)))
+        parts = [f"{state}={int(lifecycle_states.get(state) or 0)}" for state in ordered_states]
+        lines.append(f"Lifecycle states: {'; '.join(parts)}")
     candidates = [
         item
         for item in selection.get("selected_candidates") or []
@@ -5422,12 +5597,13 @@ def format_human_selected_candidate_list_report(selection: Mapping[str, Any]) ->
                 or "candidate"
             )
             state = _clean_text(item.get("queue_state")) or "missing_from_learning_preview"
+            lifecycle = _learning_candidate_diff_lifecycle_state(item, _learning_candidate_diff_queue_summary(item))
             next_action = _clean_text(item.get("next_action")) or "review_candidate"
             supervised = "yes" if _clean_text(item.get("supervised_example_candidate_id")) else "no"
             policy = _mapping_dict(item.get("policy"))
             policy_state = "confirmed" if policy.get("export_policy_confirmed") else "pending"
             lines.append(
-                f"- {state}: {label} "
+                f"- {state}/{lifecycle}: {label} "
                 f"(supervised={supervised}; policy={policy_state}; next={next_action})"
             )
     return "\n".join(lines)
@@ -5453,6 +5629,12 @@ def format_jsonl_training_export_dry_run_report(dry_run: Mapping[str, Any]) -> s
     ]
     if paths.get("jsonl_export_dry_run_latest_path"):
         lines.append(f"Dry-run: {paths['jsonl_export_dry_run_latest_path']}")
+    lifecycle_states = _mapping_dict(counts.get("lifecycle_states"))
+    if lifecycle_states:
+        ordered_states = [state for state in LEARNING_LIFECYCLE_STATES if state in lifecycle_states]
+        ordered_states.extend(sorted(set(lifecycle_states) - set(ordered_states)))
+        parts = [f"{state}={int(lifecycle_states.get(state) or 0)}" for state in ordered_states]
+        lines.append(f"Lifecycle states: {'; '.join(parts)}")
     candidates = [
         item
         for item in dry_run.get("candidates") or []
@@ -5467,12 +5649,13 @@ def format_jsonl_training_export_dry_run_report(dry_run: Mapping[str, Any]) -> s
                 or "candidate"
             )
             status = _clean_text(item.get("dry_run_status")) or "unknown"
+            lifecycle = _learning_candidate_diff_lifecycle_state(item, _learning_candidate_diff_queue_summary(item))
             next_action = _clean_text(item.get("next_action")) or "review_candidate"
             policy = _mapping_dict(item.get("policy"))
             policy_state = "confirmed" if policy.get("export_policy_confirmed") else "pending"
             future = "yes" if item.get("dry_run_eligible_for_future_export_if_separately_approved") else "no"
             lines.append(
-                f"- {status}: {label} "
+                f"- {status}/{lifecycle}: {label} "
                 f"(future={future}; policy={policy_state}; next={next_action})"
             )
     return "\n".join(lines)
@@ -5507,6 +5690,16 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
         ordered_states.extend(sorted(set(queue_states) - set(ordered_states)))
         parts = [f"{state}={int(queue_states.get(state) or 0)}" for state in ordered_states]
         lines.append(f"Review queue: {'; '.join(parts)}")
+    lifecycle_states = _mapping_dict(counts.get("review_queue_lifecycle_states"))
+    if lifecycle_states:
+        ordered_lifecycle_states = [
+            state
+            for state in LEARNING_LIFECYCLE_STATES
+            if state in lifecycle_states
+        ]
+        ordered_lifecycle_states.extend(sorted(set(lifecycle_states) - set(ordered_lifecycle_states)))
+        parts = [f"{state}={int(lifecycle_states.get(state) or 0)}" for state in ordered_lifecycle_states]
+        lines.append(f"Lifecycle states: {'; '.join(parts)}")
     queue_next_actions = _mapping_dict(counts.get("review_queue_next_actions"))
     if queue_next_actions:
         parts = [f"{key}={int(value)}" for key, value in queue_next_actions.items()]
@@ -5589,10 +5782,13 @@ def format_learning_dataset_preview_report(preview: Mapping[str, Any]) -> str:
                 or "candidate"
             )
             state = _clean_text(item.get("queue_state")) or "needs_review"
+            lifecycle = _learning_normalized_lifecycle_state(
+                _mapping_dict(item.get("lifecycle_summary")).get("lifecycle_state")
+            )
             next_action = _clean_text(item.get("next_action")) or "review_candidate"
             blocked_reason = _clean_text(item.get("blocked_reason")) or "n/a"
             lines.append(
-                f"- P{rank} {state} {label} "
+                f"- P{rank} {state}/{lifecycle} {label} "
                 f"(next={next_action}; blocked={blocked_reason})"
             )
     return "\n".join(lines)
