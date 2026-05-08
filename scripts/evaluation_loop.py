@@ -2041,6 +2041,51 @@ def record_review_resolution_signal(
     )
 
 
+def record_selection_signal(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    source_event_id: str,
+    accepted: bool,
+    decision_summary: str | None = None,
+    review_id: str | None = None,
+    review_url: str | None = None,
+    target_event_id: str | None = None,
+    relation_kind: str | None = None,
+    origin: str = "manual",
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    event_id = _clean_text(source_event_id)
+    if event_id is None:
+        raise ValueError("Selection signals require a source_event_id.")
+    events_by_id = software_work_events_by_id(root=resolved_root, workspace_id=workspace_id)
+    source_event = events_by_id.get(event_id)
+    if source_event is None:
+        raise ValueError(f"Unknown selection source_event_id `{event_id}`.")
+    signal_kind = "acceptance" if accepted else "rejection"
+    signal = build_evaluation_signal(
+        workspace_id=workspace_id,
+        signal_kind=signal_kind,
+        source_event_id=event_id,
+        source_event=source_event,
+        target_event_id=target_event_id,
+        relation_kind=relation_kind,
+        rationale=_clean_text(decision_summary),
+        evidence={
+            "decision_summary": _clean_text(decision_summary),
+            "review_id": _clean_text(review_id),
+            "review_url": _clean_text(review_url),
+        },
+        origin=origin,
+        tags=["human-selection", "accepted" if accepted else "rejected"],
+    )
+    return append_evaluation_signal(
+        evaluation_signal_log_path(workspace_id=workspace_id, root=resolved_root),
+        signal,
+        workspace_id=workspace_id,
+    )
+
+
 def record_export_policy_confirmation_signal(
     *,
     root: Path | None = None,
@@ -2155,6 +2200,39 @@ def _curation_required_next_steps(candidate: Mapping[str, Any]) -> list[str]:
     return steps or ["review_candidate"]
 
 
+def _curation_signal_capture_hint(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    event_id = _clean_text(candidate.get("event_id"))
+    state = _clean_text(candidate.get("state")) or "needs_review"
+    reasons = set(_string_list(candidate.get("reasons")))
+    blocked_by = sorted(reasons & CURATION_BLOCKING_REASONS)
+    suggested_signal_kinds: list[str] = []
+    suggested_next_actions = _curation_required_next_steps(candidate)
+
+    if blocked_by:
+        if "review_unresolved" in blocked_by:
+            suggested_signal_kinds.append("review_resolved")
+    else:
+        if "needs_test_signal" in reasons:
+            suggested_signal_kinds.extend(["test_pass", "test_fail"])
+        if "needs_human_selection" in reasons:
+            suggested_signal_kinds.extend(
+                ["acceptance", "rejection", "review_resolved", "review_unresolved"]
+            )
+        elif state == "ready":
+            suggested_signal_kinds.extend(["rejection", "review_unresolved"])
+
+    return {
+        "source_event_id": event_id,
+        "suggested_signal_kinds": _deduplicate_strings(suggested_signal_kinds),
+        "suggested_next_actions": suggested_next_actions,
+        "requires_rationale": bool(suggested_signal_kinds),
+        "preview_only": True,
+        "human_gate_required": True,
+        "training_export_allowed": False,
+        "blocking_reasons_must_be_repaired": blocked_by,
+    }
+
+
 def _curation_preview_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     reasons = _string_list(candidate.get("reasons"))
     blocked_by = [
@@ -2173,6 +2251,7 @@ def _curation_preview_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
         "ready_for_policy": _curation_candidate_ready_for_policy(candidate),
         "adoption_checklist": checklist,
         "required_next_steps": _curation_required_next_steps(candidate),
+        "signal_capture": _curation_signal_capture_hint(candidate),
     }
 
 
@@ -5850,7 +5929,14 @@ def format_curation_export_preview_report(preview: Mapping[str, Any]) -> str:
             state = _clean_text(item.get("state")) or "needs_review"
             decision = _clean_text(item.get("export_decision")) or "hold_for_review"
             steps = ", ".join(_string_list(item.get("required_next_steps"))[:2])
-            suffix = f"; next={steps}" if steps else ""
+            signal_capture = _mapping_dict(item.get("signal_capture"))
+            signal_kinds = ",".join(_string_list(signal_capture.get("suggested_signal_kinds"))[:4])
+            suffix_parts = []
+            if steps:
+                suffix_parts.append(f"next={steps}")
+            if signal_kinds:
+                suffix_parts.append(f"signals={signal_kinds}")
+            suffix = f"; {'; '.join(suffix_parts)}" if suffix_parts else ""
             lines.append(f"- {state}: {label} ({decision}{suffix})")
     return "\n".join(lines)
 
