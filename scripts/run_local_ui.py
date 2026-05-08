@@ -43,6 +43,11 @@ from audio_service import (
     serialize_audio_record,
 )
 from doctor import assets_summary, probe_optional_modules, probe_torch, probe_transformers
+from dogfood_workflows import (
+    DOGFOOD_WORKFLOW_KINDS,
+    format_dogfood_workflow_preview_report,
+    record_dogfood_workflow_preview,
+)
 from evaluation_loop import (
     CURATION_EXPORT_DECISIONS,
     CURATION_STATES,
@@ -3193,6 +3198,27 @@ def build_evaluation_signal_rows(snapshot: Mapping[str, Any] | None, *, limit: i
     return rows
 
 
+def build_dogfood_workflow_state(preview: Mapping[str, Any] | None) -> str:
+    if not preview:
+        return "No dogfood workflow preview has been launched yet."
+    recall = _ui_mapping(preview.get("recall"))
+    recall_summary = _ui_mapping(recall.get("summary"))
+    evaluation = _ui_mapping(preview.get("evaluation"))
+    snapshot = _ui_mapping(evaluation.get("snapshot"))
+    counts = _ui_mapping(snapshot.get("counts"))
+    return (
+        f"{_ui_clean_text(preview.get('label')) or 'Workflow'}; "
+        f"recall={_ui_int(recall_summary.get('selected_count'))}/"
+        f"{_ui_int(recall_summary.get('omitted_count'))}; "
+        f"signals={_ui_int(snapshot.get('signal_count'))}; "
+        f"review={_ui_int(counts.get('review_resolved'))}/{_ui_int(counts.get('review_unresolved'))}; "
+        f"curation={_ui_int(counts.get('curation_ready'))}/"
+        f"{_ui_int(counts.get('curation_needs_review'))}/"
+        f"{_ui_int(counts.get('curation_blocked'))}; "
+        "preview-only"
+    )
+
+
 class LocalUiController:
     def __init__(
         self,
@@ -3921,6 +3947,35 @@ class LocalUiController:
         review["report"] = build_learning_candidate_review_report(review)
         return review
 
+    def record_dogfood_workflow_preview(
+        self,
+        *,
+        workflow_kind: str,
+        query_text: str = "",
+        source_event_id: str = "",
+        target_event_id: str = "",
+        candidate_event_ids: list[str] | tuple[str, ...] | None = None,
+        winner_event_id: str = "",
+        file_hints: list[str] | tuple[str, ...] | None = None,
+        curation_filters: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        preview, latest_path, run_path = record_dogfood_workflow_preview(
+            root=self.workspace_store.root,
+            workspace_id=self.workspace_store.workspace_id,
+            workflow_kind=workflow_kind,
+            query_text=query_text.strip() or None,
+            source_event_id=source_event_id.strip() or None,
+            target_event_id=target_event_id.strip() or None,
+            candidate_event_ids=list(candidate_event_ids or []),
+            winner_event_id=winner_event_id.strip() or None,
+            file_hints=list(file_hints or []),
+            curation_filters=curation_filters,
+        )
+        preview["report"] = format_dogfood_workflow_preview_report(preview)
+        preview["workflow_preview_latest_path"] = str(latest_path)
+        preview["workflow_preview_run_path"] = str(run_path)
+        return preview
+
     def record_evaluation_review_resolution(
         self,
         *,
@@ -4646,6 +4701,15 @@ class LocalUiApp:
         self.evaluation_review_id = tk.StringVar(value="")
         self.evaluation_review_url = tk.StringVar(value="")
         self.evaluation_review_summary = tk.StringVar(value="")
+        self.dogfood_workflow_kind = tk.StringVar(value=DOGFOOD_WORKFLOW_KINDS[0])
+        self.dogfood_query = tk.StringVar(value="")
+        self.dogfood_source_event_id = tk.StringVar(value="")
+        self.dogfood_target_event_id = tk.StringVar(value="")
+        self.dogfood_candidate_event_ids = tk.StringVar(value="")
+        self.dogfood_winner_event_id = tk.StringVar(value="")
+        self.dogfood_workflow_state = tk.StringVar(
+            value="No dogfood workflow preview has been launched yet."
+        )
         self._recall_request_rows: dict[str, dict[str, Any]] = {}
         self._recall_selected_request_index: int | None = None
         self._recall_eval_miss_rows: dict[str, dict[str, Any]] = {}
@@ -5307,9 +5371,9 @@ class LocalUiApp:
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(6, weight=1)
         frame.grid_rowconfigure(9, weight=1)
-        frame.grid_rowconfigure(11, weight=1)
         frame.grid_rowconfigure(13, weight=1)
         frame.grid_rowconfigure(15, weight=1)
+        frame.grid_rowconfigure(17, weight=1)
         notebook.add(frame, text="Evaluation")
 
         header = ttk.Frame(frame, style="Card.TFrame")
@@ -5464,10 +5528,90 @@ class LocalUiApp:
         self.learning_candidate_review_tree.column("backend", width=150, stretch=False)
         self.learning_candidate_review_tree.column("source", width=320, stretch=True)
 
-        ttk.Label(frame, text="Signals", style="Section.TLabel").grid(row=10, column=0, sticky="w", pady=(14, 0))
+        workflow_frame = ttk.Frame(frame, style="Card.TFrame")
+        workflow_frame.grid(row=10, column=0, sticky="ew", pady=(14, 0))
+        workflow_frame.grid_columnconfigure(3, weight=1)
+        ttk.Label(
+            workflow_frame,
+            text="Dogfood Workflow",
+            style="Section.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        workflow_combo = ttk.Combobox(
+            workflow_frame,
+            textvariable=self.dogfood_workflow_kind,
+            values=list(DOGFOOD_WORKFLOW_KINDS),
+            width=30,
+            state="readonly",
+        )
+        workflow_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.launch_dogfood_workflow_button = ttk.Button(
+            workflow_frame,
+            text="Launch Preview",
+            style="Lab.TButton",
+            command=self.launch_dogfood_workflow_preview,
+        )
+        self.launch_dogfood_workflow_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            workflow_frame,
+            textvariable=self.dogfood_workflow_state,
+            style="Subtitle.TLabel",
+            wraplength=480,
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+        ttk.Label(
+            workflow_frame,
+            text="Query",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            workflow_frame,
+            text="Source Event",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(
+            workflow_frame,
+            text="Target Event",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(
+            workflow_frame,
+            textvariable=self.dogfood_query,
+            width=54,
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        ttk.Entry(
+            workflow_frame,
+            textvariable=self.dogfood_source_event_id,
+            width=34,
+        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(2, 0))
+        ttk.Entry(
+            workflow_frame,
+            textvariable=self.dogfood_target_event_id,
+            width=34,
+        ).grid(row=2, column=3, sticky="ew", padx=(8, 0), pady=(2, 0))
+        ttk.Label(
+            workflow_frame,
+            text="Candidate Events",
+            style="Subtitle.TLabel",
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            workflow_frame,
+            text="Winner Event",
+            style="Subtitle.TLabel",
+        ).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(
+            workflow_frame,
+            textvariable=self.dogfood_candidate_event_ids,
+            width=54,
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        ttk.Entry(
+            workflow_frame,
+            textvariable=self.dogfood_winner_event_id,
+            width=34,
+        ).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(2, 0))
+
+        ttk.Label(frame, text="Signals", style="Section.TLabel").grid(row=12, column=0, sticky="w", pady=(14, 0))
         self.evaluation_signals_tree = self._build_treeview(
             frame,
-            row=11,
+            row=13,
             columns=("kind", "source", "relation", "status", "label"),
             headings=("Kind", "Source", "Relation", "Status", "Label"),
             height=7,
@@ -5478,11 +5622,11 @@ class LocalUiApp:
         self.evaluation_signals_tree.column("status", width=110, stretch=False)
         self.evaluation_signals_tree.column("label", width=420, stretch=True)
 
-        ttk.Label(frame, text="Details", style="Section.TLabel").grid(row=12, column=0, sticky="w", pady=(14, 0))
-        self.evaluation_detail_output = self._readonly_text(frame, row=13, height=8)
+        ttk.Label(frame, text="Details", style="Section.TLabel").grid(row=14, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_detail_output = self._readonly_text(frame, row=15, height=8)
 
-        ttk.Label(frame, text="Report", style="Section.TLabel").grid(row=14, column=0, sticky="w", pady=(14, 0))
-        self.evaluation_output = self._readonly_text(frame, row=15, height=10)
+        ttk.Label(frame, text="Report", style="Section.TLabel").grid(row=16, column=0, sticky="w", pady=(14, 0))
+        self.evaluation_output = self._readonly_text(frame, row=17, height=10)
         return frame
 
     def _build_forensics_tab(self, notebook: ttk.Notebook) -> ttk.Frame:
@@ -7029,6 +7173,62 @@ class LocalUiApp:
             )
         except Exception as exc:
             self.status_var.set(f"Candidate review failed: {type(exc).__name__}: {exc}")
+            self.hint_var.set("")
+        finally:
+            self._clear_busy()
+            self._resume_startup_prewarm_if_needed()
+
+    def _dogfood_candidate_event_ids(self) -> list[str]:
+        raw_text = self.dogfood_candidate_event_ids.get().strip()
+        if not raw_text:
+            return []
+        normalized = raw_text.replace("\n", ",").replace(" ", ",")
+        event_ids: list[str] = []
+        seen: set[str] = set()
+        for item in normalized.split(","):
+            event_id = item.strip()
+            if not event_id or event_id in seen:
+                continue
+            seen.add(event_id)
+            event_ids.append(event_id)
+        return event_ids
+
+    def launch_dogfood_workflow_preview(self) -> None:
+        if self.job_runner.has_pending_work():
+            self.status_var.set("Dogfood workflow preview is disabled while a worker job is running.")
+            return
+
+        selected_event_id = self._selected_evaluation_candidate_event_id()
+        source_event_id = self.dogfood_source_event_id.get().strip() or selected_event_id or ""
+        if source_event_id and not self.dogfood_source_event_id.get().strip():
+            self.dogfood_source_event_id.set(source_event_id)
+
+        self._cancel_pending_startup_prewarm()
+        self._set_busy("Launching dogfood workflow preview...")
+        try:
+            preview = self.controller.record_dogfood_workflow_preview(
+                workflow_kind=self.dogfood_workflow_kind.get(),
+                query_text=self.dogfood_query.get(),
+                source_event_id=source_event_id,
+                target_event_id=self.dogfood_target_event_id.get(),
+                candidate_event_ids=self._dogfood_candidate_event_ids(),
+                winner_event_id=self.dogfood_winner_event_id.get(),
+                curation_filters=self._current_evaluation_curation_filters(),
+            )
+            report = str(preview.get("report") or format_dogfood_workflow_preview_report(preview))
+            self.dogfood_workflow_state.set(build_dogfood_workflow_state(preview))
+            self._set_output(self.evaluation_detail_output, report)
+            self._set_output(self.evaluation_output, report)
+            self.status_var.set("Dogfood workflow preview is ready.")
+            self.backend_var.set("Backend: local-dogfood-workflow")
+            self.device_var.set("Device: local files / SQLite")
+            run_path = preview.get("workflow_preview_run_path") or _ui_mapping(preview.get("paths")).get(
+                "workflow_preview_run_path"
+            )
+            self.artifact_var.set(f"Dogfood workflow preview: {run_path or 'n/a'}")
+            self.hint_var.set("Preview-only workflow launcher; record signals or comparisons only after human review.")
+        except Exception as exc:
+            self.status_var.set(f"Dogfood workflow preview failed: {type(exc).__name__}: {exc}")
             self.hint_var.set("")
         finally:
             self._clear_busy()
