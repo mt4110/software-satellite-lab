@@ -673,17 +673,11 @@ def _default_curation_filters(
     workflow_kind: str,
     curation_filters: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    raw_filters = _mapping_dict(curation_filters)
+    normalized_filters = normalize_curation_preview_filters(_mapping_dict(curation_filters))
     if workflow_kind == WORKFLOW_RESOLVED_WORK_CURATION_PREVIEW:
-        raw_filters = {
-            **(
-                {"reasons": ["review_resolved"]}
-                if not raw_filters.get("reasons") and not raw_filters.get("reason")
-                else {}
-            ),
-            **raw_filters,
-        }
-    return normalize_curation_preview_filters(raw_filters)
+        if not normalized_filters.get("reasons"):
+            normalized_filters["reasons"] = ["review_resolved"]
+    return normalized_filters
 
 
 def build_dogfood_workflow_preview(

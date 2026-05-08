@@ -21,7 +21,11 @@ from dogfood_workflows import (  # noqa: E402
     format_dogfood_workflow_preview_report,
     record_dogfood_workflow_preview,
 )
-from evaluation_loop import evaluation_comparison_log_path, record_review_resolution_signal  # noqa: E402
+from evaluation_loop import (  # noqa: E402
+    evaluation_comparison_log_path,
+    record_review_resolution_signal,
+    record_selection_signal,
+)
 from run_dogfood_workflow import main as dogfood_main  # noqa: E402
 from software_work_events import iter_workspace_events  # noqa: E402
 from workspace_state import WorkspaceSessionStore  # noqa: E402
@@ -171,18 +175,32 @@ class DogfoodWorkflowTests(unittest.TestCase):
                 resolved=True,
                 resolution_summary="Review resolved before curation preview.",
             )
+            accepted_event_id = seed_work_event(
+                root=root,
+                store=store,
+                prompt="Accepted work is ready but not review resolved.",
+                output_text="Accepted work should not appear in resolved-work defaults.",
+                artifact_name="accepted.json",
+            )
+            record_selection_signal(
+                root=root,
+                source_event_id=accepted_event_id,
+                accepted=True,
+                decision_summary="Accepted but not review resolved.",
+            )
 
             preview = build_dogfood_workflow_preview(
                 root=root,
                 workflow_kind="resolved_work_curation_preview",
                 source_event_id=source_event_id,
-                curation_filters={"states": ["ready"]},
+                curation_filters={"states": ["ready"], "reasons": []},
             )
 
         self.assertEqual(preview["curation_preview"]["export_mode"], "preview_only")
         self.assertEqual(preview["curation_preview"]["filters"]["states"], ["ready"])
         self.assertEqual(preview["curation_preview"]["filters"]["reasons"], ["review_resolved"])
         self.assertEqual(preview["curation_preview"]["counts"]["previewed_candidate_count"], 1)
+        self.assertEqual(preview["curation_preview"]["candidates"][0]["event_id"], source_event_id)
 
     def test_compare_proposals_preview_does_not_suggest_invalid_winner_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
