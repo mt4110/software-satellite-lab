@@ -71,6 +71,7 @@ from run_local_ui import (  # noqa: E402
     build_learning_candidate_review_report,
     build_learning_candidate_review_rows,
     build_learning_candidate_review_state,
+    build_dogfood_workflow_state,
     build_thinking_debug_report,
 )
 from workspace_state import WorkspaceSessionStore, session_manifest_path  # noqa: E402
@@ -789,6 +790,73 @@ class LocalUiControllerTests(unittest.TestCase):
         self.assertIn("ready=1", build_evaluation_curation_text(resolved["snapshot"]))
         self.assertIn("ready-for-policy=1", build_evaluation_adoption_text(resolved["curation_preview"]))
         self.assertEqual(resolved["curation_preview"]["filters"]["states"], ["ready"])
+
+    def test_dogfood_workflow_preview_uses_evaluation_and_curation_boundaries(self) -> None:
+        controller, store, root = self.make_controller()
+        artifact_path = root / "artifacts" / "text" / "resolved.json"
+        write_artifact(
+            artifact_path,
+            build_artifact_payload(
+                artifact_kind="text",
+                status="ok",
+                runtime=build_runtime_record(
+                    backend=CHAT_BACKEND,
+                    model_id="backend-a",
+                    device_info="cpu",
+                ),
+                prompts=build_prompt_record(
+                    prompt="Resolve review feedback for the dogfood workflow.",
+                    resolved_user_prompt="Resolve review feedback for the dogfood workflow.",
+                ),
+                extra={
+                    "validation": {
+                        "validation_mode": "unit",
+                        "claim_scope": "dogfood workflow resolved work",
+                        "pass_definition": "resolved work remains preview-only",
+                        "quality_status": "pass",
+                        "execution_status": "ok",
+                        "quality_checks": [{"name": "workflow", "pass": True, "detail": "ready"}],
+                    },
+                    "output_text": "Resolved work is ready for preview.",
+                },
+            ),
+        )
+        store.record_session_run(
+            surface="thinking",
+            model_id="backend-a",
+            mode="tool",
+            artifact_kind="thinking",
+            artifact_path=artifact_path,
+            status="ok",
+            prompt="Resolve review feedback for the dogfood workflow.",
+            system_prompt=None,
+            resolved_user_prompt="Resolve review feedback for the dogfood workflow.",
+            output_text="Resolved work is ready for preview.",
+        )
+        curation_rows = build_evaluation_curation_rows(controller.build_evaluation_snapshot()["curation_preview"])
+        source_event_id = curation_rows[0]["event_id"]
+        controller.record_evaluation_review_resolution(
+            source_event_id=source_event_id,
+            resolved=True,
+            resolution_summary="Resolved during local review.",
+        )
+
+        preview = controller.record_dogfood_workflow_preview(
+            workflow_kind="resolved_work_curation_preview",
+            source_event_id=source_event_id,
+            query_text="resolved workflow curation",
+            curation_filters={"states": ["ready"]},
+        )
+
+        self.assertEqual(preview["workflow_kind"], "resolved_work_curation_preview")
+        self.assertEqual(preview["export_mode"], "preview_only")
+        self.assertFalse(preview["training_export_ready"])
+        self.assertTrue(Path(preview["workflow_preview_run_path"]).exists())
+        self.assertIn("Dogfood workflow preview", preview["report"])
+        self.assertIn("preview-only", build_dogfood_workflow_state(preview))
+        self.assertEqual(preview["curation_preview"]["export_mode"], "preview_only")
+        self.assertEqual(preview["curation_preview"]["filters"]["states"], ["ready"])
+        self.assertEqual(preview["guardrails"]["writes_training_data"], False)
 
     def test_learning_candidate_review_reads_latest_artifacts_only(self) -> None:
         controller, _store, root = self.make_controller()

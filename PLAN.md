@@ -441,6 +441,8 @@ Current baseline:
 - human-selected candidate lists are now explicit preview-only learning artifacts, so a human shortlist can be preserved without silently promoting candidates or copying supervised example text
 - JSONL training export dry-runs now write only preview-only manifest / validation reports, so likely future export targets can be inspected without producing `.jsonl`, trainable datasets, or training jobs
 - candidate diff summaries now compare learning preview / human-selected / JSONL dry-run candidate metadata as preview-only inspection artifacts, including queue state, blocked reason, next action, policy state, comparison role, and backend id changes
+- small dogfood workflow previews now connect recall, evaluation snapshots, signal action templates, comparison previews, and resolved-work curation preview without recording decisions or creating training data
+- Local UI exposes dogfood workflow launch as a thin inspection surface rather than a new execution architecture
 - supervised candidates are still limited to test-passing work with accepted, review-resolved, or comparison-winner evidence
 - rejected, unresolved, noisy, failed, missing-source, and missing-text candidates stay out of supervised examples while preserving exclusion reasons for review
 
