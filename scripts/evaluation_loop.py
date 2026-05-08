@@ -2903,15 +2903,16 @@ def _learning_lifecycle_state(
     excluded_by: Iterable[str],
     blocked_reasons: Iterable[str],
 ) -> str:
-    reason_set = set(_string_list(list(reasons)))
-    exclusion_set = set(_string_list(list(excluded_by)))
-    blocked_set = set(_string_list(list(blocked_reasons)))
+    reason_set = {reason.lower() for reason in _string_list(list(reasons))}
+    exclusion_set = {reason.lower() for reason in _string_list(list(excluded_by))}
+    blocked_set = {reason.lower() for reason in _string_list(list(blocked_reasons))}
     quality = (_clean_text(quality_status) or "").lower()
     execution = (_clean_text(execution_status) or "").lower()
     if (
         execution in CANCELLED_EXECUTION_STATUSES
-        or "cancelled" in reason_set
-        or "cancelled" in exclusion_set
+        or bool(reason_set & CANCELLED_EXECUTION_STATUSES)
+        or bool(exclusion_set & CANCELLED_EXECUTION_STATUSES)
+        or bool(blocked_set & CANCELLED_EXECUTION_STATUSES)
     ):
         return "cancelled"
     if execution == "blocked" and test_state != "failed":

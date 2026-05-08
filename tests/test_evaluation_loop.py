@@ -2253,6 +2253,48 @@ class EvaluationLoopTests(unittest.TestCase):
             "rejected",
         )
 
+    def test_learning_lifecycle_treats_canceled_and_aborted_evidence_as_cancelled(self) -> None:
+        lifecycle_kwargs = {
+            "queue_state": "ready",
+            "curation_state": "ready",
+            "source_state": "available",
+            "test_state": "passed",
+            "review_state": "not_recorded",
+            "selection_state": "selected",
+            "policy_state": "pending_confirmation",
+            "supervised_text_state": "available",
+            "quality_status": "pass",
+            "execution_status": "ok",
+        }
+
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=["canceled"],
+                excluded_by=[],
+                blocked_reasons=[],
+            ),
+            "cancelled",
+        )
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=[],
+                excluded_by=["aborted"],
+                blocked_reasons=[],
+            ),
+            "cancelled",
+        )
+        self.assertEqual(
+            evaluation_loop_module._learning_lifecycle_state(
+                **lifecycle_kwargs,
+                reasons=[],
+                excluded_by=[],
+                blocked_reasons=["CANCELLED"],
+            ),
+            "cancelled",
+        )
+
     def test_learning_preview_requires_traceable_test_and_selection_evidence(self) -> None:
         event = {
             "event_id": "stale-ready-candidate",
