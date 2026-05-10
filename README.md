@@ -105,7 +105,7 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `scripts/satellite_pack.py`
   - Satellite Evidence Pack manifest の読み込み、v0 schema validation、permission audit artifact の土台
 - `scripts/satlab.py`
-  - `event ingest` / `recall failure` / `verdict` / `report latest` / `pack inspect|audit|run review-risk-pack` を提供する薄い CLI
+  - `event ingest` / `recall failure` / `compare proposals` / `verdict` / `report latest` / `learning inspect --preview-only` / `pack inspect|audit|run review-risk-pack` を提供する薄い CLI
 
 ## セットアップ
 
@@ -140,10 +140,13 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py event ingest --patch changes.diff --note "Patch review input"
 .venv/bin/python scripts/satlab.py recall failure --query "patch risk similar failure"
 .venv/bin/python scripts/satlab.py pack run review-risk-pack --patch changes.diff
+.venv/bin/python scripts/satlab.py compare proposals --candidate proposal-a.md --candidate proposal-b.md --verdict winner --winner-candidate 1 --rationale "Proposal A preserves source evidence."
 .venv/bin/python scripts/satlab.py verdict reject --event <event-id> --reason "Repeats prior missing-source bug"
 .venv/bin/python scripts/satlab.py report latest --format md
+.venv/bin/python scripts/satlab.py learning inspect --preview-only
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/run_public_demo_checks.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

@@ -106,7 +106,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `scripts/satellite_pack.py`
   - foundation for Satellite Evidence Pack manifest loading, v0 schema validation, and permission audit artifacts
 - `scripts/satlab.py`
-  - thin CLI for `event ingest`, `recall failure`, `verdict`, `report latest`, and `pack inspect|audit|run review-risk-pack`
+  - thin CLI for `event ingest`, `recall failure`, `compare proposals`, `verdict`, `report latest`, `learning inspect --preview-only`, and `pack inspect|audit|run review-risk-pack`
 
 ## Setup
 
@@ -141,10 +141,13 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py event ingest --patch changes.diff --note "Patch review input"
 .venv/bin/python scripts/satlab.py recall failure --query "patch risk similar failure"
 .venv/bin/python scripts/satlab.py pack run review-risk-pack --patch changes.diff
+.venv/bin/python scripts/satlab.py compare proposals --candidate proposal-a.md --candidate proposal-b.md --verdict winner --winner-candidate 1 --rationale "Proposal A preserves source evidence."
 .venv/bin/python scripts/satlab.py verdict reject --event <event-id> --reason "Repeats prior missing-source bug"
 .venv/bin/python scripts/satlab.py report latest --format md
+.venv/bin/python scripts/satlab.py learning inspect --preview-only
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/run_public_demo_checks.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

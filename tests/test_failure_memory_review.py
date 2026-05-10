@@ -20,9 +20,11 @@ from failure_memory_review import (  # noqa: E402
     build_review_risk_report,
     record_file_input,
     record_human_verdict,
+    record_proposal_comparison,
     run_review_risk_pack,
     summarize_patch,
 )
+from evaluation_loop import evaluation_comparison_log_path, read_evaluation_comparisons  # noqa: E402
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
@@ -267,6 +269,81 @@ class FailureMemoryReviewTests(unittest.TestCase):
             self.assertIn("# Review Risk Report", markdown)
             self.assertTrue(latest_report.is_file())
             self.assertTrue(run_report.is_file())
+
+    def test_proposal_comparison_preserves_source_paths_and_learning_inspect_is_preview_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            patch = _write_patch(root)
+            proposal_a = root / "proposal-a.md"
+            proposal_b = root / "proposal-b.md"
+            proposal_a.write_text("Use the existing ledger and preserve source paths.\n", encoding="utf-8")
+            proposal_b.write_text("Rewrite the flow and export training JSONL.\n", encoding="utf-8")
+            patch_input = record_file_input(
+                input_kind="patch",
+                source_path=patch,
+                note="Patch review input",
+                root=root,
+            )
+
+            comparison_result, comparison_log = record_proposal_comparison(
+                candidate_paths=[proposal_a, proposal_b],
+                verdict="winner",
+                winner_candidate="1",
+                rationale="Proposal A keeps source evidence inspectable.",
+                task_label="Compare public demo proposals",
+                criteria=["source paths", "no trainable export"],
+                candidate_backend_ids=["local-a", "local-b"],
+                root=root,
+            )
+            metadata, markdown, _latest_report, _run_report = build_review_risk_report(root=root)
+
+            learning_stdout = io.StringIO()
+            with redirect_stdout(learning_stdout):
+                learning_exit = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "learning",
+                        "inspect",
+                        "--preview-only",
+                        "--format",
+                        "json",
+                    ]
+                )
+            learning_payload = json.loads(learning_stdout.getvalue())
+            comparisons = read_evaluation_comparisons(evaluation_comparison_log_path(root=root))
+            first_candidate_source = comparisons[0]["candidates"][0]["source"]
+
+        self.assertEqual(comparison_result["human_verdict"]["winner_event_id"], comparison_result["candidates"][0]["event_id"])
+        self.assertEqual(comparison_result["human_verdict"]["loser_event_ids"], [comparison_result["candidates"][1]["event_id"]])
+        self.assertEqual(metadata["event_id"], patch_input["event_id"])
+        self.assertEqual(comparison_log, evaluation_comparison_log_path(root=root))
+        self.assertEqual(first_candidate_source["source_input_path"], str(proposal_a.resolve()))
+        self.assertIn("Proposal A keeps source evidence inspectable.", markdown)
+        self.assertIn(str(proposal_a.resolve()), markdown)
+        self.assertEqual(learning_exit, 0)
+        self.assertFalse(learning_payload["learning_preview"]["training_export_ready"])
+        self.assertIn("review_queue", learning_payload["learning_preview"])
+
+    def test_proposal_comparison_validates_winner_before_recording_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            proposal_a = root / "proposal-a.md"
+            proposal_b = root / "proposal-b.md"
+            proposal_a.write_text("A\n", encoding="utf-8")
+            proposal_b.write_text("B\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "winner index is outside"):
+                record_proposal_comparison(
+                    candidate_paths=[proposal_a, proposal_b],
+                    verdict="winner",
+                    winner_candidate="3",
+                    rationale="Invalid winner should not write candidates.",
+                    root=root,
+                )
+            index_summary = rebuild_memory_index(root=root)
+
+        self.assertEqual(index_summary["event_count"], 0)
 
     def test_report_does_not_mix_stale_verdict_or_recall_with_latest_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

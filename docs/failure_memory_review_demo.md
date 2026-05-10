@@ -31,7 +31,18 @@ Input artifacts:
 6. satlab learning inspect --preview-only
 ```
 
-The current implementation covers steps 1-5 as a local, file-first foundation. `pack run review-risk-pack` is intentionally a narrow built-in runner for this one declarative pack, not a general pack runtime. `satlab learning inspect --preview-only` remains deferred; the generated report and learning preview metadata already keep training export blocked.
+The implementation covers the full local, file-first demo path. `pack run review-risk-pack` is intentionally a narrow built-in runner for this one declarative pack, not a general pack runtime. `satlab learning inspect --preview-only` writes inspection artifacts only; no trainable export is produced.
+
+Optional proposal comparison:
+
+```text
+satlab compare proposals \
+  --candidate proposal-a.md \
+  --candidate proposal-b.md \
+  --verdict winner \
+  --winner-candidate 1 \
+  --rationale "Proposal A preserves source evidence."
+```
 
 ## Output Report Must Show
 

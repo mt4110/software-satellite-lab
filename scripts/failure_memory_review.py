@@ -11,12 +11,16 @@ from typing import Any, Iterable, Mapping
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, read_artifact, write_artifact
 from evaluation_loop import (
+    append_evaluation_comparison,
     append_evaluation_signal,
+    build_evaluation_comparison,
     build_evaluation_signal,
+    evaluation_comparison_log_path,
     evaluation_signal_log_path,
     record_curation_export_preview,
     record_evaluation_snapshot,
     record_learning_dataset_preview,
+    software_work_events_by_id,
 )
 from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
 from memory_index import MemoryIndex, rebuild_memory_index
@@ -40,12 +44,14 @@ REVIEW_RISK_PACK_NAME = "review-risk-pack"
 INPUT_KIND_DEFAULT_STATUS = {
     "patch": "needs_review",
     "failure": "failed",
+    "proposal": "needs_review",
     "repair": "ok",
     "review_note": "needs_review",
 }
 INPUT_KIND_ROLE = {
     "patch": "patch_input",
     "failure": "failure_input",
+    "proposal": "proposal_input",
     "repair": "repair_input",
     "review_note": "review_note_input",
 }
@@ -342,9 +348,15 @@ def record_file_input(
     source_path: Path,
     note: str | None = None,
     status: str | None = None,
+    backend_id: str | None = None,
+    backend_display_name: str | None = None,
+    backend_adapter_kind: str | None = None,
+    model_id: str | None = None,
+    backend_metadata: Mapping[str, Any] | None = None,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     root: Path | None = None,
     refresh_index: bool = True,
+    write_latest: bool = True,
 ) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
     normalized_kind = input_kind.strip().lower().replace("-", "_")
@@ -382,6 +394,17 @@ def record_file_input(
         notes.append(note)
     if quality_status == "fail":
         notes.append("negative_signal: failure-like input")
+    backend_options = {
+        key: value
+        for key, value in {
+            "backend_id": _clean_text(backend_id),
+            "backend_display_name": _clean_text(backend_display_name),
+            "backend_adapter_kind": _clean_text(backend_adapter_kind),
+            "model_id": _clean_text(model_id),
+            "backend_metadata": _mapping_dict(backend_metadata),
+        }.items()
+        if value not in (None, {})
+    }
     validation = {
         "validation_mode": "file_first_ingest",
         "claim_scope": f"{normalized_kind.replace('_', ' ')} source path is durable and inspectable",
@@ -400,8 +423,8 @@ def record_file_input(
         artifact_kind="software_work_input",
         status=normalized_status,
         runtime=build_runtime_record(
-            backend="satlab",
-            model_id=None,
+            backend=_clean_text(backend_id) or "satlab",
+            model_id=_clean_text(model_id),
             extra={"workflow": "failure_memory_review", "input_kind": normalized_kind},
         ),
         prompts=build_prompt_record(prompt=prompt, resolved_user_prompt=prompt),
@@ -439,13 +462,15 @@ def record_file_input(
             "source_input_sha256": source_record["sha256"],
             "file_hints": summary.get("changed_files") if normalized_kind == "patch" else [],
             "record_source_checksums": True,
+            **backend_options,
             **validation,
         },
     )
     event_id = _event_id_from_recorded_session(session, workspace_id=workspace_id)
     artifact["event_id"] = event_id
     artifact["event_artifact_path"] = str(artifact_path)
-    write_artifact(latest_path, artifact)
+    if write_latest:
+        write_artifact(latest_path, artifact)
     index_summary = rebuild_memory_index(root=resolved_root, workspace_id=workspace_id) if refresh_index else None
     result = {
         "schema_name": FAILURE_MEMORY_INPUT_SCHEMA_NAME,
@@ -458,10 +483,223 @@ def record_file_input(
         "source_inputs": [source_record],
         "input_summary": summary,
         "artifact_path": str(artifact_path),
-        "latest_artifact_path": str(latest_path),
+        "latest_artifact_path": str(latest_path) if write_latest else None,
         "index_summary": index_summary,
     }
     return result
+
+
+def _normalize_repeated_metadata(
+    values: Iterable[str] | None,
+    *,
+    candidate_count: int,
+    field_name: str,
+) -> list[str | None]:
+    cleaned = [_clean_text(value) for value in (values or [])]
+    cleaned = [value for value in cleaned if value is not None]
+    if not cleaned:
+        return [None] * candidate_count
+    if len(cleaned) != candidate_count:
+        raise ValueError(f"{field_name} must be repeated once per candidate when provided.")
+    return cleaned
+
+
+def _comparison_verdict_to_outcome(verdict: str, *, has_winner: bool) -> str:
+    normalized = verdict.strip().lower().replace("-", "_")
+    if normalized == "winner":
+        if not has_winner:
+            raise ValueError("Proposal comparison verdict `winner` requires --winner-candidate.")
+        return "winner_selected"
+    if normalized == "none":
+        return "needs_follow_up"
+    if normalized in {"tie", "needs_follow_up"}:
+        return normalized
+    raise ValueError(f"Unsupported proposal comparison verdict `{verdict}`.")
+
+
+def _normalize_comparison_verdict(verdict: str) -> str:
+    normalized = verdict.strip().lower().replace("-", "_")
+    if normalized == "needs_follow_up":
+        return "none"
+    if normalized in {"winner", "none", "tie"}:
+        return normalized
+    raise ValueError(f"Unsupported proposal comparison verdict `{verdict}`.")
+
+
+def _resolve_winner_candidate_index(
+    candidate_paths: list[Path],
+    *,
+    winner_candidate: str,
+    root: Path,
+) -> int:
+    cleaned = _clean_text(winner_candidate)
+    if cleaned is None:
+        raise ValueError("Proposal comparison winner requires a candidate source path or 1-based index.")
+    if cleaned.isdigit():
+        index = int(cleaned) - 1
+        if 0 <= index < len(candidate_paths):
+            return index
+        raise ValueError("Proposal comparison winner index is outside the candidate range.")
+
+    path_candidate: Path | None = None
+    try:
+        path_candidate = _path_from_text(cleaned, root=root)
+    except (OSError, ValueError):
+        path_candidate = None
+    for index, candidate_path in enumerate(candidate_paths):
+        if cleaned == str(candidate_path):
+            return index
+        try:
+            relative_path = str(candidate_path.relative_to(root))
+        except ValueError:
+            relative_path = None
+        if cleaned == relative_path:
+            return index
+        if path_candidate is not None and path_candidate == candidate_path:
+            return index
+    raise ValueError("Proposal comparison winner did not match any candidate source path.")
+
+
+def record_proposal_comparison(
+    *,
+    candidate_paths: Iterable[Path],
+    verdict: str,
+    rationale: str,
+    winner_candidate: str | None = None,
+    task_label: str | None = None,
+    criteria: Iterable[str] | None = None,
+    candidate_backend_ids: Iterable[str] | None = None,
+    candidate_model_ids: Iterable[str] | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> tuple[dict[str, Any], Path]:
+    resolved_root = _resolve_root(root)
+    resolved_candidates = [_path_from_text(path, root=resolved_root) for path in candidate_paths]
+    if len(resolved_candidates) < 2:
+        raise ValueError("Proposal comparison requires at least two candidate files.")
+    seen_paths: set[str] = set()
+    for path in resolved_candidates:
+        path_key = str(path)
+        if path_key in seen_paths:
+            raise ValueError("Proposal comparison candidate files must be unique.")
+        seen_paths.add(path_key)
+
+    cleaned_rationale = _clean_text(rationale)
+    if cleaned_rationale is None:
+        raise ValueError("Proposal comparison requires a human rationale.")
+    normalized_verdict = _normalize_comparison_verdict(verdict)
+    if normalized_verdict == "winner" and _clean_text(winner_candidate) is None:
+        raise ValueError("Proposal comparison verdict `winner` requires --winner-candidate.")
+    if normalized_verdict != "winner" and _clean_text(winner_candidate) is not None:
+        raise ValueError("Proposal comparison winner can only be supplied with verdict `winner`.")
+    winner_candidate_index = (
+        _resolve_winner_candidate_index(
+            resolved_candidates,
+            winner_candidate=winner_candidate or "",
+            root=resolved_root,
+        )
+        if normalized_verdict == "winner"
+        else None
+    )
+
+    backend_ids = _normalize_repeated_metadata(
+        candidate_backend_ids,
+        candidate_count=len(resolved_candidates),
+        field_name="candidate backend id",
+    )
+    model_ids = _normalize_repeated_metadata(
+        candidate_model_ids,
+        candidate_count=len(resolved_candidates),
+        field_name="candidate model id",
+    )
+
+    candidate_results: list[dict[str, Any]] = []
+    label = _clean_text(task_label) or "file-based proposal comparison"
+    for index, path in enumerate(resolved_candidates, start=1):
+        candidate_results.append(
+            record_file_input(
+                input_kind="proposal",
+                source_path=path,
+                note=f"{label} candidate {index}",
+                status="needs_review",
+                backend_id=backend_ids[index - 1],
+                model_id=model_ids[index - 1],
+                backend_display_name=backend_ids[index - 1],
+                backend_adapter_kind="local" if backend_ids[index - 1] or model_ids[index - 1] else None,
+                backend_metadata={
+                    "comparison_source": "file_based_proposal",
+                    "candidate_index": index,
+                    "source_path": str(path),
+                },
+                workspace_id=workspace_id,
+                root=resolved_root,
+                refresh_index=False,
+                write_latest=False,
+            )
+        )
+
+    events_by_id = software_work_events_by_id(root=resolved_root, workspace_id=workspace_id)
+    winner_event_id = (
+        str(candidate_results[winner_candidate_index]["event_id"])
+        if winner_candidate_index is not None
+        else None
+    )
+    outcome = _comparison_verdict_to_outcome(verdict, has_winner=winner_event_id is not None)
+
+    candidate_event_ids = [str(result["event_id"]) for result in candidate_results]
+    comparison = build_evaluation_comparison(
+        workspace_id=workspace_id,
+        candidate_event_ids=candidate_event_ids,
+        winner_event_id=winner_event_id,
+        outcome=outcome,
+        task_label=task_label,
+        criteria=criteria,
+        rationale=cleaned_rationale,
+        origin="satlab_file_proposal_compare",
+        events_by_id=events_by_id,
+        tags=["proposal_compare", "file_first", "human_rationale"],
+    )
+    comparison_log = evaluation_comparison_log_path(workspace_id=workspace_id, root=resolved_root)
+    recorded_comparison = append_evaluation_comparison(
+        comparison_log,
+        comparison,
+        workspace_id=workspace_id,
+    )
+    snapshot, snapshot_latest, snapshot_run = record_evaluation_snapshot(
+        root=resolved_root,
+        workspace_id=workspace_id,
+    )
+    result = {
+        "schema_name": "software-satellite-proposal-comparison-record",
+        "schema_version": 1,
+        "workspace_id": workspace_id,
+        "recorded_at_utc": timestamp_utc(),
+        "comparison": recorded_comparison,
+        "human_verdict": {
+            "verdict": normalized_verdict,
+            "outcome": outcome,
+            "winner_event_id": winner_event_id,
+            "loser_event_ids": [
+                event_id
+                for event_id in candidate_event_ids
+                if outcome == "winner_selected" and event_id != winner_event_id
+            ],
+            "rationale": cleaned_rationale,
+            "human_gate_required": True,
+        },
+        "candidates": candidate_results,
+        "paths": {
+            "comparison_log_path": str(comparison_log),
+            "snapshot_latest_path": str(snapshot_latest),
+            "snapshot_run_path": str(snapshot_run),
+        },
+        "evaluation_counts": _mapping_dict(snapshot.get("counts")),
+        "notes": [
+            "Comparison is file-first and source-path preserving.",
+            "A winner is still preview-only learning evidence until source, rationale, test signal, and policy gates pass.",
+        ],
+    }
+    return result, comparison_log
 
 
 def _read_json_mapping(path: Path) -> dict[str, Any] | None:
@@ -913,6 +1151,53 @@ def _markdown_table_cell(value: Any) -> str:
     return text.replace("\n", " ").replace("|", "\\|")
 
 
+def _learning_preview_queue_item(
+    learning_preview: Mapping[str, Any] | None,
+    *,
+    event_id: str | None,
+) -> dict[str, Any] | None:
+    if event_id is None or not isinstance(learning_preview, Mapping):
+        return None
+    for item in learning_preview.get("review_queue") or []:
+        if isinstance(item, Mapping) and _clean_text(item.get("event_id")) == event_id:
+            return copy.deepcopy(dict(item))
+    return None
+
+
+def _learning_preview_excluded_item(
+    learning_preview: Mapping[str, Any] | None,
+    *,
+    event_id: str | None,
+) -> dict[str, Any] | None:
+    if event_id is None or not isinstance(learning_preview, Mapping):
+        return None
+    for item in learning_preview.get("excluded_candidates") or []:
+        if isinstance(item, Mapping) and _clean_text(item.get("event_id")) == event_id:
+            return copy.deepcopy(dict(item))
+    return None
+
+
+def _learning_queue_report_fields(
+    learning_preview: Mapping[str, Any] | None,
+    *,
+    event_id: str | None,
+) -> dict[str, Any]:
+    queue_item = _learning_preview_queue_item(learning_preview, event_id=event_id)
+    excluded_item = _learning_preview_excluded_item(learning_preview, event_id=event_id)
+    if queue_item is None and excluded_item is None:
+        return {}
+    source = queue_item or excluded_item or {}
+    return {
+        "queue_state": _clean_text(source.get("queue_state")),
+        "next_action": _clean_text(source.get("next_action")),
+        "blocked_reason": _clean_text(source.get("blocked_reason")),
+        "blocked_reasons": _string_list(source.get("blocked_reasons")),
+        "excluded_by": _string_list((excluded_item or {}).get("excluded_by")),
+        "eligible_for_supervised_candidate": bool(source.get("eligible_for_supervised_candidate")),
+        "comparison_evidence": _mapping_dict(source.get("comparison_evidence")),
+    }
+
+
 def _learning_state_for_report(
     *,
     event_id: str | None,
@@ -920,6 +1205,7 @@ def _learning_state_for_report(
     snapshot: Mapping[str, Any] | None,
     learning_preview: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    queue_fields = _learning_queue_report_fields(learning_preview, event_id=event_id)
     event_contract = _mapping_dict((snapshot or {}).get("event_contract"))
     for check in event_contract.get("failed_checks") or []:
         if not isinstance(check, Mapping) or _clean_text(check.get("event_id")) != event_id:
@@ -928,6 +1214,7 @@ def _learning_state_for_report(
         source_artifact = _mapping_dict(check.get("source_artifact"))
         if contract_status == "missing_source":
             return {
+                **queue_fields,
                 "state": "missing_source",
                 "blocked_reason": "missing_source",
                 "source_artifact_reasons": _string_list(source_artifact.get("reasons")),
@@ -936,6 +1223,7 @@ def _learning_state_for_report(
             }
         if contract_status == "invalid_event_contract":
             return {
+                **queue_fields,
                 "state": "blocked",
                 "blocked_reason": "invalid_event_contract",
                 "source_artifact_reasons": _string_list(source_artifact.get("reasons")),
@@ -947,6 +1235,7 @@ def _learning_state_for_report(
         state = _clean_text(curation_state.get("state")) or "needs_review"
         reasons = _string_list(curation_state.get("reasons"))
         return {
+            **queue_fields,
             "state": state,
             "reasons": reasons,
             "preview_only": True,
@@ -955,6 +1244,7 @@ def _learning_state_for_report(
     verdict = _clean_text((latest_verdict or {}).get("verdict"))
     if verdict == "reject":
         return {
+            **queue_fields,
             "state": "blocked",
             "blocked_reason": "rejected",
             "preview_only": True,
@@ -962,6 +1252,7 @@ def _learning_state_for_report(
         }
     counts = _mapping_dict((learning_preview or {}).get("counts"))
     return {
+        **queue_fields,
         "state": "needs_review",
         "preview_only": True,
         "training_export_ready": False,
@@ -985,7 +1276,11 @@ def build_review_risk_report(
     latest_input_event_id = _event_id_from_latest_input_artifact(latest_input)
     raw_recall = _latest_recall(resolved_root, workspace_id=workspace_id)
     raw_verdict = _latest_verdict(resolved_root, workspace_id=workspace_id)
-    learning_preview = _latest_learning_preview(resolved_root, workspace_id=workspace_id)
+    learning_preview, learning_latest_path, learning_run_path = record_learning_dataset_preview(
+        root=resolved_root,
+        workspace_id=workspace_id,
+        snapshot=snapshot,
+    )
     input_summary = _mapping_dict((latest_input or {}).get("input_summary"))
     input_recorded_at_utc = _clean_text((latest_input or {}).get("timestamp_utc"))
     fallback_verdict_event_id = _clean_text((raw_verdict or {}).get("event_id"))
@@ -1093,6 +1388,34 @@ def build_review_risk_report(
                 f"- `{_clean_text(comparison.get('outcome')) or 'needs_follow_up'}` "
                 f"winner=`{_clean_text(comparison.get('winner_event_id')) or 'n/a'}`"
             )
+            rationale = _clean_text(comparison.get("rationale"))
+            if rationale:
+                lines.append(f"  - Rationale: {_markdown_table_cell(rationale)}")
+            criteria = _string_list(comparison.get("criteria"))
+            if criteria:
+                criteria_text = ", ".join("`" + _markdown_table_cell(item) + "`" for item in criteria[:6])
+                lines.append(f"  - Criteria: {criteria_text}")
+            candidate_sources = [
+                dict(item)
+                for item in comparison.get("candidate_sources") or []
+                if isinstance(item, Mapping)
+            ]
+            for candidate in candidate_sources[:4]:
+                source_path = (
+                    _clean_text(candidate.get("source_input_path"))
+                    or _clean_text(candidate.get("artifact_path"))
+                    or "n/a"
+                )
+                backend_label = (
+                    _clean_text(candidate.get("backend_id"))
+                    or _clean_text(candidate.get("model_id"))
+                    or "n/a"
+                )
+                lines.append(
+                    "  - Candidate "
+                    f"`{_clean_text(candidate.get('event_id')) or 'n/a'}` "
+                    f"source=`{_markdown_table_cell(source_path)}` backend=`{_markdown_table_cell(backend_label)}`"
+                )
     else:
         lines.append("- None recorded for this review.")
 
@@ -1150,10 +1473,13 @@ def build_review_risk_report(
             "report_run_path": str(report_run),
             "report_metadata_latest_path": str(metadata_latest),
             "report_metadata_run_path": str(metadata_run),
+            "learning_preview_latest_path": str(learning_latest_path),
+            "learning_preview_run_path": str(learning_run_path),
         },
         "source_inputs": source_inputs,
         "risk_note": risk_note,
         "learning_state": learning_state,
+        "learning_preview_counts": _mapping_dict(learning_preview.get("counts")),
         "validation_metrics": metrics,
     }
     write_json(metadata_run, metadata)
@@ -1278,6 +1604,37 @@ def format_ingest_result(result: Mapping[str, Any]) -> str:
             f"Artifact: {result.get('artifact_path')}",
         ]
     )
+
+
+def format_proposal_comparison_result(result: Mapping[str, Any]) -> str:
+    comparison = _mapping_dict(result.get("comparison"))
+    verdict = _mapping_dict(result.get("human_verdict"))
+    paths = _mapping_dict(result.get("paths"))
+    lines = [
+        "Proposal comparison recorded",
+        f"Comparison: {comparison.get('comparison_id')}",
+        f"Verdict: {verdict.get('verdict')}",
+        f"Outcome: {comparison.get('outcome')}",
+        f"Winner: {comparison.get('winner_event_id') or 'none'}",
+        f"Losers: {', '.join(_string_list(verdict.get('loser_event_ids'))) or 'none'}",
+        f"Rationale: {verdict.get('rationale')}",
+        f"Ledger: {paths.get('comparison_log_path')}",
+        "",
+        "Candidates:",
+    ]
+    for index, candidate in enumerate(result.get("candidates") or [], start=1):
+        if not isinstance(candidate, Mapping):
+            continue
+        source = next(iter(candidate.get("source_inputs") or []), {})
+        source_path = source.get("workspace_relative_path") or source.get("path") if isinstance(source, Mapping) else None
+        lines.append(f"- {index}. `{candidate.get('event_id')}` source=`{source_path or 'n/a'}`")
+    lines.extend(
+        [
+            "",
+            "Learning: preview-only; run `satlab learning inspect --preview-only` to inspect queue state.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def format_verdict_result(result: Mapping[str, Any]) -> str:

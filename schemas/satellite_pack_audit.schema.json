@@ -184,6 +184,36 @@
         }
       }
     },
+    "security_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "check_id",
+          "status",
+          "message",
+          "evidence"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": ["pass", "review", "block"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "v0_restrictions": {
       "type": "object",
       "required": [

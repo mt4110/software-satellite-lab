@@ -79,6 +79,29 @@ V0_DENIED_TRUE_PERMISSIONS = {
 }
 PACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 RECIPE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+REMOTE_URL_RE = re.compile(r"\b(?:https?|ftp)://", re.IGNORECASE)
+EXECUTABLE_CONTENT_RE = re.compile(
+    r"(^#!|\b(?:bash|curl|node|npm|npx|python|ruby|sh|wget)\b|[`$][(]|&&|\|\||;|<script\b|"
+    r"\.(?:js|py|rb|sh|zsh|bash|command|app)\b)",
+    re.IGNORECASE,
+)
+LEARNING_BYPASS_RE = re.compile(
+    r"\b(?:auto[_-]?promote|bypass|fine[_-]?tune|finetune|jsonl[_-]?export|"
+    r"trainable|training[_-]?data|training[_-]?export)\b",
+    re.IGNORECASE,
+)
+ALLOWED_OUTPUT_SCHEMA_NAMES = {
+    "evaluation_suggestion",
+    "evidence_bundle",
+    "human_verdict_request",
+    "learning_candidate_state",
+    "normalized_evidence",
+    "read_only_report_widget",
+    "recall_instructions",
+    "review_note",
+    "risk_evidence_bundle",
+    "similar_failure_bundle",
+}
 
 PERMISSION_POLICIES: dict[str, dict[str, str]] = {
     "read_repo": {
@@ -865,6 +888,154 @@ def build_permission_summary(manifest: Mapping[str, Any] | Any) -> list[dict[str
     return summary
 
 
+def _manifest_string_values(value: Any, *, path: str = "$") -> list[dict[str, str]]:
+    if isinstance(value, str):
+        return [{"path": path, "value": value}]
+    if isinstance(value, Mapping):
+        values: list[dict[str, str]] = []
+        for key, item in value.items():
+            values.extend(_manifest_string_values(item, path=f"{path}.{key}"))
+        return values
+    if isinstance(value, list):
+        values = []
+        for index, item in enumerate(value):
+            values.extend(_manifest_string_values(item, path=f"{path}[{index}]"))
+        return values
+    return []
+
+
+def _security_check(
+    *,
+    check_id: str,
+    status: str,
+    message: str,
+    evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "check_id": check_id,
+        "status": status,
+        "message": message,
+        "evidence": list(evidence or []),
+    }
+
+
+def build_pack_security_checks(
+    manifest: Mapping[str, Any] | Any,
+    *,
+    validation_issues: list[ValidationIssue],
+    permission_summary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    manifest_strings = _manifest_string_values(manifest)
+    validation_issue_paths = {issue.path for issue in validation_issues}
+    unknown_field_paths = [
+        issue.path
+        for issue in validation_issues
+        if "Additional" in issue.message
+    ]
+    denied_permission_issues = [
+        item["permission"]
+        for item in permission_summary
+        if item.get("status") in {"blocked", "invalid"}
+    ]
+    remote_url_hits = [
+        f"{item['path']}={item['value']}"
+        for item in manifest_strings
+        if REMOTE_URL_RE.search(item["value"])
+    ]
+    executable_hits = [
+        f"{item['path']}={item['value']}"
+        for item in manifest_strings
+        if EXECUTABLE_CONTENT_RE.search(item["value"])
+    ]
+    learning_bypass_hits = [
+        f"{item['path']}={item['value']}"
+        for item in manifest_strings
+        if LEARNING_BYPASS_RE.search(item["value"])
+        and item["value"] != "learning_candidate_state"
+    ]
+
+    outputs = manifest.get("outputs") if isinstance(manifest, Mapping) else None
+    output_values = [item for item in outputs if isinstance(item, str)] if isinstance(outputs, list) else []
+    unknown_outputs = sorted(set(output_values) - ALLOWED_OUTPUT_SCHEMA_NAMES)
+    source_preserving_outputs = [
+        output
+        for output in output_values
+        if any(token in output for token in ("evidence", "source", "learning_candidate_state"))
+    ]
+
+    checks = [
+        _security_check(
+            check_id="schema_validity",
+            status="pass" if not validation_issues else "block",
+            message="Manifest schema is valid." if not validation_issues else "Manifest schema has blocking issues.",
+            evidence=sorted(validation_issue_paths),
+        ),
+        _security_check(
+            check_id="denied_permission_requests",
+            status="pass" if not denied_permission_issues else "block",
+            message=(
+                "No denied v0 permissions are requested."
+                if not denied_permission_issues
+                else "Denied or invalid permissions are present."
+            ),
+            evidence=denied_permission_issues,
+        ),
+        _security_check(
+            check_id="unknown_fields",
+            status="pass" if not unknown_field_paths else "block",
+            message="No unknown manifest fields." if not unknown_field_paths else "Unknown manifest fields are present.",
+            evidence=unknown_field_paths,
+        ),
+        _security_check(
+            check_id="output_schema_compatibility",
+            status="pass" if not unknown_outputs else "block",
+            message=(
+                "Outputs use known v0 evidence schema names."
+                if not unknown_outputs
+                else "Outputs include names outside the v0 evidence schema allowlist."
+            ),
+            evidence=unknown_outputs,
+        ),
+        _security_check(
+            check_id="source_path_preservation",
+            status="pass" if source_preserving_outputs else "review",
+            message=(
+                "Outputs preserve evidence/source-path inspection."
+                if source_preserving_outputs
+                else "Outputs do not obviously preserve source-path inspection."
+            ),
+            evidence=source_preserving_outputs,
+        ),
+        _security_check(
+            check_id="learning_preview_bypass_attempts",
+            status="pass" if not learning_bypass_hits else "block",
+            message=(
+                "No learning-preview bypass language found."
+                if not learning_bypass_hits
+                else "Manifest appears to request trainable export or bypass behavior."
+            ),
+            evidence=learning_bypass_hits,
+        ),
+        _security_check(
+            check_id="executable_content_presence",
+            status="pass" if not executable_hits else "block",
+            message=(
+                "No executable content indicators found."
+                if not executable_hits
+                else "Manifest contains executable or shell-like content indicators."
+            ),
+            evidence=executable_hits,
+        ),
+        _security_check(
+            check_id="remote_url_usage",
+            status="pass" if not remote_url_hits else "block",
+            message="No remote URLs found." if not remote_url_hits else "Remote URL usage is not allowed in v0.",
+            evidence=remote_url_hits,
+        ),
+    ]
+    return checks
+
+
 def _compact_manifest_summary(manifest: Mapping[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         return {
@@ -955,6 +1126,11 @@ def build_pack_audit(
     schema_path = satellite_pack_manifest_schema_path(root)
     validation_issues = validate_manifest_schema(manifest)
     permission_summary = build_permission_summary(manifest)
+    security_checks = build_pack_security_checks(
+        manifest,
+        validation_issues=validation_issues,
+        permission_summary=permission_summary,
+    )
     blocked_reasons = [
         f"{issue.path}: {issue.message}"
         for issue in validation_issues
@@ -971,6 +1147,17 @@ def build_pack_audit(
         for item in permission_summary
         if item.get("status") == "needs_review"
     ]
+    blocked_reasons.extend(
+        f"{item['check_id']}: {item['message']}"
+        for item in security_checks
+        if item.get("status") == "block"
+        and item.get("check_id") not in {"schema_validity", "denied_permission_requests", "unknown_fields"}
+    )
+    review_reasons.extend(
+        f"{item['check_id']}: {item['message']}"
+        for item in security_checks
+        if item.get("status") == "review"
+    )
 
     if blocked_reasons:
         verdict = "block"
@@ -1000,6 +1187,7 @@ def build_pack_audit(
             "schema_valid": not validation_issues,
             "issues": _validation_issue_dicts(validation_issues),
         },
+        "security_checks": security_checks,
         "v0_restrictions": {
             "arbitrary_runtime": "blocked",
             "marketplace": "blocked",
@@ -1107,6 +1295,16 @@ def format_pack_audit_report(audit: Mapping[str, Any]) -> str:
         lines.extend(["", "Review Reasons:"])
         for reason in review_reasons:
             lines.append(f"- {reason}")
+
+    security_checks = [
+        item
+        for item in audit.get("security_checks") or []
+        if isinstance(item, Mapping)
+    ]
+    if security_checks:
+        lines.extend(["", "Security Checks:"])
+        for item in security_checks:
+            lines.append(f"- {item.get('check_id')}: {item.get('status')} - {item.get('message')}")
 
     lines.extend(["", "Permissions:"])
     for item in audit.get("permission_summary") or []:
