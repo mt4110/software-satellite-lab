@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Satellite Pack Manifest",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "name",
+    "version",
+    "kind",
+    "permissions",
+    "inputs",
+    "outputs"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "workflow_pack"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "recipes"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-pack"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "version": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "workflow_pack",
+        "recall_pack",
+        "evaluation_pack",
+        "widget_pack"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "required": [
+        "read_repo",
+        "write_repo",
+        "read_artifacts",
+        "write_artifacts",
+        "read_memory_index",
+        "write_evaluation_signal",
+        "request_human_verdict",
+        "run_command",
+        "network",
+        "secrets",
+        "use_backend"
+      ],
+      "properties": {
+        "read_repo": {
+          "type": "boolean"
+        },
+        "write_repo": {
+          "const": false
+        },
+        "read_artifacts": {
+          "type": "boolean"
+        },
+        "write_artifacts": {
+          "type": "boolean"
+        },
+        "read_memory_index": {
+          "type": "boolean"
+        },
+        "write_evaluation_signal": {
+          "const": false
+        },
+        "request_human_verdict": {
+          "type": "boolean"
+        },
+        "run_command": {
+          "const": false
+        },
+        "network": {
+          "const": false
+        },
+        "secrets": {
+          "const": false
+        },
+        "use_backend": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "recipes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "steps"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]*$"
+            }
+          }
+        }
+      }
+    },
+    "widgets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

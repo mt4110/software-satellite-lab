@@ -1,0 +1,47 @@
+schema_name: software-satellite-pack
+schema_version: 1
+name: review-risk-pack
+version: 0.1.0
+kind: workflow_pack
+summary: Recall similar failures and produce patch risk evidence.
+
+inputs:
+  - git_diff
+  - software_work_events
+  - memory_index
+
+outputs:
+  - review_note
+  - similar_failure_bundle
+  - risk_evidence_bundle
+  - human_verdict_request
+  - learning_preview_candidate_or_blocked
+
+permissions:
+  read_repo: true
+  write_repo: false
+  read_artifacts: true
+  write_artifacts: true
+  read_memory_index: true
+  write_evaluation_signal: false
+  request_human_verdict: true
+  run_command: false
+  network: false
+  secrets: false
+  use_backend: false
+
+recipes:
+  - id: patch_risk_review
+    steps:
+      - resolve_patch_input
+      - recall_similar_failures
+      - build_risk_note
+      - write_evidence_bundle
+      - request_human_verdict
+      - update_curation_preview
+
+widgets:
+  - evidence_path_card
+  - similar_failures_card
+  - blocked_reason_card
+  - human_verdict_card
