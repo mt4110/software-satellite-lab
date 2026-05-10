@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,19 @@ def _path_reference(path: str | Path | None, *, root: Path) -> dict[str, Any]:
     except ValueError:
         reference["workspace_relative_path"] = None
     return reference
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def detect_asset_kind(path: str | Path | None) -> str | None:
@@ -421,7 +435,13 @@ class WorkspaceSessionStore:
         )
         recorded_at = timestamp_utc()
         entry_id = self._entry_id(normalized_surface, session)
-        attached_assets = self._build_attached_assets(attachments, recorded_at_utc=recorded_at)
+        options_payload = copy.deepcopy(options or {})
+        record_source_checksums = bool(options_payload.get("record_source_checksums"))
+        attached_assets = self._build_attached_assets(
+            attachments,
+            recorded_at_utc=recorded_at,
+            record_source_checksums=record_source_checksums,
+        )
         artifact_ref = self._build_artifact_ref(
             artifact_path=artifact_path,
             artifact_kind=artifact_kind,
@@ -429,6 +449,7 @@ class WorkspaceSessionStore:
             status=status,
             entry_id=entry_id,
             recorded_at_utc=recorded_at,
+            record_source_checksums=record_source_checksums,
         )
         entry = {
             "entry_id": entry_id,
@@ -444,7 +465,7 @@ class WorkspaceSessionStore:
             "attached_assets": copy.deepcopy(attached_assets),
             "artifact_ref": copy.deepcopy(artifact_ref),
             "notes": list(notes or []),
-            "options": copy.deepcopy(options or {}),
+            "options": options_payload,
         }
         session["attached_assets"] = attached_assets
         session["artifact_refs"].append(artifact_ref)
@@ -544,6 +565,7 @@ class WorkspaceSessionStore:
         attachments: list[dict[str, Any]] | None,
         *,
         recorded_at_utc: str,
+        record_source_checksums: bool = False,
     ) -> list[dict[str, Any]]:
         attached_assets: list[dict[str, Any]] = []
         for attachment in attachments or []:
@@ -553,15 +575,16 @@ class WorkspaceSessionStore:
             reference = _path_reference(path, root=self.root)
             if reference["path"] is None:
                 continue
-            attached_assets.append(
-                {
-                    "role": str(attachment.get("role") or "attachment"),
-                    "kind": str(attachment.get("kind") or detect_asset_kind(path) or "file"),
-                    "path": reference["path"],
-                    "workspace_relative_path": reference["workspace_relative_path"],
-                    "added_at_utc": recorded_at_utc,
-                }
-            )
+            asset = {
+                "role": str(attachment.get("role") or "attachment"),
+                "kind": str(attachment.get("kind") or detect_asset_kind(path) or "file"),
+                "path": reference["path"],
+                "workspace_relative_path": reference["workspace_relative_path"],
+                "added_at_utc": recorded_at_utc,
+            }
+            if record_source_checksums:
+                asset["sha256"] = _file_sha256(Path(reference["path"])) if reference["path"] is not None else None
+            attached_assets.append(asset)
         return attached_assets
 
     def _build_artifact_ref(
@@ -573,9 +596,10 @@ class WorkspaceSessionStore:
         status: str,
         entry_id: str,
         recorded_at_utc: str,
+        record_source_checksums: bool = False,
     ) -> dict[str, Any]:
         reference = _path_reference(artifact_path, root=self.root)
-        return {
+        artifact_ref = {
             "entry_id": entry_id,
             "artifact_kind": artifact_kind,
             "action": action,
@@ -584,3 +608,6 @@ class WorkspaceSessionStore:
             "artifact_path": reference["path"],
             "artifact_workspace_relative_path": reference["workspace_relative_path"],
         }
+        if record_source_checksums:
+            artifact_ref["artifact_sha256"] = _file_sha256(Path(reference["path"])) if reference["path"] is not None else None
+        return artifact_ref

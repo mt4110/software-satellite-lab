@@ -23,7 +23,7 @@ Input artifacts:
 ## Demo Flow
 
 ```text
-1. satlab event ingest --patch changes.diff --note "AI generated patch"
+1. satlab event ingest --patch changes.diff --note "Patch review input"
 2. satlab recall failure --query "patch risk similar failure"
 3. satlab pack run review-risk-pack --patch changes.diff
 4. satlab verdict reject --event <id> --reason "Repeats prior missing-source bug"
@@ -31,7 +31,7 @@ Input artifacts:
 6. satlab learning inspect --preview-only
 ```
 
-The current implementation only includes the Evidence Pack inspect/audit foundation. Runtime execution, verdict commands, reports, and learning inspection remain future work.
+The current implementation covers steps 1-5 as a local, file-first foundation. `pack run review-risk-pack` is intentionally a narrow built-in runner for this one declarative pack, not a general pack runtime. `satlab learning inspect --preview-only` remains deferred; the generated report and learning preview metadata already keep training export blocked.
 
 ## Output Report Must Show
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -146,6 +147,67 @@ class WorkspaceSessionStoreTests(unittest.TestCase):
             "artifacts/vision/result.json",
         )
         self.assertEqual(workspace["sessions"][0]["latest_artifact_status"], "ok")
+
+    def test_record_session_run_source_checksums_are_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            store = WorkspaceSessionStore(root=root)
+            artifact_one = root / "artifacts" / "text" / "first.json"
+            artifact_two = root / "artifacts" / "text" / "second.json"
+            input_one = root / "inputs" / "first.txt"
+            input_two = root / "inputs" / "second.txt"
+            for path, text in (
+                (artifact_one, "first artifact"),
+                (artifact_two, "second artifact"),
+                (input_one, "first input"),
+                (input_two, "second input"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+
+            store.record_session_run(
+                surface="chat",
+                model_id=None,
+                mode="default-checksum-behavior",
+                artifact_kind="text",
+                artifact_path=artifact_one,
+                status="ok",
+                prompt="First",
+                system_prompt=None,
+                resolved_user_prompt="First",
+                output_text="First result",
+                attachments=[{"role": "primary_input", "path": input_one}],
+                options={},
+            )
+            store.record_session_run(
+                surface="chat",
+                model_id=None,
+                mode="checksum-opt-in",
+                artifact_kind="text",
+                artifact_path=artifact_two,
+                status="ok",
+                prompt="Second",
+                system_prompt=None,
+                resolved_user_prompt="Second",
+                output_text="Second result",
+                attachments=[{"role": "primary_input", "path": input_two}],
+                options={"record_source_checksums": True},
+            )
+
+            session = read_session_manifest(
+                session_manifest_path(
+                    session_id="chat-main",
+                    workspace_id=DEFAULT_WORKSPACE_ID,
+                    root=root,
+                )
+            )
+            artifact_two_sha256 = hashlib.sha256(artifact_two.read_bytes()).hexdigest()
+            input_two_sha256 = hashlib.sha256(input_two.read_bytes()).hexdigest()
+
+        self.assertNotIn("artifact_sha256", session["artifact_refs"][0])
+        self.assertNotIn("sha256", session["entries"][0]["attached_assets"][0])
+        self.assertEqual(session["artifact_refs"][1]["artifact_sha256"], artifact_two_sha256)
+        self.assertEqual(session["entries"][1]["attached_assets"][0]["sha256"], input_two_sha256)
 
 
 if __name__ == "__main__":
