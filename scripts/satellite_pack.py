@@ -21,10 +21,13 @@ PACK_INSPECTION_SCHEMA_VERSION = 1
 
 PACK_KINDS = ("workflow_pack", "recall_pack", "evaluation_pack", "widget_pack")
 MANIFEST_FILENAMES = (
+    "satellite.json",
     "satellite.yaml",
     "satellite.yml",
+    "manifest.json",
     "manifest.yaml",
     "manifest.yml",
+    "pack.satellite.json",
     "pack.satellite.yaml",
     "pack.satellite.yml",
 )
@@ -267,6 +270,8 @@ def _looks_like_key_value(text: str) -> bool:
 def _parse_yaml_scalar(value: str) -> Any:
     if value == "":
         return ""
+    if value.startswith("[") and value.endswith("]"):
+        return _parse_yaml_flow_sequence(value)
     lowered = value.lower()
     if lowered == "true":
         return True
@@ -284,6 +289,54 @@ def _parse_yaml_scalar(value: str) -> Any:
         except json.JSONDecodeError:
             return value[1:-1]
     return value
+
+
+def _split_flow_items(value: str, *, path: Path | None = None) -> list[str]:
+    items: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    escape = False
+
+    for char in value:
+        if escape:
+            current.append(char)
+            escape = False
+            continue
+        if char == "\\" and in_double:
+            current.append(char)
+            escape = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            current.append(char)
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            current.append(char)
+            continue
+        if char == "," and not in_single and not in_double:
+            items.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+
+    if in_single or in_double:
+        location = f"{path}: " if path is not None else ""
+        raise PackManifestError(f"{location}unterminated quoted string in flow sequence.")
+
+    trailing = "".join(current).strip()
+    if trailing or value.rstrip().endswith(","):
+        items.append(trailing)
+    return items
+
+
+def _parse_yaml_flow_sequence(value: str, *, path: Path | None = None) -> list[Any]:
+    inner = value[1:-1].strip()
+    if not inner:
+        return []
+    items = _split_flow_items(inner, path=path)
+    return [_parse_yaml_scalar(item) for item in items]
 
 
 def _parse_yaml_block(
@@ -430,7 +483,11 @@ def resolve_pack_manifest_path(pack_path: Path) -> Path:
         raise PackManifestError(f"Pack path must be a manifest file or directory: {path}")
 
     exact_candidates = [path / name for name in MANIFEST_FILENAMES if (path / name).is_file()]
-    glob_candidates = sorted(path.glob("*.satellite.yaml")) + sorted(path.glob("*.satellite.yml"))
+    glob_candidates = (
+        sorted(path.glob("*.satellite.json"))
+        + sorted(path.glob("*.satellite.yaml"))
+        + sorted(path.glob("*.satellite.yml"))
+    )
     candidates: list[Path] = []
     seen: set[Path] = set()
     for candidate in exact_candidates + glob_candidates:
@@ -441,7 +498,7 @@ def resolve_pack_manifest_path(pack_path: Path) -> Path:
         candidates.append(resolved)
 
     if not candidates:
-        expected = ", ".join(MANIFEST_FILENAMES) + ", or one *.satellite.yaml file"
+        expected = ", ".join(MANIFEST_FILENAMES) + ", or one *.satellite.{json,yaml,yml} file"
         raise PackManifestError(f"No Satellite Pack manifest found in {path}. Expected {expected}.")
     if len(candidates) > 1:
         choices = ", ".join(str(candidate) for candidate in candidates)
@@ -480,7 +537,14 @@ def _issue(
     expected: str | None = None,
     actual: Any = None,
 ) -> None:
-    actual_text = None if actual is None else _type_name(actual) if not isinstance(actual, str) else actual
+    if actual is None:
+        actual_text = None
+    elif isinstance(actual, str):
+        actual_text = actual
+    elif isinstance(actual, (bool, int, float)):
+        actual_text = json.dumps(actual)
+    else:
+        actual_text = _type_name(actual)
     issues.append(
         ValidationIssue(
             path=path,

@@ -60,6 +60,20 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertEqual(resolved, manifest_path.resolve())
         self.assertEqual(manifest["name"], "review-risk-pack")
 
+    def test_manifest_loader_accepts_json_manifest_in_pack_directory(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack_dir = Path(tmpdir) / "packs" / "json-pack"
+            pack_dir.mkdir(parents=True)
+            manifest_path = pack_dir / "pack.satellite.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            resolved = resolve_pack_manifest_path(pack_dir)
+            loaded = load_pack_manifest(pack_dir)
+
+        self.assertEqual(resolved, manifest_path.resolve())
+        self.assertEqual(loaded["name"], "review-risk-pack")
+
     def test_manifest_loader_rejects_ambiguous_pack_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pack_dir = Path(tmpdir)
@@ -84,6 +98,23 @@ class SatellitePackManifestTests(unittest.TestCase):
 
         self.assertEqual(manifest["inputs"], ["https://example.test/event-log.json"])
 
+    def test_manifest_yaml_subset_parses_flow_style_string_arrays(self) -> None:
+        manifest = parse_yaml_manifest_subset(
+            "\n".join(
+                [
+                    "schema_name: software-satellite-pack",
+                    "inputs: []",
+                    'outputs: ["review_note", "evidence_bundle"]',
+                    "widgets: [evidence_path_card, human_verdict_card]",
+                ]
+            ),
+            Path("pack.satellite.yaml"),
+        )
+
+        self.assertEqual(manifest["inputs"], [])
+        self.assertEqual(manifest["outputs"], ["review_note", "evidence_bundle"])
+        self.assertEqual(manifest["widgets"], ["evidence_path_card", "human_verdict_card"])
+
     def test_schema_validation_blocks_denied_v0_permission(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
         harmful = copy.deepcopy(manifest)
@@ -95,6 +126,16 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertTrue(any(issue.path == "$.permissions.network" for issue in issues))
         self.assertEqual(audit["verdict"], "block")
         self.assertTrue(any("$.permissions.network" in reason for reason in audit["blocked_reasons"]))
+
+    def test_schema_validation_preserves_primitive_actual_values(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        invalid = copy.deepcopy(manifest)
+        invalid["recipes"][0]["steps"] = []
+
+        issues = validate_manifest_schema(invalid)
+        steps_issue = next(issue for issue in issues if issue.path == "$.recipes[0].steps")
+
+        self.assertEqual(steps_issue.actual, "0")
 
     def test_manifest_validator_stays_aligned_with_manifest_schema_contract(self) -> None:
         schema = json.loads(MANIFEST_SCHEMA.read_text(encoding="utf-8"))

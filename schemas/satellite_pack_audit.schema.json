@@ -68,9 +68,9 @@
           "status": {
             "enum": ["allowed", "not_requested", "needs_review", "blocked", "invalid"]
           },
-        "reason": {
-          "type": "string"
-        }
+          "reason": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }
