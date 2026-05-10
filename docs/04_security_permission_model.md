@@ -2,7 +2,7 @@
 
 ## 1. Security Principle
 
-`software-satellite-lab` は、agent platform ではなく evidence OS である。
+`software-satellite-lab` は、agent platform ではなく evidence ledger である。
 
 したがって v0 の安全原則は次。
 
@@ -24,7 +24,7 @@ human gate before irreversible action
 | Secret exfiltration | API key を読む | secrets deny |
 | Destructive command | rm / deploy / DB 操作 | run_command deny |
 | Network leak | evidence を外へ送る | network deny |
-| Training contamination | raw output が学習候補になる | learning preview gate |
+| Training contamination | raw output が学習候補になる | learning-candidate inspection gate |
 | False positive evidence | source path がない winner | missing_source block |
 
 ## 3. Permission Classes
@@ -75,13 +75,13 @@ They are runtime capabilities that remain unavailable regardless of manifest con
 | arbitrary_javascript | deny | no executable pack in v0 |
 | arbitrary_shell | deny | no executable pack in v0 |
 
-## 6. Pack Audit Output
+## 6. Evidence Pack Audit Output
 
-`pack audit` は、人間が読むための artifact を出す。
+`pack audit` は、人間が読むための Satellite Evidence Pack audit artifact を出す。
 
 ```json
 {
-  "schema_name": "software-satellite-pack-audit",
+  "schema_name": "software-satellite-evidence-pack-audit",
   "schema_version": 1,
   "pack_name": "review-risk-pack",
   "verdict": "pass|needs_review|block",
@@ -99,7 +99,7 @@ They are runtime capabilities that remain unavailable regardless of manifest con
 ```text
 - accepted / rejected signal の確定
 - comparison winner の確定
-- learning preview candidate の昇格
+- learning-candidate inspection candidate の昇格
 - export policy confirmation
 - repo write / patch apply
 - shell command execution

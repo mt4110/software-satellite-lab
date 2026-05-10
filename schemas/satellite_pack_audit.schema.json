@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Satellite Evidence Pack Audit",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "audit_id",
+    "audited_at_utc",
+    "pack_name",
+    "verdict",
+    "permission_summary",
+    "blocked_reasons",
+    "human_review_required",
+    "source_paths"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-evidence-pack-audit"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "audit_id": {
+      "type": "string"
+    },
+    "audited_at_utc": {
+      "type": "string"
+    },
+    "pack_name": {
+      "type": ["string", "null"]
+    },
+    "pack_version": {
+      "type": ["string", "null"]
+    },
+    "pack_kind": {
+      "type": ["string", "null"]
+    },
+    "verdict": {
+      "enum": ["pass", "needs_review", "block"]
+    },
+    "permission_summary": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "permission",
+          "requested",
+          "default",
+          "v0_policy",
+          "status",
+          "reason"
+        ],
+        "properties": {
+          "permission": {
+            "type": "string"
+          },
+          "requested": {
+            "type": ["boolean", "null"]
+          },
+          "default": {
+            "type": "string"
+          },
+          "v0_policy": {
+            "type": "string"
+          },
+          "status": {
+            "enum": ["allowed", "not_requested", "needs_review", "blocked", "invalid"]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "blocked_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "review_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "human_review_required": {
+      "type": "boolean"
+    },
+    "source_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "manifest_path": {
+      "type": "string"
+    },
+    "schema_path": {
+      "type": "string"
+    },
+    "manifest_summary": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "kind",
+        "summary",
+        "input_count",
+        "output_count",
+        "recipe_count",
+        "widget_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": ["string", "null"]
+        },
+        "version": {
+          "type": ["string", "null"]
+        },
+        "kind": {
+          "type": ["string", "null"]
+        },
+        "summary": {
+          "type": ["string", "null"]
+        },
+        "input_count": {
+          "type": "integer"
+        },
+        "output_count": {
+          "type": "integer"
+        },
+        "recipe_count": {
+          "type": "integer"
+        },
+        "widget_count": {
+          "type": "integer"
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": [
+        "schema_valid",
+        "issues"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_valid": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "message",
+              "severity"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "string"
+              },
+              "actual": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "v0_restrictions": {
+      "type": "object",
+      "required": [
+        "arbitrary_runtime",
+        "marketplace",
+        "network",
+        "secrets",
+        "repo_write",
+        "live_backend"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "arbitrary_runtime": {
+          "const": "blocked"
+        },
+        "marketplace": {
+          "const": "blocked"
+        },
+        "network": {
+          "const": "blocked"
+        },
+        "secrets": {
+          "const": "blocked"
+        },
+        "repo_write": {
+          "const": "blocked"
+        },
+        "live_backend": {
+          "const": "blocked"
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "paths": {
+      "type": "object",
+      "required": [
+        "audit_latest_path",
+        "audit_run_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "audit_latest_path": {
+          "type": "string"
+        },
+        "audit_run_path": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

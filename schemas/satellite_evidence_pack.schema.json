@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Legacy Satellite Pack Manifest",
+  "title": "Satellite Evidence Pack Manifest",
   "type": "object",
   "required": [
     "schema_name",
@@ -31,7 +31,7 @@
   ],
   "properties": {
     "schema_name": {
-      "const": "software-satellite-pack"
+      "const": "software-satellite-evidence-pack"
     },
     "schema_version": {
       "const": 1

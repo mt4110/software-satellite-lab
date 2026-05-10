@@ -21,7 +21,7 @@ evidence に正規化する。
 ## 2. 一文のプロダクト定義
 
 ```text
-software-satellite-lab は、AI 開発作業を、忘れない・比べられる・検査できる・再利用できる状態にする、ローカルファーストな software-work evidence OS である。
+software-satellite-lab は、AI 開発作業を、忘れない・比べられる・検査できる・再利用できる状態にする、ローカルファーストな AI Coding Flight Recorder / software-work evidence ledger である。
 ```
 
 英語:
@@ -81,7 +81,7 @@ human verdict
 comparison
 recall
 curation
-learning preview
+learning-candidate inspection
 ```
 
 ## 5. Anti-Drift Rule
@@ -108,12 +108,12 @@ learning preview
 
 ```text
 Do not build another coding agent.
-Build the evidence OS around all coding agents.
+Build the AI Coding Flight Recorder around all coding agents.
 ```
 
 日本語:
 
 ```text
 もう一つの coding agent を作らない。
-すべての coding agent の外側にある evidence OS を作る。
+すべての coding agent の外側にある flight recorder / evidence ledger を作る。
 ```

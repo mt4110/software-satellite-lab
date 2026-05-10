@@ -2,31 +2,31 @@
 
 [English README](./README_EN.md)
 
-ソフトウェア開発特化のサテライトシステム実験室です。
+ローカルファーストな AI Coding Flight Recorder です。
 
-このリポジトリは、新しい巨大モデルをいきなり作るための場所ではありません。
-まずは、ソフトウェア制作を実務で前に進めるための外付け知能層を育てることを目的にしています。
+AI-assisted software work のレビュー、失敗、修復、比較、人間の verdict を source-linked evidence として記録し、あとから inspect / compare / recall できるようにします。
+
+これは coding agent ではありません。coding agent の外側にある evidence layer です。
 
 ## 目的
 
-- レビューを強くする
-- 設計と提案の質を上げる
-- エージェント実行を扱いやすくする
-- 評価ループを残す
-- セッションをまたいで記憶を使えるようにする
-- 将来的なモデル差し替えや学習基盤化につなげる
+- AI coding work の失敗理由、採用理由、却下理由を忘れない
+- 似た失敗と human verdict を recall する
+- backend / proposal comparison を source path 付きで残す
+- learning-candidate inspection を preview-only で安全に扱う
+- どの agent / backend が出した結果でも、成果ではなく evidence を中心に検査する
 
 ## 何を作るのか
 
-中核にあるのは単体のモデルではなく、ソフトウェア開発のためのサテライトシステムです。
+中核にあるのは単体のモデルや agent 実行ではなく、AI-assisted software work の evidence ledger です。
 
 主な機能は次の5つです。
 
 1. イベントと成果物の記録
 2. 記憶と検索
-3. レビューと提案
-4. エージェント実行
-5. 評価と学習準備
+3. failure-memory review
+4. backend / proposal comparison
+5. human-gated learning-candidate inspection
 
 ## 設計方針
 
@@ -66,6 +66,9 @@
 - `README.md`: 日本語の概要
 - `README_EN.md`: English overview
 - `PLAN.md`: 再設計の設計図とマイルストーン
+- `docs/strategy_v2.md`: AI Coding Flight Recorder としての v2 strategy
+- `docs/satellite_evidence_pack_contract.md`: Satellite Evidence Pack の安全契約
+- `docs/failure_memory_review_demo.md`: 最初の failure-memory review demo spec
 - `docs/recall_context_builder_design.md`: 最初に取り掛かる Recall / Context Builder 設計
 - `docs/recall_hit_quality_loop.md`: Recall ヒット品質の可視化と軽量評価ループ
 - `docs/learning_finetune_prep_design.md`: M7 Learning and Fine-Tune Prep の preview-only dataset 候補設計
@@ -99,6 +102,10 @@
   - recall / evaluation / curation preview を束ね、小さい software-work workflow を preview-only で反復する土台
 - `scripts/run_dogfood_workflow.py`
   - review patch、proposal comparison、prior failure recall、decision explanation、resolved-work curation preview を CLI から起動するコマンド
+- `scripts/satellite_pack.py`
+  - Satellite Evidence Pack manifest の読み込み、v0 schema validation、permission audit artifact の土台
+- `scripts/satlab.py`
+  - `pack inspect` / `pack audit` を提供する薄い CLI
 
 ## セットアップ
 
@@ -130,6 +137,8 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_backend_swap.py --list-backends
 .venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"
+.venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```
