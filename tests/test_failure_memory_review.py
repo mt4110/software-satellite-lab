@@ -21,6 +21,7 @@ from failure_memory_review import (  # noqa: E402
     record_file_input,
     record_human_verdict,
     run_review_risk_pack,
+    summarize_patch,
 )
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
@@ -38,6 +39,31 @@ def _write_patch(root: Path, name: str = "changes.diff") -> Path:
                 "@@ -1,2 +1,3 @@",
                 " import argparse",
                 "+# preserve source artifact path",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_large_patch(root: Path) -> Path:
+    path = root / "large.diff"
+    filler = "\n".join(f"+filler line {index:05d}" for index in range(1600))
+    path.write_text(
+        "\n".join(
+            [
+                "diff --git a/scripts/first.py b/scripts/first.py",
+                "--- a/scripts/first.py",
+                "+++ b/scripts/first.py",
+                "@@ -1 +1 @@",
+                "+first change",
+                filler,
+                "diff --git a/scripts/late_file.py b/scripts/late_file.py",
+                "--- a/scripts/late_file.py",
+                "+++ b/scripts/late_file.py",
+                "@@ -1 +1 @@",
+                "+late change",
             ]
         )
         + "\n",
@@ -75,6 +101,19 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertEqual(mismatched["contract_status"], "invalid_event_contract")
         self.assertIn("source_artifact_checksum_mismatch", mismatched["schema_issues"])
         self.assertEqual(mismatched["source_artifact"]["checksum_status"], "mismatch")
+
+    def test_patch_summary_uses_full_patch_for_hints_and_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            patch = _write_large_patch(root)
+
+            summary = summarize_patch(patch)
+
+            self.assertGreater(patch.stat().st_size, 20000)
+            self.assertIn("scripts/first.py", summary["changed_files"])
+            self.assertIn("scripts/late_file.py", summary["changed_files"])
+            self.assertEqual(summary["changed_file_count"], 2)
+            self.assertGreater(summary["added_lines"], 1600)
 
     def test_file_first_review_loop_records_recall_verdict_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

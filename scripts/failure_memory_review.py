@@ -79,11 +79,14 @@ def _string_list(value: Any) -> list[str]:
     return [cleaned for item in value if (cleaned := _clean_text(item)) is not None]
 
 
-def _read_text(path: Path, *, limit: int = 20000) -> str:
+def _read_text(path: Path, *, limit: int | None = 20000) -> str:
     try:
-        return path.read_text(encoding="utf-8")[:limit]
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+        text = path.read_text(encoding="utf-8", errors="replace")
+    if limit is None:
+        return text
+    return text[:limit]
 
 
 def _truncate(text: str | None, *, limit: int = 180) -> str:
@@ -276,7 +279,7 @@ def _patch_file_hints(patch_text: str) -> list[str]:
 
 
 def summarize_patch(path: Path) -> dict[str, Any]:
-    patch_text = _read_text(path)
+    patch_text = _read_text(path, limit=None)
     added = sum(1 for line in patch_text.splitlines() if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in patch_text.splitlines() if line.startswith("-") and not line.startswith("---"))
     file_hints = _patch_file_hints(patch_text)
