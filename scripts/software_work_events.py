@@ -122,6 +122,14 @@ def _resolve_source_artifact_path(path_text: str, *, root: Path) -> Path:
         return path.absolute()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def build_event_contract_check(
     event: Mapping[str, Any],
     *,
@@ -136,12 +144,14 @@ def build_event_contract_check(
     source_refs = _mapping_dict(event.get("source_refs"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
     artifact_path = _clean_text(artifact_ref.get("artifact_path"))
+    declared_sha256 = _clean_text(artifact_ref.get("artifact_sha256")) or _clean_text(artifact_ref.get("sha256"))
     schema_issues: list[str] = []
     source_reasons: list[str] = []
     resolved_artifact_path: Path | None = None
     workspace_relative_path: str | None = None
     durability_status = "missing_path"
     readability_status = "missing_path"
+    checksum_status = "not_declared"
 
     if event_id is None:
         schema_issues.append("missing_event_id")
@@ -149,6 +159,12 @@ def build_event_contract_check(
         schema_issues.append("missing_event_kind")
     if status is None:
         schema_issues.append("missing_status")
+    if declared_sha256 is not None and (
+        len(declared_sha256) != 64
+        or any(char not in "0123456789abcdefABCDEF" for char in declared_sha256)
+    ):
+        schema_issues.append("invalid_source_artifact_checksum")
+        checksum_status = "invalid"
 
     if artifact_path is None:
         source_reasons.append("missing_source_artifact_path")
@@ -183,6 +199,19 @@ def build_event_contract_check(
                         source_reasons.append("source_artifact_unreadable")
                     else:
                         readability_status = "readable"
+                        if declared_sha256 is not None and checksum_status != "invalid":
+                            try:
+                                actual_sha256 = _file_sha256(resolved_artifact_path)
+                            except OSError:
+                                checksum_status = "not_checked"
+                            else:
+                                checksum_status = (
+                                    "verified"
+                                    if actual_sha256.lower() == declared_sha256.lower()
+                                    else "mismatch"
+                                )
+                                if checksum_status == "mismatch":
+                                    schema_issues.append("source_artifact_checksum_mismatch")
 
     source_status = "readable" if not source_reasons else "missing_source"
     if source_status == "missing_source":
@@ -208,6 +237,8 @@ def build_event_contract_check(
             "artifact_path": artifact_path,
             "resolved_artifact_path": str(resolved_artifact_path) if resolved_artifact_path is not None else None,
             "artifact_workspace_relative_path": workspace_relative_path,
+            "declared_sha256": declared_sha256,
+            "checksum_status": checksum_status,
         },
     }
 

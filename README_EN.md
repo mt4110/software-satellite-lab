@@ -106,7 +106,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `scripts/satellite_pack.py`
   - foundation for Satellite Evidence Pack manifest loading, v0 schema validation, and permission audit artifacts
 - `scripts/satlab.py`
-  - thin CLI for `pack inspect` and `pack audit`
+  - thin CLI for `event ingest`, `recall failure`, `verdict`, `report latest`, and `pack inspect|audit|run review-risk-pack`
 
 ## Setup
 
@@ -138,6 +138,11 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_backend_swap.py --list-backends
 .venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"
+.venv/bin/python scripts/satlab.py event ingest --patch changes.diff --note "Patch review input"
+.venv/bin/python scripts/satlab.py recall failure --query "patch risk similar failure"
+.venv/bin/python scripts/satlab.py pack run review-risk-pack --patch changes.diff
+.venv/bin/python scripts/satlab.py verdict reject --event <event-id> --reason "Repeats prior missing-source bug"
+.venv/bin/python scripts/satlab.py report latest --format md
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_local_ui.py

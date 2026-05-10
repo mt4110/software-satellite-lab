@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,19 @@ def _path_reference(path: str | Path | None, *, root: Path) -> dict[str, Any]:
     except ValueError:
         reference["workspace_relative_path"] = None
     return reference
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def detect_asset_kind(path: str | Path | None) -> str | None:
@@ -559,6 +573,7 @@ class WorkspaceSessionStore:
                     "kind": str(attachment.get("kind") or detect_asset_kind(path) or "file"),
                     "path": reference["path"],
                     "workspace_relative_path": reference["workspace_relative_path"],
+                    "sha256": _file_sha256(Path(reference["path"])) if reference["path"] is not None else None,
                     "added_at_utc": recorded_at_utc,
                 }
             )
@@ -583,4 +598,5 @@ class WorkspaceSessionStore:
             "recorded_at_utc": recorded_at_utc,
             "artifact_path": reference["path"],
             "artifact_workspace_relative_path": reference["workspace_relative_path"],
+            "artifact_sha256": _file_sha256(Path(reference["path"])) if reference["path"] is not None else None,
         }
