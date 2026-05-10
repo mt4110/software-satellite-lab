@@ -134,6 +134,22 @@ class SatellitePackManifestTests(unittest.TestCase):
             },
         )
 
+    def test_manifest_yaml_subset_preserves_nested_flow_collections(self) -> None:
+        manifest = parse_yaml_manifest_subset(
+            "recipes: [{id: patch, steps: [lint, test]}]",
+            Path("pack.satellite.yaml"),
+        )
+
+        self.assertEqual(
+            manifest["recipes"],
+            [
+                {
+                    "id": "patch",
+                    "steps": ["lint", "test"],
+                }
+            ],
+        )
+
     def test_schema_validation_blocks_denied_v0_permission(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
         harmful = copy.deepcopy(manifest)
@@ -155,6 +171,17 @@ class SatellitePackManifestTests(unittest.TestCase):
         version_issue = next(issue for issue in issues if issue.path == "$.schema_version")
 
         self.assertEqual(version_issue.actual, "true")
+
+    def test_schema_validation_rejects_null_recipes_when_present(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        invalid = copy.deepcopy(manifest)
+        invalid["kind"] = "recall_pack"
+        invalid["recipes"] = None
+
+        issues = validate_manifest_schema(invalid)
+        recipes_issue = next(issue for issue in issues if issue.path == "$.recipes")
+
+        self.assertEqual(recipes_issue.expected, "array")
 
     def test_schema_validation_preserves_primitive_actual_values(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)

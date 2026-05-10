@@ -299,6 +299,8 @@ def _split_flow_items(value: str, *, path: Path | None = None) -> list[str]:
     in_single = False
     in_double = False
     escape = False
+    bracket_depth = 0
+    brace_depth = 0
 
     for char in value:
         if escape:
@@ -317,7 +319,19 @@ def _split_flow_items(value: str, *, path: Path | None = None) -> list[str]:
             in_double = not in_double
             current.append(char)
             continue
-        if char == "," and not in_single and not in_double:
+        if not in_single and not in_double:
+            if char == "[":
+                bracket_depth += 1
+            elif char == "]":
+                bracket_depth -= 1
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth -= 1
+            if bracket_depth < 0 or brace_depth < 0:
+                location = f"{path}: " if path is not None else ""
+                raise PackManifestError(f"{location}unbalanced flow collection delimiters.")
+        if char == "," and not in_single and not in_double and bracket_depth == 0 and brace_depth == 0:
             items.append("".join(current).strip())
             current = []
             continue
@@ -326,6 +340,9 @@ def _split_flow_items(value: str, *, path: Path | None = None) -> list[str]:
     if in_single or in_double:
         location = f"{path}: " if path is not None else ""
         raise PackManifestError(f"{location}unterminated quoted string in flow sequence.")
+    if bracket_depth != 0 or brace_depth != 0:
+        location = f"{path}: " if path is not None else ""
+        raise PackManifestError(f"{location}unbalanced flow collection delimiters.")
 
     trailing = "".join(current).strip()
     if trailing or value.rstrip().endswith(","):
@@ -673,10 +690,16 @@ def _validate_permissions(value: Any, issues: list[ValidationIssue]) -> None:
             )
 
 
-def _validate_recipes(value: Any, issues: list[ValidationIssue], *, required: bool) -> None:
+def _validate_recipes(
+    value: Any,
+    issues: list[ValidationIssue],
+    *,
+    present: bool,
+    required: bool,
+) -> None:
     if value is None:
-        if required:
-            _issue(issues, "$.recipes", "workflow_pack manifests must include recipes.", expected="array")
+        if required or present:
+            _issue(issues, "$.recipes", "Expected an array.", expected="array", actual=value)
         return
     if not isinstance(value, list):
         _issue(issues, "$.recipes", "Expected an array.", expected="array", actual=value)
@@ -768,6 +791,7 @@ def validate_manifest_schema(manifest: Mapping[str, Any] | Any) -> list[Validati
     _validate_recipes(
         manifest.get("recipes"),
         issues,
+        present="recipes" in manifest,
         required=manifest.get("kind") == "workflow_pack",
     )
     return issues
