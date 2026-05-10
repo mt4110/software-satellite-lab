@@ -115,6 +115,25 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertEqual(manifest["outputs"], ["review_note", "evidence_bundle"])
         self.assertEqual(manifest["widgets"], ["evidence_path_card", "human_verdict_card"])
 
+    def test_manifest_yaml_subset_parses_flow_style_mapping(self) -> None:
+        manifest = parse_yaml_manifest_subset(
+            "\n".join(
+                [
+                    "schema_name: software-satellite-pack",
+                    "permissions: {read_repo: false, write_artifacts: true}",
+                ]
+            ),
+            Path("pack.satellite.yaml"),
+        )
+
+        self.assertEqual(
+            manifest["permissions"],
+            {
+                "read_repo": False,
+                "write_artifacts": True,
+            },
+        )
+
     def test_schema_validation_blocks_denied_v0_permission(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
         harmful = copy.deepcopy(manifest)
@@ -126,6 +145,16 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertTrue(any(issue.path == "$.permissions.network" for issue in issues))
         self.assertEqual(audit["verdict"], "block")
         self.assertTrue(any("$.permissions.network" in reason for reason in audit["blocked_reasons"]))
+
+    def test_schema_validation_rejects_boolean_schema_version(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        invalid = copy.deepcopy(manifest)
+        invalid["schema_version"] = True
+
+        issues = validate_manifest_schema(invalid)
+        version_issue = next(issue for issue in issues if issue.path == "$.schema_version")
+
+        self.assertEqual(version_issue.actual, "true")
 
     def test_schema_validation_preserves_primitive_actual_values(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)

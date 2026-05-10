@@ -272,6 +272,8 @@ def _parse_yaml_scalar(value: str) -> Any:
         return ""
     if value.startswith("[") and value.endswith("]"):
         return _parse_yaml_flow_sequence(value)
+    if value.startswith("{") and value.endswith("}"):
+        return _parse_yaml_flow_mapping(value)
     lowered = value.lower()
     if lowered == "true":
         return True
@@ -337,6 +339,31 @@ def _parse_yaml_flow_sequence(value: str, *, path: Path | None = None) -> list[A
         return []
     items = _split_flow_items(inner, path=path)
     return [_parse_yaml_scalar(item) for item in items]
+
+
+def _parse_yaml_flow_key(value: str) -> str:
+    parsed = _parse_yaml_scalar(value)
+    if isinstance(parsed, str):
+        return parsed
+    return str(parsed)
+
+
+def _parse_yaml_flow_mapping(value: str, *, path: Path | None = None) -> dict[str, Any]:
+    inner = value[1:-1].strip()
+    if not inner:
+        return {}
+    mapping: dict[str, Any] = {}
+    for item in _split_flow_items(inner, path=path):
+        if ":" not in item:
+            location = f"{path}: " if path is not None else ""
+            raise PackManifestError(f"{location}flow mapping item must use `key: value` syntax.")
+        key_text, value_text = item.split(":", 1)
+        key = _parse_yaml_flow_key(key_text.strip())
+        if key in mapping:
+            location = f"{path}: " if path is not None else ""
+            raise PackManifestError(f"{location}duplicate flow mapping key `{key}`.")
+        mapping[key] = _parse_yaml_scalar(value_text.strip())
+    return mapping
 
 
 def _parse_yaml_block(
@@ -710,13 +737,18 @@ def validate_manifest_schema(manifest: Mapping[str, Any] | Any) -> list[Validati
             expected=PACK_MANIFEST_SCHEMA_NAME,
             actual=manifest.get("schema_name"),
         )
-    if "schema_version" in manifest and manifest.get("schema_version") != PACK_MANIFEST_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if "schema_version" in manifest and (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != PACK_MANIFEST_SCHEMA_VERSION
+    ):
         _issue(
             issues,
             "$.schema_version",
             "Unsupported manifest schema version.",
             expected=str(PACK_MANIFEST_SCHEMA_VERSION),
-            actual=str(manifest.get("schema_version")),
+            actual=schema_version,
         )
 
     _validate_string_field(manifest, "name", issues, pattern=PACK_NAME_RE)
