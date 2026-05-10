@@ -53,11 +53,15 @@ permissions:
 | read_memory_index | allow | no external transfer |
 | read_repo | prompt / manifest explicit | patch review requires it |
 | write_repo | deny | not in v0 |
+| write_evaluation_signal | deny | write suggestion artifacts, not final signals |
+| request_human_verdict | allow | required for adoption / curation decisions |
 | run_command | deny | only core-owned verification runner later |
 | network | deny | no marketplace / exfiltration |
 | secrets | deny | no exception in v0 |
+| use_backend | deny | no live backend invocation in v0 packs |
 
 These are the only permission keys declared by the v0 manifest schema.
+The denied v0 permissions are schema-enforced as `false`, not merely documented as defaults.
 
 ## 5. Runtime Restrictions
 

@@ -13,6 +13,22 @@
     "outputs"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "workflow_pack"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "recipes"
+        ]
+      }
+    }
+  ],
   "properties": {
     "schema_name": {
       "const": "software-satellite-pack"
@@ -72,7 +88,7 @@
           "type": "boolean"
         },
         "write_repo": {
-          "type": "boolean"
+          "const": false
         },
         "read_artifacts": {
           "type": "boolean"
@@ -84,28 +100,29 @@
           "type": "boolean"
         },
         "write_evaluation_signal": {
-          "type": "boolean"
+          "const": false
         },
         "request_human_verdict": {
           "type": "boolean"
         },
         "run_command": {
-          "type": "boolean"
+          "const": false
         },
         "network": {
-          "type": "boolean"
+          "const": false
         },
         "secrets": {
-          "type": "boolean"
+          "const": false
         },
         "use_backend": {
-          "type": "boolean"
+          "const": false
         }
       },
       "additionalProperties": false
     },
     "recipes": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object",
         "required": [
