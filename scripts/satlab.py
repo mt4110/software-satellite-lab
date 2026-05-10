@@ -13,6 +13,7 @@ from failure_memory_review import (
     event_contract_summary,
     format_failure_recall_report,
     format_ingest_result,
+    format_verdict_template,
     format_verdict_result,
     record_file_input,
     record_human_verdict,
@@ -278,7 +279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.format == "json":
                 print(json.dumps(template, ensure_ascii=False, indent=2))
             else:
-                print(json.dumps(template, ensure_ascii=False, indent=2))
+                print(format_verdict_template(template))
             return 0
         try:
             result, _latest_path, _run_path = record_human_verdict(

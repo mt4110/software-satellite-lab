@@ -81,9 +81,12 @@ def _string_list(value: Any) -> list[str]:
 
 def _read_text(path: Path, *, limit: int | None = 20000) -> str:
     try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValueError(f"Input file is not readable: `{path}`.") from exc
     if limit is None:
         return text
     return text[:limit]
@@ -111,11 +114,14 @@ def _coerce_utc_datetime(value: Any) -> datetime | None:
 
 
 def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError as exc:
+        raise ValueError(f"Input file is not readable: `{path}`.") from exc
 
 
 def _path_from_text(path: str | Path, *, root: Path) -> Path:
@@ -246,13 +252,17 @@ def report_metadata_run_path(
 
 
 def _source_input_record(path: Path, *, role: str, root: Path) -> dict[str, Any]:
+    try:
+        size_bytes = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"Input file is not readable: `{path}`.") from exc
     return {
         "role": role,
         "kind": "file",
         "path": str(path),
         "workspace_relative_path": _workspace_relative(path, root=root),
         "sha256": _file_sha256(path),
-        "size_bytes": path.stat().st_size,
+        "size_bytes": size_bytes,
     }
 
 
@@ -341,7 +351,11 @@ def record_file_input(
     if normalized_kind not in INPUT_KIND_DEFAULT_STATUS:
         raise ValueError(f"Unsupported file input kind `{input_kind}`.")
     resolved_source = _path_from_text(source_path, root=resolved_root)
-    if not resolved_source.is_file():
+    try:
+        source_is_file = resolved_source.is_file()
+    except OSError as exc:
+        raise ValueError(f"{normalized_kind} input must be a readable file: `{resolved_source}`.") from exc
+    if not source_is_file:
         raise ValueError(f"{normalized_kind} input must be a readable file: `{resolved_source}`.")
 
     normalized_status = _clean_text(status) or INPUT_KIND_DEFAULT_STATUS[normalized_kind]
@@ -424,6 +438,7 @@ def record_file_input(
             "source_input_path": str(resolved_source),
             "source_input_sha256": source_record["sha256"],
             "file_hints": summary.get("changed_files") if normalized_kind == "patch" else [],
+            "record_source_checksums": True,
             **validation,
         },
     )
@@ -685,6 +700,22 @@ def build_verdict_template(*, event_id: str | None = None, verdict: str = "rejec
         "records_evaluation_signal": verdict in VERDICT_SIGNAL_KIND,
         "preview_only_learning": True,
     }
+
+
+def format_verdict_template(template: Mapping[str, Any]) -> str:
+    gate = "required" if template.get("human_gate_required") else "not required"
+    signal = "yes" if template.get("records_evaluation_signal") else "no"
+    learning = "preview-only" if template.get("preview_only_learning") else "not marked"
+    return "\n".join(
+        [
+            f"Verdict template: {_clean_text(template.get('verdict')) or 'reject'}",
+            f"Event: {_clean_text(template.get('event_id')) or '<event-id>'}",
+            f"Reason: {_clean_text(template.get('reason')) or '<short human reason>'}",
+            f"Human gate: {gate}",
+            f"Records evaluation signal: {signal}",
+            f"Learning mode: {learning}",
+        ]
+    )
 
 
 def record_human_verdict(

@@ -25,7 +25,7 @@ from failure_memory_review import (  # noqa: E402
 )
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
-from software_work_events import build_event_contract_check  # noqa: E402
+from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
 
 
 def _write_patch(root: Path, name: str = "changes.diff") -> Path:
@@ -150,15 +150,46 @@ class FailureMemoryReviewTests(unittest.TestCase):
                 root=root,
             )
             metadata, markdown, latest_report, run_report = build_review_risk_report(root=root)
+            index_summary = rebuild_memory_index(root=root)
+            event_log = read_event_log(Path(index_summary["event_log_path"]))
+            patch_event = next(
+                event for event in event_log["events"] if event["event_id"] == patch_result["event_id"]
+            )
+            contract_check = build_event_contract_check(patch_event, root=root)
 
             self.assertTrue(failure_result["event_id"])
             self.assertGreaterEqual(recall["bundle"]["selected_count"], 1)
             self.assertEqual(verdict["signal"]["signal_kind"], "rejection")
+            self.assertEqual(contract_check["source_artifact"]["checksum_status"], "verified")
             self.assertEqual(metadata["learning_state"]["state"], "blocked")
             self.assertIn("Review Risk Report", markdown)
             self.assertIn("Repeats prior missing-source bug", markdown)
             self.assertTrue(latest_report.is_file())
             self.assertTrue(run_report.is_file())
+
+    def test_satlab_verdict_template_text_is_human_readable(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = satlab_main(
+                [
+                    "verdict",
+                    "template",
+                    "--event",
+                    "local-default:chat-main:patch-0001",
+                    "--verdict",
+                    "reject",
+                    "--reason",
+                    "Needs source review",
+                    "--format",
+                    "text",
+                ]
+            )
+        text = stdout.getvalue()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Verdict template: reject", text)
+        self.assertIn("Event: local-default:chat-main:patch-0001", text)
+        self.assertFalse(text.lstrip().startswith("{"))
 
     def test_satlab_cli_ingest_and_recall_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
