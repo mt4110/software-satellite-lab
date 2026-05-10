@@ -349,8 +349,24 @@ def _event_source_record(event: Mapping[str, Any] | None, *, source_event_id: st
     session = _mapping_dict(event_payload.get("session"))
     outcome = _mapping_dict(event_payload.get("outcome"))
     content = _mapping_dict(event_payload.get("content"))
+    options = _mapping_dict(content.get("options"))
     source_refs = _mapping_dict(event_payload.get("source_refs"))
     artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
+    attached_assets = [
+        {
+            key: value
+            for key, value in {
+                "role": _clean_text(item.get("role")),
+                "kind": _clean_text(item.get("kind")),
+                "path": _clean_text(item.get("path")),
+                "workspace_relative_path": _clean_text(item.get("workspace_relative_path")),
+                "sha256": _clean_text(item.get("sha256")),
+            }.items()
+            if value is not None
+        }
+        for item in source_refs.get("attached_assets") or []
+        if isinstance(item, Mapping)
+    ]
     return {
         "source_event_id": source_event_id,
         "event_kind": _clean_text(event_payload.get("event_kind")),
@@ -361,6 +377,10 @@ def _event_source_record(event: Mapping[str, Any] | None, *, source_event_id: st
         "quality_status": _clean_text(outcome.get("quality_status")),
         "execution_status": _clean_text(outcome.get("execution_status")),
         "artifact_path": _clean_text(artifact_ref.get("artifact_path")),
+        "artifact_workspace_relative_path": _clean_text(artifact_ref.get("artifact_workspace_relative_path")),
+        "source_input_path": _clean_text(options.get("source_input_path")),
+        "source_input_sha256": _clean_text(options.get("source_input_sha256")),
+        "attached_assets": attached_assets,
         "prompt_excerpt": _clean_text(content.get("prompt")),
     }
 
@@ -1231,6 +1251,18 @@ def _comparison_summary(comparison: Mapping[str, Any]) -> dict[str, Any]:
             event_id
             for item in candidates
             if (event_id := _clean_text(item.get("event_id"))) is not None
+        ],
+        "candidate_sources": [
+            {
+                "event_id": _clean_text(item.get("event_id")),
+                "artifact_path": _clean_text(_mapping_dict(item.get("source")).get("artifact_path")),
+                "source_input_path": _clean_text(_mapping_dict(item.get("source")).get("source_input_path")),
+                "source_input_sha256": _clean_text(_mapping_dict(item.get("source")).get("source_input_sha256")),
+                "backend_id": _clean_text(_mapping_dict(item.get("backend_metadata")).get("backend_id")),
+                "model_id": _clean_text(_mapping_dict(item.get("backend_metadata")).get("model_id")),
+            }
+            for item in candidates
+            if isinstance(item, Mapping)
         ],
         "backend_comparison": _comparison_backend_summary(
             candidates,

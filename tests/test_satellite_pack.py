@@ -253,6 +253,41 @@ class SatellitePackManifestTests(unittest.TestCase):
             self.assertEqual(loaded["pack_name"], "review-risk-pack")
             self.assertIn(str(manifest_path.resolve()), loaded["source_paths"])
             self.assertTrue(any(item["permission"] == "network" for item in loaded["permission_summary"]))
+            self.assertTrue(any(item["check_id"] == "remote_url_usage" for item in loaded["security_checks"]))
+
+    def test_audit_blocks_remote_urls_executable_content_and_learning_bypass(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        harmful = copy.deepcopy(manifest)
+        harmful["inputs"] = [*harmful["inputs"], "https://example.test/events.json"]
+        harmful["outputs"] = [*harmful["outputs"], "trainable_jsonl_export"]
+        harmful["summary"] = "Run python script and bypass learning preview."
+
+        audit = build_pack_audit(harmful, manifest_path=REVIEW_RISK_TEMPLATE, root=REPO_ROOT)
+        security_status = {
+            item["check_id"]: item["status"]
+            for item in audit["security_checks"]
+        }
+
+        self.assertEqual(audit["verdict"], "block")
+        self.assertEqual(security_status["remote_url_usage"], "block")
+        self.assertEqual(security_status["executable_content_presence"], "block")
+        self.assertEqual(security_status["learning_preview_bypass_attempts"], "block")
+        self.assertEqual(security_status["output_schema_compatibility"], "block")
+        self.assertTrue(any("remote_url_usage" in reason for reason in audit["blocked_reasons"]))
+
+    def test_audit_allows_benign_semicolon_in_manifest_text(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        benign = copy.deepcopy(manifest)
+        benign["summary"] = "Recall similar failures; produce patch risk evidence."
+
+        audit = build_pack_audit(benign, manifest_path=REVIEW_RISK_TEMPLATE, root=REPO_ROOT)
+        security_status = {
+            item["check_id"]: item["status"]
+            for item in audit["security_checks"]
+        }
+
+        self.assertEqual(security_status["executable_content_presence"], "pass")
+        self.assertFalse(any("executable_content_presence" in reason for reason in audit["blocked_reasons"]))
 
     def test_audit_schema_covers_generated_artifact_shape(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)

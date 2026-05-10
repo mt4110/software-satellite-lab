@@ -13,12 +13,15 @@ from failure_memory_review import (
     event_contract_summary,
     format_failure_recall_report,
     format_ingest_result,
+    format_proposal_comparison_result,
     format_verdict_template,
     format_verdict_result,
     record_file_input,
     record_human_verdict,
+    record_proposal_comparison,
     run_review_risk_pack,
 )
+from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
 from satellite_pack import (
     PackManifestError,
     audit_pack_path,
@@ -47,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     input_group = ingest_parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--patch", type=Path, help="Patch or git diff file to record.")
     input_group.add_argument("--failure", type=Path, help="Failure log or failure note file to record.")
+    input_group.add_argument("--proposal", type=Path, help="Proposal or candidate output file to record.")
     input_group.add_argument("--repair", type=Path, help="Repair note or repair artifact file to record.")
     input_group.add_argument("--review-note", type=Path, help="Accepted/rejected review note file to record.")
     ingest_parser.add_argument("--note", default="", help="Short note to attach to the event.")
@@ -76,6 +80,48 @@ def build_parser() -> argparse.ArgumentParser:
     failure_recall_parser.add_argument("--context-budget-chars", type=int, default=6000, help="Recall bundle budget.")
     failure_recall_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     failure_recall_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    compare_parser = subparsers.add_parser("compare", help="Record source-linked proposal comparisons.")
+    compare_subparsers = compare_parser.add_subparsers(dest="compare_command", required=True)
+    proposals_parser = compare_subparsers.add_parser(
+        "proposals",
+        help="Compare two or more proposal/candidate output files with a human rationale.",
+    )
+    proposals_parser.add_argument(
+        "--candidate",
+        type=Path,
+        action="append",
+        required=True,
+        help="Candidate output file. Repeat at least twice.",
+    )
+    proposals_parser.add_argument(
+        "--verdict",
+        choices=("winner", "none", "tie", "needs-follow-up"),
+        required=True,
+        help="Human comparison verdict. Use `winner` with --winner-candidate or `none` when no candidate wins.",
+    )
+    proposals_parser.add_argument(
+        "--winner-candidate",
+        default="",
+        help="Winning candidate path or 1-based index. Required for --verdict winner.",
+    )
+    proposals_parser.add_argument("--rationale", required=True, help="Human rationale for the comparison verdict.")
+    proposals_parser.add_argument("--label", default="", help="Short task label for the comparison.")
+    proposals_parser.add_argument("--criterion", action="append", default=[], help="Comparison criterion. Repeatable.")
+    proposals_parser.add_argument(
+        "--candidate-backend-id",
+        action="append",
+        default=[],
+        help="Optional backend id for a candidate. Repeat once per candidate when provided.",
+    )
+    proposals_parser.add_argument(
+        "--candidate-model-id",
+        action="append",
+        default=[],
+        help="Optional model id for a candidate. Repeat once per candidate when provided.",
+    )
+    proposals_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    proposals_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     pack_parser = subparsers.add_parser("pack", help="Inspect and audit declarative Satellite Evidence Packs.")
     pack_subparsers = pack_parser.add_subparsers(dest="pack_command", required=True)
@@ -136,6 +182,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     latest_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     latest_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    learning_parser = subparsers.add_parser("learning", help="Inspect preview-only learning candidates.")
+    learning_subparsers = learning_parser.add_subparsers(dest="learning_command", required=True)
+    inspect_learning_parser = learning_subparsers.add_parser(
+        "inspect",
+        help="Build and inspect a preview-only learning-candidate queue.",
+    )
+    inspect_learning_parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Required safety flag. Writes inspection artifacts only; no trainable export is produced.",
+    )
+    inspect_learning_parser.add_argument("--limit", type=int, default=None, help="Maximum eligible candidates to preview.")
+    inspect_learning_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    inspect_learning_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
     return parser
 
 
@@ -185,6 +246,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.failure is not None:
             input_kind = "failure"
             source_path = args.failure
+        elif args.proposal is not None:
+            input_kind = "proposal"
+            source_path = args.proposal
         elif args.repair is not None:
             input_kind = "repair"
             source_path = args.repair
@@ -250,6 +314,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(format_failure_recall_report(recall))
         return 0
 
+    if args.command == "compare" and args.compare_command == "proposals":
+        try:
+            result, _comparison_log = record_proposal_comparison(
+                candidate_paths=args.candidate,
+                verdict=args.verdict,
+                winner_candidate=args.winner_candidate.strip() or None,
+                rationale=args.rationale,
+                task_label=args.label.strip() or None,
+                criteria=args.criterion,
+                candidate_backend_ids=args.candidate_backend_id,
+                candidate_model_ids=args.candidate_model_id,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(format_proposal_comparison_result(result))
+        return 0
+
     if args.command == "pack" and args.pack_command == "run":
         try:
             metadata, markdown, _latest_path, _run_path = run_review_risk_pack(
@@ -267,6 +353,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(metadata, ensure_ascii=False, indent=2))
         else:
             print(markdown)
+        return 0
+
+    if args.command == "learning" and args.learning_command == "inspect":
+        if not args.preview_only:
+            parser.error("learning inspect requires --preview-only.")
+        try:
+            preview, latest_path, run_path = record_learning_dataset_preview(
+                workspace_id=args.workspace_id,
+                root=args.root,
+                limit=args.limit,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            payload = {
+                "learning_preview": preview,
+                "learning_preview_latest_path": str(latest_path),
+                "learning_preview_run_path": str(run_path),
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(format_learning_dataset_preview_report(preview))
         return 0
 
     if args.command == "verdict":
