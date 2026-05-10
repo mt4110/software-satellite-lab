@@ -34,9 +34,7 @@
         "workflow_pack",
         "recall_pack",
         "evaluation_pack",
-        "widget_pack",
-        "evidence_adapter_pack",
-        "backend_adapter_pack"
+        "widget_pack"
       ]
     },
     "summary": {
@@ -109,7 +107,26 @@
     "recipes": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "required": [
+          "id",
+          "steps"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]*$"
+            }
+          }
+        }
       }
     },
     "widgets": {

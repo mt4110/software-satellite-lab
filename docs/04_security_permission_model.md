@@ -44,7 +44,7 @@ permissions:
   request_human_verdict: true
 ```
 
-## 4. Default Policy
+## 4. Manifest Permission Defaults
 
 | Permission | Default | v0 note |
 |---|---:|---|
@@ -56,10 +56,22 @@ permissions:
 | run_command | deny | only core-owned verification runner later |
 | network | deny | no marketplace / exfiltration |
 | secrets | deny | no exception in v0 |
+
+These are the only permission keys declared by the v0 manifest schema.
+
+## 5. Runtime Restrictions
+
+The following are not manifest permissions in v0.
+They are runtime capabilities that remain unavailable regardless of manifest content.
+
+| Capability | v0 policy | Note |
+|---|---:|---|
 | custom_js_widget | deny | use schema-rendered widgets |
 | arbitrary_python | deny | no executable pack in v0 |
+| arbitrary_javascript | deny | no executable pack in v0 |
+| arbitrary_shell | deny | no executable pack in v0 |
 
-## 5. Pack Audit Output
+## 6. Pack Audit Output
 
 `pack audit` は、人間が読むための artifact を出す。
 
@@ -76,7 +88,7 @@ permissions:
 }
 ```
 
-## 6. Human Gate Policy
+## 7. Human Gate Policy
 
 次は必ず human gate を要求する。
 
@@ -89,7 +101,7 @@ permissions:
 - shell command execution
 ```
 
-## 7. Widget Safety
+## 8. Widget Safety
 
 v0 widget は custom JS を禁止する。
 
@@ -103,7 +115,7 @@ artifact query
 core renderer
 ```
 
-## 8. Future Sandbox Levels
+## 9. Future Sandbox Levels
 
 v0 では実行コードを避ける。
 
@@ -116,7 +128,7 @@ v0 では実行コードを避ける。
 | L2 | allowlisted command | local sandbox + explicit human approval |
 | L3 | executable pack | signing / sandbox / rollback / logs required |
 
-## 9. Security Non-Negotiables
+## 10. Security Non-Negotiables
 
 ```text
 - secrets は v0 で触らない

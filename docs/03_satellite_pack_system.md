@@ -32,11 +32,15 @@ no arbitrary code in v0
 | recall_pack | task kind ごとの recall policy | Yes |
 | evaluation_pack | check criteria / comparison criteria | Yes |
 | widget_pack | read-only artifact view | Yes |
-| evidence_adapter_pack | 外部ログを software-work event へ正規化 | Later |
-| backend_adapter_pack | live model / agent adapter | Later |
-| executable_pack | shell / Python / JS 実行を含む | No in v0 |
+| evidence_adapter_pack | 外部ログを software-work event へ正規化 | Later, not valid in v0 schema |
+| backend_adapter_pack | live model / agent adapter | Later, not valid in v0 schema |
+| executable_pack | shell / Python / JS 実行を含む | No in v0, not valid in v0 schema |
 
 ## 4. Pack Manifest
+
+v0 manifest schema で有効な `kind` は、`workflow_pack`、`recall_pack`、
+`evaluation_pack`、`widget_pack` のみ。
+adapter / executable 系の Pack kind は将来検討対象だが、v0 では有効な `kind` 値ではない。
 
 最小 manifest:
 
@@ -55,27 +59,38 @@ inputs:
 
 outputs:
   - review_note
-  - evidence_bundle
-  - evaluation_signal_suggestion
+  - similar_failure_bundle
+  - risk_evidence_bundle
+  - human_verdict_request
+  - learning_preview_candidate_or_blocked
 
 permissions:
   read_repo: true
+  write_repo: false
+  read_artifacts: true
   write_artifacts: true
+  read_memory_index: true
+  write_evaluation_signal: false
+  request_human_verdict: true
   run_command: false
   network: false
   secrets: false
-  write_repo: false
+  use_backend: false
 
 recipes:
   - id: patch_risk_review
     steps:
+      - resolve_patch_input
       - recall_similar_failures
       - build_risk_note
-      - require_human_verdict
+      - write_evidence_bundle
+      - request_human_verdict
+      - update_curation_preview
 
 widgets:
-  - similar_failure_card
   - evidence_path_card
+  - similar_failures_card
+  - blocked_reason_card
   - human_verdict_card
 ```
 
