@@ -99,6 +99,10 @@
   - recall / evaluation / curation preview を束ね、小さい software-work workflow を preview-only で反復する土台
 - `scripts/run_dogfood_workflow.py`
   - review patch、proposal comparison、prior failure recall、decision explanation、resolved-work curation preview を CLI から起動するコマンド
+- `scripts/satellite_pack.py`
+  - Satellite Pack manifest の読み込み、v0 schema validation、permission audit artifact の土台
+- `scripts/satlab.py`
+  - `pack inspect` / `pack audit` を提供する薄い CLI
 
 ## セットアップ
 
@@ -130,6 +134,8 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_backend_swap.py --list-backends
 .venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"
+.venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```

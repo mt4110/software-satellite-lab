@@ -100,6 +100,10 @@ These are treated as baseline assets for the redesign, not as throwaway work.
   - preview-only workflow layer that connects recall, evaluation, and curation preview for small repeated software-work loops
 - `scripts/run_dogfood_workflow.py`
   - CLI launcher for patch review, proposal comparison, prior-failure recall, decision explanation, and resolved-work curation preview
+- `scripts/satellite_pack.py`
+  - foundation for Satellite Pack manifest loading, v0 schema validation, and permission audit artifacts
+- `scripts/satlab.py`
+  - thin CLI for `pack inspect` and `pack audit`
 
 ## Setup
 
@@ -131,6 +135,8 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/run_agent_lane.py --task-title "Patch smoke" --goal "Run a bounded patch-plan-verify loop." --plan-step "Inspect scope." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_agent_lane"
 .venv/bin/python scripts/run_backend_swap.py --list-backends
 .venv/bin/python scripts/run_backend_swap.py --task-title "Backend swap smoke" --goal "Run the same workflow across local backend configs." --plan-step "Load backend config." --plan-step "Run verification." --verification-command ".venv/bin/python -m unittest tests.test_backend_swap"
+.venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke
 ```
