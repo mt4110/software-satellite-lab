@@ -275,6 +275,20 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertEqual(security_status["output_schema_compatibility"], "block")
         self.assertTrue(any("remote_url_usage" in reason for reason in audit["blocked_reasons"]))
 
+    def test_audit_allows_benign_semicolon_in_manifest_text(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        benign = copy.deepcopy(manifest)
+        benign["summary"] = "Recall similar failures; produce patch risk evidence."
+
+        audit = build_pack_audit(benign, manifest_path=REVIEW_RISK_TEMPLATE, root=REPO_ROOT)
+        security_status = {
+            item["check_id"]: item["status"]
+            for item in audit["security_checks"]
+        }
+
+        self.assertEqual(security_status["executable_content_presence"], "pass")
+        self.assertFalse(any("executable_content_presence" in reason for reason in audit["blocked_reasons"]))
+
     def test_audit_schema_covers_generated_artifact_shape(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
         audit = build_pack_audit(manifest, manifest_path=REVIEW_RISK_TEMPLATE, root=REPO_ROOT)

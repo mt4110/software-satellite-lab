@@ -81,7 +81,7 @@ PACK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 RECIPE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 REMOTE_URL_RE = re.compile(r"\b(?:https?|ftp)://", re.IGNORECASE)
 EXECUTABLE_CONTENT_RE = re.compile(
-    r"(^#!|\b(?:bash|curl|node|npm|npx|python|ruby|sh|wget)\b|[`$][(]|&&|\|\||;|<script\b|"
+    r"(^#!|\b(?:bash|curl|node|npm|npx|python|ruby|sh|wget)\b|[`$][(]|&&|\|\||<script\b|"
     r"\.(?:js|py|rb|sh|zsh|bash|command|app)\b)",
     re.IGNORECASE,
 )

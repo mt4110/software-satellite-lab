@@ -345,6 +345,24 @@ class FailureMemoryReviewTests(unittest.TestCase):
 
         self.assertEqual(index_summary["event_count"], 0)
 
+    def test_proposal_comparison_validates_all_candidate_paths_before_recording(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            proposal_a = root / "proposal-a.md"
+            missing_proposal = root / "missing-proposal.md"
+            proposal_a.write_text("A\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "readable files"):
+                record_proposal_comparison(
+                    candidate_paths=[proposal_a, missing_proposal],
+                    verdict="none",
+                    rationale="Missing candidate should not write partial events.",
+                    root=root,
+                )
+            index_summary = rebuild_memory_index(root=root)
+
+        self.assertEqual(index_summary["event_count"], 0)
+
     def test_report_does_not_mix_stale_verdict_or_recall_with_latest_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -577,6 +577,16 @@ def record_proposal_comparison(
     resolved_candidates = [_path_from_text(path, root=resolved_root) for path in candidate_paths]
     if len(resolved_candidates) < 2:
         raise ValueError("Proposal comparison requires at least two candidate files.")
+    unreadable_candidates = [
+        str(path)
+        for path in resolved_candidates
+        if not path.is_file()
+    ]
+    if unreadable_candidates:
+        raise ValueError(
+            "Proposal comparison candidates must be readable files: "
+            + ", ".join(unreadable_candidates)
+        )
     seen_paths: set[str] = set()
     for path in resolved_candidates:
         path_key = str(path)
@@ -1626,7 +1636,7 @@ def format_proposal_comparison_result(result: Mapping[str, Any]) -> str:
         if not isinstance(candidate, Mapping):
             continue
         source = next(iter(candidate.get("source_inputs") or []), {})
-        source_path = source.get("workspace_relative_path") or source.get("path") if isinstance(source, Mapping) else None
+        source_path = (source.get("workspace_relative_path") or source.get("path")) if isinstance(source, Mapping) else None
         lines.append(f"- {index}. `{candidate.get('event_id')}` source=`{source_path or 'n/a'}`")
     lines.extend(
         [
