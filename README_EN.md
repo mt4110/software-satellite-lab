@@ -70,6 +70,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `docs/strategy_v2.md`: v2 strategy around the AI Coding Flight Recorder wedge
 - `docs/satellite_evidence_pack_contract.md`: safety contract for Satellite Evidence Packs
 - `docs/failure_memory_review_demo.md`: first failure-memory review demo spec
+- `docs/demand_validation_demo_kit.md`: demand-validation and dogfood measurement kit after the public demo
 - `docs/recall_context_builder_design.md`: first implementation design for Recall / Context Builder
 - `docs/recall_hit_quality_loop.md`: hit-quality visualization and lightweight evaluation loop for Recall
 - `docs/learning_finetune_prep_design.md`: M7 preview-only dataset candidate design for Learning and Fine-Tune Prep
@@ -105,8 +106,10 @@ These are treated as baseline assets for the redesign, not as throwaway work.
   - CLI launcher for patch review, proposal comparison, prior-failure recall, decision explanation, and resolved-work curation preview
 - `scripts/satellite_pack.py`
   - foundation for Satellite Evidence Pack manifest loading, v0 schema validation, and permission audit artifacts
+- `scripts/demand_validation.py`
+  - public-demo validation kit that records dogfood runs, external interviews, and clone-to-demo timing into local file ledgers and reports
 - `scripts/satlab.py`
-  - thin CLI for `event ingest`, `recall failure`, `compare proposals`, `verdict`, `report latest`, `learning inspect --preview-only`, and `pack inspect|audit|run review-risk-pack`
+  - thin CLI for `event ingest`, `recall failure`, `compare proposals`, `verdict`, `report latest`, `learning inspect --preview-only`, `pack inspect|audit|run review-risk-pack`, and `validation`
 
 ## Setup
 
@@ -145,6 +148,11 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py verdict reject --event <event-id> --reason "Repeats prior missing-source bug"
 .venv/bin/python scripts/satlab.py report latest --format md
 .venv/bin/python scripts/satlab.py learning inspect --preview-only
+.venv/bin/python scripts/satlab.py validation template --output-dir artifacts/demand_validation_notes
+.venv/bin/python scripts/satlab.py validation record-run --event <event-id> --useful-recall yes --critical-false-evidence-count 0 --verdict-capture-seconds 20 --notes-file artifacts/demand_validation_notes/dogfood_run_notes.md
+.venv/bin/python scripts/satlab.py validation record-interview --participant user-1 --recognized-pain yes --wants-to-try yes --notes-file artifacts/demand_validation_notes/external_user_interview.md
+.venv/bin/python scripts/satlab.py validation record-setup --clone-to-demo-minutes 12 --notes-file artifacts/demand_validation_notes/setup_timing.md
+.venv/bin/python scripts/satlab.py validation report --write --format md
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_public_demo_checks.py
