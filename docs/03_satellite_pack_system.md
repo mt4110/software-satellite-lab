@@ -1,13 +1,13 @@
-# 03. Satellite Pack System
+# 03. Satellite Evidence Pack System
 
-## 1. Why Satellite Pack?
+## 1. Why Satellite Evidence Pack?
 
 `plugin` と呼ぶと、自由な実行コードや marketplace を連想し、設計が危険に広がる。
 
-`Satellite Pack` は違う。
+`Satellite Evidence Pack` は違う。
 
 ```text
-Satellite Pack = software-work evidence OS に安全に接続できる、宣言的な workflow / evidence / recall / widget / evaluation bundle
+Satellite Evidence Pack = software-work evidence ledger に安全に接続できる、宣言的な workflow / evidence / recall / widget / evaluation bundle
 ```
 
 目的は「何でもできる拡張」ではなく、**evidence を壊さず、判断を増やす拡張**。
@@ -45,7 +45,7 @@ adapter / executable 系の Pack kind は将来検討対象だが、v0 では有
 最小 manifest:
 
 ```yaml
-schema_name: software-satellite-pack
+schema_name: software-satellite-evidence-pack
 schema_version: 1
 name: review-risk-pack
 version: 0.1.0
@@ -62,7 +62,7 @@ outputs:
   - similar_failure_bundle
   - risk_evidence_bundle
   - human_verdict_request
-  - learning_preview_candidate_or_blocked
+  - learning_candidate_state
 
 permissions:
   read_repo: true
@@ -85,7 +85,7 @@ recipes:
       - build_risk_note
       - write_evidence_bundle
       - request_human_verdict
-      - update_curation_preview
+      - update_learning_candidate_inspection
 
 widgets:
   - evidence_path_card
@@ -118,7 +118,7 @@ render read-only widgets
 wait for human verdict
 ```
 
-## 6. v0 Pack Runtime Restrictions
+## 6. v0 Evidence Pack Runtime Restrictions
 
 v0 では、以下を禁止する。
 
@@ -154,7 +154,7 @@ patch を読む
 過去の類似失敗を recall する
 risk note を作る
 human verdict を要求する
-curation / learning preview に接続する
+curation / learning-candidate inspection に接続する
 ```
 
 ### 7.2 backend-compare-pack
@@ -183,7 +183,7 @@ Pack は merge 前に次を満たす。
 [ ] source artifact path を失わない
 [ ] outputs が core schema に準拠
 [ ] human verdict が必要な箇所で bypass されない
-[ ] learning preview に raw output を入れない
+[ ] learning-candidate inspection に raw output を入れない
 [ ] negative evidence / exclusion reason を保存する
 [ ] CLI で実行できる
 [ ] read-only widget で inspect できる
@@ -208,6 +208,6 @@ No auto-update.
 
 競合の拡張は、多くの場合「agent に何かをさせる」方向へ進む。
 
-Satellite Pack は、「agent の作業を evidence OS に残す」方向へ進む。
+Satellite Evidence Pack は、「agent の作業を evidence ledger に残す」方向へ進む。
 
 この違いを守る。

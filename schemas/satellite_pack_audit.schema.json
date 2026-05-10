@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Satellite Pack Audit",
+  "title": "Satellite Evidence Pack Audit",
   "type": "object",
   "required": [
     "schema_name",
@@ -17,7 +17,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_name": {
-      "const": "software-satellite-pack-audit"
+      "const": "software-satellite-evidence-pack-audit"
     },
     "schema_version": {
       "const": 1

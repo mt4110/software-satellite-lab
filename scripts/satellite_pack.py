@@ -12,11 +12,13 @@ from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
-PACK_MANIFEST_SCHEMA_NAME = "software-satellite-pack"
+PACK_MANIFEST_SCHEMA_NAME = "software-satellite-evidence-pack"
+LEGACY_PACK_MANIFEST_SCHEMA_NAME = "software-satellite-pack"
+PACK_MANIFEST_SCHEMA_NAMES = (PACK_MANIFEST_SCHEMA_NAME, LEGACY_PACK_MANIFEST_SCHEMA_NAME)
 PACK_MANIFEST_SCHEMA_VERSION = 1
-PACK_AUDIT_SCHEMA_NAME = "software-satellite-pack-audit"
+PACK_AUDIT_SCHEMA_NAME = "software-satellite-evidence-pack-audit"
 PACK_AUDIT_SCHEMA_VERSION = 1
-PACK_INSPECTION_SCHEMA_NAME = "software-satellite-pack-inspection"
+PACK_INSPECTION_SCHEMA_NAME = "software-satellite-evidence-pack-inspection"
 PACK_INSPECTION_SCHEMA_VERSION = 1
 
 PACK_KINDS = ("workflow_pack", "recall_pack", "evaluation_pack", "widget_pack")
@@ -167,7 +169,7 @@ def satellite_pack_root(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     root: Path | None = None,
 ) -> Path:
-    return _resolve_root(root) / "artifacts" / "satellite_packs" / workspace_id
+    return _resolve_root(root) / "artifacts" / "satellite_evidence_packs" / workspace_id
 
 
 def pack_audit_latest_path(
@@ -193,9 +195,14 @@ def pack_audit_run_path(
 
 
 def satellite_pack_manifest_schema_path(root: Path | None = None) -> Path:
-    candidate = _resolve_root(root) / "schemas" / "satellite_pack_manifest.schema.json"
-    if candidate.is_file():
-        return candidate
+    resolved_root = _resolve_root(root)
+    for name in ("satellite_evidence_pack.schema.json", "satellite_pack_manifest.schema.json"):
+        candidate = resolved_root / "schemas" / name
+        if candidate.is_file():
+            return candidate
+    preferred = repo_root() / "schemas" / "satellite_evidence_pack.schema.json"
+    if preferred.is_file():
+        return preferred
     return repo_root() / "schemas" / "satellite_pack_manifest.schema.json"
 
 
@@ -543,10 +550,10 @@ def resolve_pack_manifest_path(pack_path: Path) -> Path:
 
     if not candidates:
         expected = ", ".join(MANIFEST_FILENAMES) + ", or one *.satellite.{json,yaml,yml} file"
-        raise PackManifestError(f"No Satellite Pack manifest found in {path}. Expected {expected}.")
+        raise PackManifestError(f"No Satellite Evidence Pack manifest found in {path}. Expected {expected}.")
     if len(candidates) > 1:
         choices = ", ".join(str(candidate) for candidate in candidates)
-        raise PackManifestError(f"Multiple Satellite Pack manifests found in {path}: {choices}")
+        raise PackManifestError(f"Multiple Satellite Evidence Pack manifests found in {path}: {choices}")
     return candidates[0]
 
 
@@ -555,7 +562,7 @@ def load_pack_manifest(pack_path: Path) -> dict[str, Any]:
     try:
         text = manifest_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise PackManifestError(f"Could not read Satellite Pack manifest `{manifest_path}`: {exc}") from exc
+        raise PackManifestError(f"Could not read Satellite Evidence Pack manifest `{manifest_path}`: {exc}") from exc
 
     suffix = manifest_path.suffix.lower()
     if suffix == ".json":
@@ -684,7 +691,7 @@ def _validate_permissions(value: Any, issues: list[ValidationIssue]) -> None:
             _issue(
                 issues,
                 f"$.permissions.{key}",
-                "Permission must be false in Satellite Pack v0.",
+                "Permission must be false in Satellite Evidence Pack v0.",
                 expected="false",
                 actual=str(permission_value).lower(),
             )
@@ -752,12 +759,12 @@ def validate_manifest_schema(manifest: Mapping[str, Any] | Any) -> list[Validati
     for key in sorted(str(key) for key in manifest.keys() if key not in MANIFEST_TOP_LEVEL_KEYS):
         _issue(issues, f"$.{key}", "Additional manifest fields are not allowed in v0.")
 
-    if "schema_name" in manifest and manifest.get("schema_name") != PACK_MANIFEST_SCHEMA_NAME:
+    if "schema_name" in manifest and manifest.get("schema_name") not in PACK_MANIFEST_SCHEMA_NAMES:
         _issue(
             issues,
             "$.schema_name",
             "Unsupported manifest schema name.",
-            expected=PACK_MANIFEST_SCHEMA_NAME,
+            expected=" | ".join(PACK_MANIFEST_SCHEMA_NAMES),
             actual=manifest.get("schema_name"),
         )
     schema_version = manifest.get("schema_version")
@@ -1047,7 +1054,7 @@ def _format_permission_line(item: Mapping[str, Any]) -> str:
 def format_pack_inspection_report(inspection: Mapping[str, Any]) -> str:
     summary = inspection.get("manifest_summary") if isinstance(inspection.get("manifest_summary"), Mapping) else {}
     lines = [
-        f"Satellite Pack: {summary.get('name') or 'unknown'} {summary.get('version') or ''}".rstrip(),
+        f"Satellite Evidence Pack: {summary.get('name') or 'unknown'} {summary.get('version') or ''}".rstrip(),
         f"Kind: {summary.get('kind') or 'unknown'}",
         f"Manifest: {inspection.get('manifest_path')}",
         f"Schema: {'valid' if inspection.get('schema_valid') else 'invalid'}",
@@ -1080,7 +1087,7 @@ def format_pack_inspection_report(inspection: Mapping[str, Any]) -> str:
 
 def format_pack_audit_report(audit: Mapping[str, Any]) -> str:
     lines = [
-        f"Pack Audit: {audit.get('verdict')}",
+        f"Evidence Pack Audit: {audit.get('verdict')}",
         f"Pack: {audit.get('pack_name') or 'unknown'} {audit.get('pack_version') or ''}".rstrip(),
         f"Kind: {audit.get('pack_kind') or 'unknown'}",
     ]

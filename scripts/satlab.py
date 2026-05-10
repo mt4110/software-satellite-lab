@@ -24,19 +24,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=None, help="Optional repo root override.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    pack_parser = subparsers.add_parser("pack", help="Inspect and audit declarative Satellite Packs.")
+    pack_parser = subparsers.add_parser("pack", help="Inspect and audit declarative Satellite Evidence Packs.")
     pack_subparsers = pack_parser.add_subparsers(dest="pack_command", required=True)
 
     inspect_parser = pack_subparsers.add_parser(
         "inspect",
-        help="Load a Satellite Pack manifest and print its declarative shape.",
+        help="Load a Satellite Evidence Pack manifest and print its declarative shape.",
     )
     inspect_parser.add_argument("pack", type=Path, help="Manifest file or pack directory.")
     inspect_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     audit_parser = pack_subparsers.add_parser(
         "audit",
-        help="Validate a Satellite Pack manifest and write a permission summary artifact.",
+        help="Validate a Satellite Evidence Pack manifest and write a permission summary artifact.",
     )
     audit_parser.add_argument("pack", type=Path, help="Manifest file or pack directory.")
     audit_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")

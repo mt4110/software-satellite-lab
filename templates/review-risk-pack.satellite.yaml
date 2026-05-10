@@ -1,4 +1,4 @@
-schema_name: software-satellite-pack
+schema_name: software-satellite-evidence-pack
 schema_version: 1
 name: review-risk-pack
 version: 0.1.0
@@ -15,7 +15,7 @@ outputs:
   - similar_failure_bundle
   - risk_evidence_bundle
   - human_verdict_request
-  - learning_preview_candidate_or_blocked
+  - learning_candidate_state
 
 permissions:
   read_repo: true
@@ -38,7 +38,7 @@ recipes:
       - build_risk_note
       - write_evidence_bundle
       - request_human_verdict
-      - update_curation_preview
+      - update_learning_candidate_inspection
 
 widgets:
   - evidence_path_card

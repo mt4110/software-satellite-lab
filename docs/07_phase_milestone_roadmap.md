@@ -7,10 +7,10 @@
 最初の 12 週間は、AI coding agent を増やす期間ではない。
 
 ```text
-Evidence OS kernel を固める
-Satellite Pack v0 を固める
+Evidence ledger kernel を固める
+Satellite Evidence Pack v0 を固める
 review-risk-pack demo を通す
-human-gated learning preview を守る
+human-gated learning-candidate inspection を守る
 ```
 
 ## Phase 0 — Doctrine Freeze / Rename Closeout
@@ -41,7 +41,7 @@ Done when:
 [ ] no-go list が merge されている
 ```
 
-## Phase 1 — Evidence OS Kernel Hardening
+## Phase 1 — Evidence Ledger Kernel Hardening
 
 期間目安: 2 weeks
 
@@ -70,7 +70,7 @@ Done when:
 [ ] stale positive signal より新しい negative signal が説明される
 ```
 
-## Phase 2 — Satellite Pack v0 Contract
+## Phase 2 — Satellite Evidence Pack v0 Contract
 
 期間目安: 2 weeks
 
@@ -84,7 +84,7 @@ Deliverables:
 
 ```text
 - docs/03_satellite_pack_system.md
-- schemas/satellite_pack_manifest.schema.json
+- schemas/satellite_evidence_pack.schema.json
 - satlab pack inspect
 - satlab pack audit
 - v0 permission model
@@ -106,7 +106,7 @@ Done when:
 目的:
 
 ```text
-最初の公開デモを、agent execution ではなく evidence OS として見せる。
+最初の公開デモを、agent execution ではなく AI Coding Flight Recorder / failure-memory review として見せる。
 ```
 
 Deliverables:
@@ -117,7 +117,7 @@ Deliverables:
 - recall similar failures
 - risk note artifact
 - human verdict request
-- curation / learning preview connection
+- curation / learning-candidate inspection connection
 ```
 
 Done when:
@@ -183,7 +183,7 @@ Done when:
 [ ] human review queue が見える
 [ ] source path へ戻れる
 [ ] blocked reason / next action が見える
-[ ] learning preview queue が preview-only と分かる
+[ ] learning-candidate inspection queue が preview-only と分かる
 ```
 
 ## Phase 6 — Public Dogfood / OSS Onboarding
@@ -233,7 +233,7 @@ Done when:
 - source_missing_rate
 - human_verdict_rate
 - comparison_record_count
-- learning_preview_blocked_reason_count
+- learning_candidate_blocked_reason_count
 - repeated_failure_rate
 - review_risk_pack_dogfood_count
 - curation_ready_vs_blocked_ratio
@@ -244,7 +244,7 @@ Done when:
 12週間後に目指す状態:
 
 ```text
-software-satellite-lab は、AI coding agent ではなく、AI-assisted software work の evidence OS であると説明できる。
-review-risk-pack demo が動き、過去失敗 recall、backend comparison、human verdict、learning preview が一連で見える。
+software-satellite-lab は、AI coding agent ではなく、AI-assisted software work の AI Coding Flight Recorder / evidence ledger であると説明できる。
+review-risk-pack demo が動き、過去失敗 recall、backend comparison、human verdict、learning-candidate inspection が一連で見える。
 Pack は安全な declarative workflow として追加できる。
 ```

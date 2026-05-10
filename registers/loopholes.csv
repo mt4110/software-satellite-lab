@@ -1,0 +1,21 @@
+id,loophole,severity,fix,validation_gate
+1,Looks like another coding agent,Critical,Publicly frame as AI Coding Flight Recorder/evidence ledger,README one-liner test with 3 users
+2,Satellite Pack collides with Agent Skills/plugin systems,Critical,Rename/define as Satellite Evidence Pack; evidence output only,Pack schema denies execution/network/secrets
+3,Evidence OS collides with LLM observability tools,Critical,Specialize in source-linked software-work outcomes and human verdicts,Demo shows source paths and verdicts not generic traces
+4,Developers may not demand evidence,Critical,Start with repeated-failure memory pain,3 external users confirm exact pain
+5,One-person scope explosion,Critical,CLI/report-first; no IDE/cloud/marketplace/UI until demand,30-day plan has only one workflow
+6,Learning preview creates legal/IP/training risk,High,Rename to learning-candidate inspection; no trainable export,No JSONL/export files generated in v0
+7,Capturing traces across tools is hard,High,Use generic file-first input in v0; adapters later,Demo works from diff/test/review files only
+8,Pack security risk,High,Declarative-only v0; no arbitrary code,pack audit rejects executable fields
+9,Recall may produce misleading matches,High,Measure source-hit and critical false evidence,0 critical false evidence in dogfood
+10,Review demo collides with PR reviewers,High,Demo recalls prior project-specific failures rather than posting PR comments,Report includes prior failure source and verdict
+11,Backend compare becomes provider hub,Medium,Compare file-based candidate outputs; no provider-count KPI,Comparison requires human rationale
+12,Local-first limits enterprise market,Medium,Use local-first as trust angle and produce model adoption reports,At least one sponsor narrative based on audit/risk
+13,Human verdict adds friction,Medium,Make verdict capture one command / 3 states,Verdict under 30 seconds
+14,Schema becomes too loose,High,JSON Schema + required source path + missing_source state,90% source path completeness
+15,Negative evidence gets lost,High,Preserve rejected/unresolved/failed with exclusion reasons,Snapshot shows excluded reasons
+16,Competitors copy the phrase,Medium,Build practical schema/fixtures/dogfood quality,External clone can reproduce demo
+17,Learning candidates become model-output-as-truth,Critical,Require source path + positive signal + human gate,No candidate without human gate
+18,Dashboard temptation returns,Medium,Reports first; UI only read-only after demand,No dashboard PR before M5
+19,Vector search distraction,Low,Lexical/structured first; vector only after measured miss reasons,Recall miss report proves need before vector
+20,Full test/CI determinism risk,Medium,Add performance/timeout CI gate,Full suite completes under fixed timeout

@@ -17,6 +17,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from satellite_pack import (  # noqa: E402
     PACK_AUDIT_SCHEMA_NAME,
     PACK_KINDS,
+    PACK_MANIFEST_SCHEMA_NAME,
     PackManifestError,
     REQUIRED_PERMISSION_KEYS,
     V0_DENIED_TRUE_PERMISSIONS,
@@ -32,7 +33,7 @@ from satellite_pack import (  # noqa: E402
 
 REVIEW_RISK_TEMPLATE = REPO_ROOT / "templates" / "review-risk-pack.satellite.yaml"
 AUDIT_SCHEMA = REPO_ROOT / "schemas" / "satellite_pack_audit.schema.json"
-MANIFEST_SCHEMA = REPO_ROOT / "schemas" / "satellite_pack_manifest.schema.json"
+MANIFEST_SCHEMA = REPO_ROOT / "schemas" / "satellite_evidence_pack.schema.json"
 
 
 class SatellitePackManifestTests(unittest.TestCase):
@@ -41,6 +42,7 @@ class SatellitePackManifestTests(unittest.TestCase):
         issues = validate_manifest_schema(manifest)
 
         self.assertEqual(issues, [])
+        self.assertEqual(manifest["schema_name"], PACK_MANIFEST_SCHEMA_NAME)
         self.assertEqual(manifest["name"], "review-risk-pack")
         self.assertEqual(manifest["kind"], "workflow_pack")
         self.assertTrue(manifest["permissions"]["read_repo"])
@@ -77,8 +79,14 @@ class SatellitePackManifestTests(unittest.TestCase):
     def test_manifest_loader_rejects_ambiguous_pack_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pack_dir = Path(tmpdir)
-            (pack_dir / "one.satellite.yaml").write_text("schema_name: software-satellite-pack\n", encoding="utf-8")
-            (pack_dir / "two.satellite.yaml").write_text("schema_name: software-satellite-pack\n", encoding="utf-8")
+            (pack_dir / "one.satellite.yaml").write_text(
+                f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}\n",
+                encoding="utf-8",
+            )
+            (pack_dir / "two.satellite.yaml").write_text(
+                f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}\n",
+                encoding="utf-8",
+            )
 
             with self.assertRaises(PackManifestError):
                 resolve_pack_manifest_path(pack_dir)
@@ -86,13 +94,13 @@ class SatellitePackManifestTests(unittest.TestCase):
     def test_manifest_yaml_subset_rejects_tabs_in_indentation(self) -> None:
         with self.assertRaisesRegex(PackManifestError, "tabs are not supported"):
             parse_yaml_manifest_subset(
-                "schema_name: software-satellite-pack\npermissions:\n\tread_repo: false\n",
+                f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}\npermissions:\n\tread_repo: false\n",
                 Path("pack.satellite.yaml"),
             )
 
     def test_manifest_yaml_subset_keeps_colon_scalars_in_lists(self) -> None:
         manifest = parse_yaml_manifest_subset(
-            "schema_name: software-satellite-pack\ninputs:\n  - https://example.test/event-log.json\n",
+            f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}\ninputs:\n  - https://example.test/event-log.json\n",
             Path("pack.satellite.yaml"),
         )
 
@@ -102,7 +110,7 @@ class SatellitePackManifestTests(unittest.TestCase):
         manifest = parse_yaml_manifest_subset(
             "\n".join(
                 [
-                    "schema_name: software-satellite-pack",
+                    f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}",
                     "inputs: []",
                     'outputs: ["review_note", "evidence_bundle"]',
                     "widgets: [evidence_path_card, human_verdict_card]",
@@ -119,7 +127,7 @@ class SatellitePackManifestTests(unittest.TestCase):
         manifest = parse_yaml_manifest_subset(
             "\n".join(
                 [
-                    "schema_name: software-satellite-pack",
+                    f"schema_name: {PACK_MANIFEST_SCHEMA_NAME}",
                     "permissions: {read_repo: false, write_artifacts: true}",
                 ]
             ),
@@ -162,6 +170,14 @@ class SatellitePackManifestTests(unittest.TestCase):
         self.assertEqual(audit["verdict"], "block")
         self.assertTrue(any("$.permissions.network" in reason for reason in audit["blocked_reasons"]))
 
+    def test_schema_validation_accepts_legacy_pack_schema_name(self) -> None:
+        manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
+        manifest["schema_name"] = "software-satellite-pack"
+
+        issues = validate_manifest_schema(manifest)
+
+        self.assertEqual(issues, [])
+
     def test_schema_validation_rejects_boolean_schema_version(self) -> None:
         manifest = load_pack_manifest(REVIEW_RISK_TEMPLATE)
         invalid = copy.deepcopy(manifest)
@@ -203,6 +219,7 @@ class SatellitePackManifestTests(unittest.TestCase):
         }
 
         self.assertEqual(tuple(permission_schema["required"]), REQUIRED_PERMISSION_KEYS)
+        self.assertEqual(schema["properties"]["schema_name"]["const"], PACK_MANIFEST_SCHEMA_NAME)
         self.assertEqual(set(schema["properties"]["kind"]["enum"]), set(PACK_KINDS))
         self.assertEqual(const_false_permissions, V0_DENIED_TRUE_PERMISSIONS)
 
