@@ -480,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "validation":
         if args.validation_command == "template":
             if args.output_dir is not None:
-                paths = write_demand_validation_templates(args.output_dir)
+                paths = write_demand_validation_templates(args.output_dir, root=args.root)
                 if args.format == "json":
                     print(json.dumps({"template_paths": paths}, ensure_ascii=False, indent=2))
                 else:

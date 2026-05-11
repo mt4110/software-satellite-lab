@@ -11,7 +11,12 @@ from evaluation_loop import evaluation_signal_log_path, read_evaluation_signals
 from failure_memory_review import failure_memory_root, latest_recall_path
 from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
 from memory_index import rebuild_memory_index
-from software_work_events import build_event_contract_check, read_event_log
+from software_work_events import (
+    build_event_contract_check,
+    build_event_contract_report,
+    iter_workspace_events,
+    read_event_log,
+)
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
@@ -707,7 +712,9 @@ def build_demand_validation_report(
 ) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
     index_summary = rebuild_memory_index(root=resolved_root, workspace_id=workspace_id)
-    event_contract = _mapping_dict(index_summary.get("event_contract"))
+    workspace_events = iter_workspace_events(root=resolved_root, workspace_id=workspace_id)
+    workspace_event_count = len(workspace_events)
+    event_contract = build_event_contract_report(workspace_events, root=resolved_root)
     checked_event_count = int(event_contract.get("checked_event_count") or 0)
     source_counts = _mapping_dict(event_contract.get("source_status_counts"))
     missing_source_count = int(source_counts.get("missing_source") or 0)
@@ -753,8 +760,8 @@ def build_demand_validation_report(
             key="dogfood_event_count",
             label="Workspace source-linked events",
             target=">= 10",
-            observed=int(index_summary.get("event_count") or 0),
-            status=_status_min_count(int(index_summary.get("event_count") or 0), 10),
+            observed=workspace_event_count,
+            status=_status_min_count(workspace_event_count, 10),
             detail={"count_scope": "workspace_event_log"},
         ),
         _metric(
@@ -936,7 +943,8 @@ def build_demand_validation_report(
         },
         "metrics": metrics,
         "counts": {
-            "event_count": int(index_summary.get("event_count") or 0),
+            "event_count": workspace_event_count,
+            "indexed_event_count": int(index_summary.get("event_count") or 0),
             "recall_run_count": len(recall_records),
             "human_verdict_count": len(verdict_signals),
             "dogfood_run_count": len(dogfood_runs),
@@ -1234,8 +1242,10 @@ def demand_validation_templates_markdown() -> str:
     )
 
 
-def write_demand_validation_templates(output_dir: Path) -> dict[str, str]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def write_demand_validation_templates(output_dir: Path, *, root: Path | None = None) -> dict[str, str]:
+    resolved_root = _resolve_root(root)
+    resolved_output_dir = _path_from_text(output_dir, root=resolved_root)
+    resolved_output_dir.mkdir(parents=True, exist_ok=True)
     templates = {
         "dogfood_run_notes": "\n".join(
             [
@@ -1276,7 +1286,7 @@ def write_demand_validation_templates(output_dir: Path) -> dict[str, str]:
     }
     paths: dict[str, str] = {}
     for name, content in templates.items():
-        path = output_dir / f"{name}.md"
+        path = resolved_output_dir / f"{name}.md"
         path.write_text(content, encoding="utf-8")
         paths[name] = str(path)
     return paths

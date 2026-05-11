@@ -35,7 +35,7 @@ def _write_source(root: Path, name: str, text: str) -> Path:
 class DemandValidationTests(unittest.TestCase):
     def test_validation_report_passes_when_dogfood_and_external_gates_are_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
+            root = Path(tmpdir).resolve()
             event_ids: list[str] = []
             for index in range(10):
                 source = _write_source(
@@ -160,8 +160,8 @@ class DemandValidationTests(unittest.TestCase):
 
     def test_validation_template_cli_writes_markdown_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            output_dir = root / "validation-templates"
+            root = Path(tmpdir).resolve()
+            output_dir = Path("validation-templates")
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = satlab_main(
@@ -185,6 +185,7 @@ class DemandValidationTests(unittest.TestCase):
         self.assertTrue(dogfood_template_exists)
         self.assertTrue(interview_template_exists)
         self.assertTrue(setup_template_exists)
+        self.assertTrue(str(Path(payload["template_paths"]["dogfood_run_notes"])).startswith(str(root)))
 
     def test_dogfood_run_rejects_recall_for_a_different_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
