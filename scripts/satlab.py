@@ -21,6 +21,20 @@ from failure_memory_review import (
     record_proposal_comparison,
     run_review_risk_pack,
 )
+from demand_validation import (
+    DEMAND_VALIDATION_JUDGEMENTS,
+    build_demand_validation_report,
+    demand_validation_templates_markdown,
+    format_demand_validation_report,
+    format_demo_setup_metric,
+    format_dogfood_validation_run,
+    format_external_user_interview,
+    record_demo_setup_metric,
+    record_demand_validation_report,
+    record_dogfood_validation_run,
+    record_external_user_interview,
+    write_demand_validation_templates,
+)
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
 from satellite_pack import (
     PackManifestError,
@@ -197,6 +211,92 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_learning_parser.add_argument("--limit", type=int, default=None, help="Maximum eligible candidates to preview.")
     inspect_learning_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     inspect_learning_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    validation_parser = subparsers.add_parser(
+        "validation",
+        help="Record demand-validation dogfood and external-user evidence.",
+    )
+    validation_subparsers = validation_parser.add_subparsers(dest="validation_command", required=True)
+    validation_template_parser = validation_subparsers.add_parser(
+        "template",
+        help="Print or write local demand-validation note templates.",
+    )
+    validation_template_parser.add_argument("--output-dir", type=Path, default=None, help="Optional directory for Markdown templates.")
+    validation_template_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    validation_run_parser = validation_subparsers.add_parser(
+        "record-run",
+        help="Record a dogfood run judgement for a recall-backed review event.",
+    )
+    validation_run_parser.add_argument("--event", required=True, help="Dogfood software-work event id.")
+    validation_run_parser.add_argument("--recall", type=Path, default=None, help="Recall artifact path. Defaults to latest recall.")
+    validation_run_parser.add_argument(
+        "--useful-recall",
+        choices=DEMAND_VALIDATION_JUDGEMENTS,
+        required=True,
+        help="Human judgement for whether recalled evidence helped.",
+    )
+    validation_run_parser.add_argument(
+        "--critical-false-evidence-count",
+        type=int,
+        default=0,
+        help="Count critical false-evidence cases found in this run.",
+    )
+    validation_run_parser.add_argument(
+        "--verdict-capture-seconds",
+        type=float,
+        default=None,
+        help="Seconds needed to capture the human verdict for this run.",
+    )
+    validation_run_parser.add_argument("--notes-file", type=Path, default=None, help="Optional dogfood notes file.")
+    validation_run_parser.add_argument("--note", default="", help="Short note for the validation run.")
+    validation_run_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    validation_run_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    validation_interview_parser = validation_subparsers.add_parser(
+        "record-interview",
+        help="Record external technical-user interview evidence from a local notes file.",
+    )
+    validation_interview_parser.add_argument("--participant", required=True, help="Participant label or anonymized id.")
+    validation_interview_parser.add_argument(
+        "--recognized-pain",
+        choices=DEMAND_VALIDATION_JUDGEMENTS,
+        required=True,
+        help="Whether the user recognized the exact pain.",
+    )
+    validation_interview_parser.add_argument(
+        "--wants-to-try",
+        choices=DEMAND_VALIDATION_JUDGEMENTS,
+        required=True,
+        help="Whether the user wants to try it on a repo.",
+    )
+    validation_interview_parser.add_argument("--notes-file", type=Path, required=True, help="Interview notes file.")
+    validation_interview_parser.add_argument("--note", default="", help="Short note for the interview record.")
+    validation_interview_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    validation_interview_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    validation_setup_parser = validation_subparsers.add_parser(
+        "record-setup",
+        help="Record a timed local clone-to-demo setup measurement.",
+    )
+    validation_setup_parser.add_argument(
+        "--clone-to-demo-minutes",
+        type=float,
+        required=True,
+        help="Minutes from fresh clone/setup to demo report.",
+    )
+    validation_setup_parser.add_argument("--notes-file", type=Path, default=None, help="Optional setup timing notes file.")
+    validation_setup_parser.add_argument("--note", default="", help="Short setup note.")
+    validation_setup_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    validation_setup_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    validation_report_parser = validation_subparsers.add_parser(
+        "report",
+        help="Generate a demand-validation report from local dogfood, verdict, recall, and interview artifacts.",
+    )
+    validation_report_parser.add_argument("--write", action="store_true", help="Persist latest and run report artifacts.")
+    validation_report_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    validation_report_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
     return parser
 
 
@@ -376,6 +476,94 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_learning_dataset_preview_report(preview))
         return 0
+
+    if args.command == "validation":
+        if args.validation_command == "template":
+            if args.output_dir is not None:
+                paths = write_demand_validation_templates(args.output_dir, root=args.root)
+                if args.format == "json":
+                    print(json.dumps({"template_paths": paths}, ensure_ascii=False, indent=2))
+                else:
+                    print("\n".join([f"{name}: {path}" for name, path in paths.items()]))
+                return 0
+            template = demand_validation_templates_markdown()
+            if args.format == "json":
+                print(json.dumps({"template_markdown": template}, ensure_ascii=False, indent=2))
+            else:
+                print(template)
+            return 0
+
+        if args.validation_command == "record-run":
+            try:
+                result, _latest_path, _run_path, _log_path = record_dogfood_validation_run(
+                    event_id=args.event,
+                    useful_recall=args.useful_recall,
+                    critical_false_evidence_count=args.critical_false_evidence_count,
+                    verdict_capture_seconds=args.verdict_capture_seconds,
+                    recall_path=args.recall,
+                    note=args.note.strip() or None,
+                    notes_file=args.notes_file,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(format_dogfood_validation_run(result))
+            return 0
+
+        if args.validation_command == "record-interview":
+            try:
+                result, _latest_path, _run_path, _log_path = record_external_user_interview(
+                    participant_label=args.participant,
+                    recognized_pain=args.recognized_pain,
+                    wants_to_try=args.wants_to_try,
+                    notes_file=args.notes_file,
+                    note=args.note.strip() or None,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(format_external_user_interview(result))
+            return 0
+
+        if args.validation_command == "record-setup":
+            try:
+                result, _latest_path, _run_path = record_demo_setup_metric(
+                    clone_to_demo_minutes=args.clone_to_demo_minutes,
+                    note=args.note.strip() or None,
+                    notes_file=args.notes_file,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(format_demo_setup_metric(result))
+            return 0
+
+        if args.validation_command == "report":
+            if args.write:
+                report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_demand_validation_report(
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            else:
+                report = build_demand_validation_report(workspace_id=args.workspace_id, root=args.root)
+                markdown = format_demand_validation_report(report)
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(markdown)
+            return 0
 
     if args.command == "verdict":
         if args.verdict_command == "template":
