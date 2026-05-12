@@ -68,6 +68,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `README_EN.md`: English overview
 - `PLAN.md`: redesign blueprint and milestones
 - `docs/strategy_v2.md`: v2 strategy around the AI Coding Flight Recorder wedge
+- `docs/anti_drift_rules.md`: anti-drift rules for the first product wave
 - `docs/satellite_evidence_pack_contract.md`: safety contract for Satellite Evidence Packs
 - `docs/failure_memory_review_demo.md`: first failure-memory review demo spec
 - `docs/demand_validation_demo_kit.md`: demand-validation and dogfood measurement kit after the public demo
