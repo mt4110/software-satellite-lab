@@ -17,6 +17,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from failure_memory_review import (  # noqa: E402
+    build_evidence_gate,
     build_failure_recall,
     build_review_risk_report,
     record_file_input,
@@ -26,6 +27,7 @@ from failure_memory_review import (  # noqa: E402
     summarize_patch,
 )
 from evaluation_loop import evaluation_comparison_log_path, read_evaluation_comparisons  # noqa: E402
+from git_work_intake import capture_git_work_intake, redact_text  # noqa: E402
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
@@ -117,6 +119,79 @@ class FailureMemoryReviewTests(unittest.TestCase):
             self.assertIn("scripts/late_file.py", summary["changed_files"])
             self.assertEqual(summary["changed_file_count"], 2)
             self.assertGreater(summary["added_lines"], 1600)
+
+    def test_git_intake_redacts_env_names_and_boundary_secrets_before_final_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            app = root / "app.py"
+            app.write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            app.write_text(
+                "print('base')\n" + ("x" * 120) + "sk-" + ("a" * 32) + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "secret fixture"], cwd=root, check=True, capture_output=True)
+            test_log = root / "test.log"
+            test_log.write_text(("x" * 85) + "sk-" + ("b" * 32) + "\n", encoding="utf-8")
+
+            intake, _latest_path, _run_path = capture_git_work_intake(
+                base=base,
+                head="HEAD",
+                test_log=test_log,
+                root=root,
+                max_diff_chars=180,
+                max_test_log_chars=100,
+            )
+            patch_snapshot = Path(intake["diff"]["snapshot_path"]).read_text(encoding="utf-8")
+            test_snapshot = Path(intake["test_log"]["snapshot_path"]).read_text(encoding="utf-8")
+            env_redacted, env_report = redact_text("OPENAI_API_KEY=plain_secret_without_known_prefix\n")
+
+        self.assertNotIn("sk-", patch_snapshot)
+        self.assertNotIn("sk-", test_snapshot)
+        self.assertEqual(env_redacted, "OPENAI_API_KEY=[REDACTED]\n")
+        self.assertTrue(env_report["redacted"])
+
+    def test_evidence_gate_metrics_scan_beyond_display_limit(self) -> None:
+        recall = {
+            "bundle": {
+                "selected_candidates": [
+                    {
+                        "event_id": f"prior-{index}",
+                        "score": 12,
+                        "reasons": ["file-match"],
+                        "evidence_types": ["source-artifact", "test_fail"],
+                        "event_contract_status": "ok",
+                    }
+                    for index in range(5)
+                ]
+                + [
+                    {
+                        "event_id": "current",
+                        "score": 12,
+                        "reasons": ["file-match"],
+                        "evidence_types": ["source-artifact"],
+                        "event_contract_status": "ok",
+                    }
+                ],
+                "omitted_candidates": [],
+            }
+        }
+
+        gate = build_evidence_gate(recall, current_event_id="current", limit=5)
+
+        self.assertEqual(gate["selected_count"], 6)
+        self.assertEqual(gate["critical_false_evidence_count"], 1)
+        self.assertIn(
+            "current",
+            {item["event_id"] for item in gate["classified_recalled_evidence"]},
+        )
 
     def test_file_first_review_loop_records_recall_verdict_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

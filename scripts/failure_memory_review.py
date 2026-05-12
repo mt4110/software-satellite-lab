@@ -1192,6 +1192,17 @@ def _top_recalled_rows(recall: Mapping[str, Any] | None, *, limit: int = 5) -> l
     return rows[:limit]
 
 
+def _all_recalled_rows(recall: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if recall is None:
+        return []
+    bundle = _mapping_dict(recall.get("bundle"))
+    return [
+        dict(item)
+        for item in bundle.get("selected_candidates") or []
+        if isinstance(item, Mapping)
+    ]
+
+
 POSITIVE_EVIDENCE_CLASSES = {"source_linked_prior", "manual_pin"}
 NON_POSITIVE_EVIDENCE_CLASSES = {
     "current_review_subject",
@@ -1243,13 +1254,13 @@ def build_evidence_gate(
     current_event_id: str | None,
     limit: int = 5,
 ) -> dict[str, Any]:
-    rows = _top_recalled_rows(recall, limit=limit)
+    rows = _all_recalled_rows(recall)
     bundle = _mapping_dict(recall.get("bundle") if isinstance(recall, Mapping) else None)
     omitted_rows = [
         dict(item)
         for item in bundle.get("omitted_candidates") or []
         if isinstance(item, Mapping)
-    ][:limit]
+    ]
     classified_rows: list[dict[str, Any]] = []
     positive_rows: list[dict[str, Any]] = []
     warning_rows: list[dict[str, Any]] = []
@@ -1294,6 +1305,7 @@ def build_evidence_gate(
         "selected_count": len(rows),
         "positive_count": len(positive_rows),
         "warning_count": len(warning_rows),
+        "display_limit": limit,
         "class_counts": dict(sorted(class_counts.items())),
         "critical_false_evidence_count": critical_false_evidence_count,
         "temporal_gate_status": temporal_gate_status,
@@ -1452,12 +1464,12 @@ def build_review_risk_report(
         dict(item)
         for item in evidence_gate.get("top_prior_evidence") or []
         if isinstance(item, Mapping)
-    ]
+    ][:5]
     non_positive_recalled_rows = [
         dict(item)
         for item in evidence_gate.get("non_positive_evidence") or []
         if isinstance(item, Mapping)
-    ]
+    ][:10]
     learning_state = _learning_state_for_report(
         event_id=event_id,
         latest_verdict=verdict,

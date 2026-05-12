@@ -17,13 +17,16 @@ GIT_WORK_INTAKE_SCHEMA_NAME = "software-satellite-git-work-intake"
 GIT_WORK_INTAKE_SCHEMA_VERSION = 1
 DEFAULT_MAX_DIFF_CHARS = 200_000
 DEFAULT_MAX_TEST_LOG_CHARS = 80_000
+REDACTION_OVERLAP_CHARS = 4096
 
 SECRET_PATTERNS = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"\bhf_[A-Za-z0-9]{16,}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{16,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s]+"),
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"hf_[A-Za-z0-9]{16,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{16,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(
+        r"(?i)\b([A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password)[A-Za-z0-9_-]*)\s*[:=]\s*['\"]?[^'\"\s]+"
+    ),
 )
 
 
@@ -44,6 +47,14 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _workspace_relative(path: Path, *, root: Path) -> str | None:
@@ -122,6 +133,33 @@ def _run_git(root: Path, args: list[str]) -> str:
     return completed.stdout
 
 
+def _run_git_text_window(root: Path, args: list[str], *, max_chars: int) -> tuple[str, dict[str, Any]]:
+    limit = max_chars + REDACTION_OVERLAP_CHARS
+    process = subprocess.Popen(
+        ["git", *args],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    raw_output = process.stdout.read(limit + 1)
+    truncated = len(raw_output) > limit
+    if truncated:
+        raw_output = raw_output[:limit]
+        process.kill()
+    _stdout_tail, stderr = process.communicate()
+    if process.returncode not in (0, -9) and not truncated:
+        message = stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"git {' '.join(args)} failed: {message}")
+    return raw_output.decode("utf-8", errors="replace"), {
+        "source_truncated": truncated,
+        "source_capture_chars": len(raw_output.decode("utf-8", errors="replace")),
+        "redaction_overlap_chars": REDACTION_OVERLAP_CHARS,
+        "raw_sha256": _sha256_bytes(raw_output),
+        "raw_sha256_scope": "captured_window" if truncated else "full_output",
+    }
+
+
 def _git_ref(root: Path, ref: str) -> str:
     return _run_git(root, ["rev-parse", "--verify", ref]).strip()
 
@@ -170,6 +208,12 @@ def _bounded_text(text: str, *, max_chars: int) -> tuple[str, dict[str, Any]]:
         "captured_chars": max_chars,
         "max_chars": max_chars,
     }
+
+
+def _redact_then_bound(text: str, *, max_chars: int) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    redacted, redaction = redact_text(text)
+    bounded, bounds = _bounded_text(redacted, max_chars=max_chars)
+    return bounded, bounds, redaction
 
 
 def _parse_name_status(text: str) -> list[dict[str, Any]]:
@@ -241,17 +285,27 @@ def _read_optional_text(
         candidate = root / candidate
     if not candidate.is_file():
         raise ValueError(f"test log must be a readable file: `{candidate}`.")
-    raw_bytes = candidate.read_bytes()
-    raw_text = raw_bytes.decode("utf-8", errors="replace")
-    bounded, bounds = _bounded_text(raw_text, max_chars=max_chars)
-    redacted, redaction = redact_text(bounded)
+    read_limit = max_chars + REDACTION_OVERLAP_CHARS
+    with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+        raw_text = handle.read(read_limit + 1)
+    source_truncated = len(raw_text) > read_limit
+    if source_truncated:
+        raw_text = raw_text[:read_limit]
+    redacted, bounds, redaction = _redact_then_bound(raw_text, max_chars=max_chars)
+    bounds.update(
+        {
+            "source_truncated": source_truncated,
+            "source_capture_chars": len(raw_text),
+            "redaction_overlap_chars": REDACTION_OVERLAP_CHARS,
+        }
+    )
     snapshot_path = git_test_log_snapshot_path(workspace_id=workspace_id, root=root)
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(redacted, encoding="utf-8")
     return {
         "source_path": str(candidate.resolve()),
         "source_workspace_relative_path": _workspace_relative(candidate, root=root),
-        "source_sha256": _sha256_bytes(raw_bytes),
+        "source_sha256": _file_sha256(candidate),
         "captured_sha256": _sha256_text(redacted),
         "snapshot_path": str(snapshot_path),
         "snapshot_workspace_relative_path": _workspace_relative(snapshot_path, root=root),
@@ -278,15 +332,19 @@ def capture_git_work_intake(
     base_commit = _git_ref(resolved_root, base)
     head_commit = _git_ref(resolved_root, head)
     dirty = _git_dirty_summary(resolved_root)
-    diff_text = _run_git(resolved_root, ["diff", "--no-ext-diff", "--find-renames", base, head])
+    diff_text, diff_source_bounds = _run_git_text_window(
+        resolved_root,
+        ["diff", "--no-ext-diff", "--find-renames", base, head],
+        max_chars=max_diff_chars,
+    )
     name_status = _run_git(resolved_root, ["diff", "--name-status", "--find-renames", base, head])
     numstat = _run_git(resolved_root, ["diff", "--numstat", "--find-renames", base, head])
     changed_files, unsupported_components = _summarize_changed_files(name_status, numstat)
     if "GIT binary patch" in diff_text or "Binary files " in diff_text:
         unsupported_components.append({"kind": "binary_diff_marker", "path": None})
 
-    bounded_diff, diff_bounds = _bounded_text(diff_text, max_chars=max_diff_chars)
-    redacted_diff, diff_redaction = redact_text(bounded_diff)
+    redacted_diff, diff_bounds, diff_redaction = _redact_then_bound(diff_text, max_chars=max_diff_chars)
+    diff_bounds.update(diff_source_bounds)
     patch_path = git_patch_snapshot_path(workspace_id=workspace_id, root=resolved_root)
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(redacted_diff, encoding="utf-8")
@@ -312,7 +370,8 @@ def capture_git_work_intake(
         "dirty_tree": dirty,
         "diff": {
             "source": "git diff --no-ext-diff --find-renames",
-            "raw_sha256": _sha256_text(diff_text),
+            "raw_sha256": diff_source_bounds["raw_sha256"],
+            "raw_sha256_scope": diff_source_bounds["raw_sha256_scope"],
             "captured_sha256": _sha256_text(redacted_diff),
             "snapshot_path": str(patch_path),
             "snapshot_workspace_relative_path": _workspace_relative(patch_path, root=resolved_root),

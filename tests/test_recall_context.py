@@ -13,7 +13,14 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, write_artifact  # noqa: E402
 from memory_index import MemoryIndex, rebuild_memory_index  # noqa: E402
-from recall_context import RecallCandidate, build_context_bundle, normalize_recall_request, rank_candidates, retrieve_candidates  # noqa: E402
+from recall_context import (  # noqa: E402
+    RecallCandidate,
+    _event_allowed_by_request,
+    build_context_bundle,
+    normalize_recall_request,
+    rank_candidates,
+    retrieve_candidates,
+)
 from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
@@ -120,6 +127,30 @@ class RecallContextTests(unittest.TestCase):
         self.assertEqual(request.status_filters, ("ok", "quality_fail"))
         self.assertEqual(request.limit, 12)
         self.assertEqual(request.context_budget_chars, 6000)
+
+    def test_temporal_gate_tie_breaks_on_entry_id_not_session_prefix(self) -> None:
+        request = normalize_recall_request(
+            {
+                "task_kind": "review",
+                "query_text": "review gate",
+                "recorded_before_utc": "2026-05-12T00:00:00+00:00",
+                "recorded_before_event_id": "local-default:chat-main:20260512T000000000002Z-p1-chat-0002",
+            }
+        )
+
+        allowed = _event_allowed_by_request(
+            request,
+            event_id="local-default:thinking-main:20260512T000000000001Z-p1-thinking-0001",
+            recorded_at_utc="2026-05-12T00:00:00+00:00",
+        )
+        blocked = _event_allowed_by_request(
+            request,
+            event_id="local-default:audio-main:20260512T000000000003Z-p1-audio-0003",
+            recorded_at_utc="2026-05-12T00:00:00+00:00",
+        )
+
+        self.assertTrue(allowed)
+        self.assertFalse(blocked)
 
     def test_rank_candidates_handles_mixed_timezone_timestamps(self) -> None:
         request = normalize_recall_request(

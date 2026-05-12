@@ -778,10 +778,14 @@ def _event_allowed_by_request(
         if (
             recorded_at == cutoff
             and request.recorded_before_event_id
-            and event_id >= request.recorded_before_event_id
+            and _event_order_key(event_id) >= _event_order_key(request.recorded_before_event_id)
         ):
             return False
     return True
+
+
+def _event_order_key(event_id: str) -> str:
+    return str(event_id).rsplit(":", 1)[-1]
 
 
 def _search_queries(request: RecallRequest) -> list[str | None]:
