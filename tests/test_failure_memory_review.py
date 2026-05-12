@@ -27,7 +27,12 @@ from failure_memory_review import (  # noqa: E402
     summarize_patch,
 )
 from evaluation_loop import evaluation_comparison_log_path, read_evaluation_comparisons  # noqa: E402
-from git_work_intake import _summarize_changed_files, capture_git_work_intake, redact_text  # noqa: E402
+from git_work_intake import (  # noqa: E402
+    _summarize_changed_files,
+    _test_status_from_log,
+    capture_git_work_intake,
+    redact_text,
+)
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
@@ -190,6 +195,17 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in intake["changed_files"]], ["feature_only.txt"])
         self.assertIn("feature_only.txt", patch_snapshot)
         self.assertNotIn("base_only.txt", patch_snapshot)
+
+    def test_test_log_status_treats_zero_error_summaries_as_pass(self) -> None:
+        self.assertEqual(_test_status_from_log("0 errors\n"), "pass")
+        self.assertEqual(_test_status_from_log("no errors\n"), "pass")
+        self.assertEqual(_test_status_from_log("0 error\n"), "pass")
+        self.assertEqual(_test_status_from_log("no failure\n"), "pass")
+
+    def test_test_log_status_keeps_real_failures_as_fail(self) -> None:
+        self.assertEqual(_test_status_from_log("1 error\n"), "fail")
+        self.assertEqual(_test_status_from_log("0 failed, 1 error\n"), "fail")
+        self.assertEqual(_test_status_from_log("Traceback (most recent call last)\n"), "fail")
 
     def test_changed_file_summary_maps_rename_numstat_to_destination_path(self) -> None:
         name_status = "R100\told_name.py\tnew_name.py\nC100\tsource.py\tcopy.py\n"

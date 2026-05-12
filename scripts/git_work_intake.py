@@ -278,9 +278,14 @@ def _summarize_changed_files(name_status: str, numstat: str) -> tuple[list[dict[
 
 def _test_status_from_log(text: str) -> str:
     lowered = text.lower()
-    if re.search(r"\b(failed|failure|error|traceback)\b", lowered) and not re.search(r"\b0 failed\b", lowered):
+    zero_problem_pattern = re.compile(r"\b(?:0|zero|no)\s+(?:failed|failures?|errors?|error|tracebacks?)\b")
+    positive_problem_pattern = re.compile(r"\b[1-9]\d*\s+(?:failed|failures?|errors?|error|tracebacks?)\b")
+    if positive_problem_pattern.search(lowered):
         return "fail"
-    if re.search(r"\b(passed|success|successful|ok)\b", lowered):
+    failure_probe = zero_problem_pattern.sub("", lowered)
+    if re.search(r"\b(failed|failure|error|traceback)\b", failure_probe):
+        return "fail"
+    if re.search(r"\b(passed|success|successful|ok)\b", lowered) or zero_problem_pattern.search(lowered):
         return "pass"
     return "unknown"
 
