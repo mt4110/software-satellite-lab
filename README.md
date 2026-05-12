@@ -67,6 +67,7 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `README_EN.md`: English overview
 - `PLAN.md`: 再設計の設計図とマイルストーン
 - `docs/strategy_v2.md`: AI Coding Flight Recorder としての v2 strategy
+- `docs/anti_drift_rules.md`: 初期プロダクト波の drift 防止ルール
 - `docs/satellite_evidence_pack_contract.md`: Satellite Evidence Pack の安全契約
 - `docs/failure_memory_review_demo.md`: 最初の failure-memory review demo spec
 - `docs/demand_validation_demo_kit.md`: 公開デモ後の demand validation / dogfood 実測キット
