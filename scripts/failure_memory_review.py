@@ -1710,12 +1710,11 @@ def record_latest_review_verdict(
     latest_metadata = _read_json_mapping(
         report_metadata_latest_path(workspace_id=workspace_id, root=resolved_root)
     )
+    if not latest_metadata or latest_metadata.get("schema_name") != REVIEW_RISK_REPORT_SCHEMA_NAME:
+        raise ValueError("No latest review metadata found. Run `satlab review git` or `satlab report latest` first.")
     event_id = _clean_text((latest_metadata or {}).get("event_id"))
     if event_id is None:
-        latest_input = _latest_input_artifact(root=resolved_root, workspace_id=workspace_id)
-        event_id = _event_id_from_latest_input_artifact(latest_input)
-    if event_id is None:
-        raise ValueError("No latest review event found. Run `satlab review git` or `satlab report latest` first.")
+        raise ValueError("Latest review metadata does not identify a review event. Run `satlab review git` again.")
     return record_human_verdict(
         verdict=decision,
         event_id=event_id,

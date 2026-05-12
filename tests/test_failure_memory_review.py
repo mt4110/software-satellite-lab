@@ -22,6 +22,7 @@ from failure_memory_review import (  # noqa: E402
     build_review_risk_report,
     record_file_input,
     record_human_verdict,
+    record_latest_review_verdict,
     record_proposal_comparison,
     run_review_risk_pack,
     summarize_patch,
@@ -201,11 +202,15 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertEqual(_test_status_from_log("no errors\n"), "pass")
         self.assertEqual(_test_status_from_log("0 error\n"), "pass")
         self.assertEqual(_test_status_from_log("no failure\n"), "pass")
+        self.assertEqual(_test_status_from_log("Failures: 0, Errors: 0\n"), "pass")
+        self.assertEqual(_test_status_from_log("Tests run: 10, Failures: 0, Errors: 0\n"), "pass")
 
     def test_test_log_status_keeps_real_failures_as_fail(self) -> None:
         self.assertEqual(_test_status_from_log("1 error\n"), "fail")
         self.assertEqual(_test_status_from_log("0 failed, 1 error\n"), "fail")
         self.assertEqual(_test_status_from_log("Traceback (most recent call last)\n"), "fail")
+        self.assertEqual(_test_status_from_log("Failures: 1, Errors: 0\n"), "fail")
+        self.assertEqual(_test_status_from_log("Failures: 0, Errors: 2\n"), "fail")
 
     def test_changed_file_summary_maps_rename_numstat_to_destination_path(self) -> None:
         name_status = "R100\told_name.py\tnew_name.py\nC100\tsource.py\tcopy.py\n"
@@ -784,6 +789,25 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertEqual(verdict["event_id"], patch_input["event_id"])
         self.assertEqual(verdict["verdict"], "needs_fix")
         self.assertEqual(verdict["recall_usefulness"], "useful")
+
+    def test_review_verdict_from_latest_requires_review_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failure = root / "failure.log"
+            failure.write_text("standalone failure input\n", encoding="utf-8")
+            record_file_input(
+                input_kind="failure",
+                source_path=failure,
+                note="Not a latest review subject",
+                root=root,
+            )
+
+            with self.assertRaisesRegex(ValueError, "No latest review metadata"):
+                record_latest_review_verdict(
+                    decision="needs_fix",
+                    rationale="Should not attach to a generic latest input.",
+                    root=root,
+                )
 
 
 if __name__ == "__main__":
