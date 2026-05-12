@@ -158,6 +158,39 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertEqual(env_redacted, "OPENAI_API_KEY=[REDACTED]\n")
         self.assertTrue(env_report["redacted"])
 
+    def test_git_intake_uses_merge_base_diff_for_branch_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            (root / "shared.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "shared.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            merge_base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            subprocess.run(["git", "checkout", "-b", "feature"], cwd=root, check=True, capture_output=True)
+            (root / "feature_only.txt").write_text("feature\n", encoding="utf-8")
+            subprocess.run(["git", "add", "feature_only.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "feature"], cwd=root, check=True, capture_output=True)
+
+            subprocess.run(["git", "checkout", "master"], cwd=root, check=True, capture_output=True)
+            (root / "base_only.txt").write_text("base branch\n", encoding="utf-8")
+            subprocess.run(["git", "add", "base_only.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "base branch change"], cwd=root, check=True, capture_output=True)
+
+            intake, _latest_path, _run_path = capture_git_work_intake(
+                base="master",
+                head="feature",
+                root=root,
+            )
+            patch_snapshot = Path(intake["diff"]["snapshot_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(intake["diff_base_commit"], merge_base)
+        self.assertEqual([item["path"] for item in intake["changed_files"]], ["feature_only.txt"])
+        self.assertIn("feature_only.txt", patch_snapshot)
+        self.assertNotIn("base_only.txt", patch_snapshot)
+
     def test_changed_file_summary_maps_rename_numstat_to_destination_path(self) -> None:
         name_status = "R100\told_name.py\tnew_name.py\nC100\tsource.py\tcopy.py\n"
         numstat = "3\t1\told_name.py => new_name.py\n5\t0\tsource.py => copy.py\n"

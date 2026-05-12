@@ -164,6 +164,10 @@ def _git_ref(root: Path, ref: str) -> str:
     return _run_git(root, ["rev-parse", "--verify", ref]).strip()
 
 
+def _git_merge_base(root: Path, base: str, head: str) -> str:
+    return _run_git(root, ["merge-base", base, head]).strip()
+
+
 def _git_dirty_summary(root: Path) -> dict[str, Any]:
     status = _run_git(root, ["status", "--porcelain=v1"])
     lines = [line for line in status.splitlines() if line.strip()]
@@ -341,14 +345,15 @@ def capture_git_work_intake(
     _run_git(resolved_root, ["rev-parse", "--show-toplevel"])
     base_commit = _git_ref(resolved_root, base)
     head_commit = _git_ref(resolved_root, head)
+    diff_base_commit = _git_merge_base(resolved_root, base, head)
     dirty = _git_dirty_summary(resolved_root)
     diff_text, diff_source_bounds = _run_git_text_window(
         resolved_root,
-        ["diff", "--no-ext-diff", "--find-renames", base, head],
+        ["diff", "--no-ext-diff", "--find-renames", diff_base_commit, head],
         max_chars=max_diff_chars,
     )
-    name_status = _run_git(resolved_root, ["diff", "--name-status", "--find-renames", base, head])
-    numstat = _run_git(resolved_root, ["diff", "--numstat", "--find-renames", base, head])
+    name_status = _run_git(resolved_root, ["diff", "--name-status", "--find-renames", diff_base_commit, head])
+    numstat = _run_git(resolved_root, ["diff", "--numstat", "--find-renames", diff_base_commit, head])
     changed_files, unsupported_components = _summarize_changed_files(name_status, numstat)
     if "GIT binary patch" in diff_text or "Binary files " in diff_text:
         unsupported_components.append({"kind": "binary_diff_marker", "path": None})
@@ -376,10 +381,11 @@ def capture_git_work_intake(
         "head": head,
         "base_commit": base_commit,
         "head_commit": head_commit,
+        "diff_base_commit": diff_base_commit,
         "note": _clean_text(note),
         "dirty_tree": dirty,
         "diff": {
-            "source": "git diff --no-ext-diff --find-renames",
+            "source": "git diff --no-ext-diff --find-renames <merge-base(base, head)> <head>",
             "raw_sha256": diff_source_bounds["raw_sha256"],
             "raw_sha256_scope": diff_source_bounds["raw_sha256_scope"],
             "captured_sha256": _sha256_text(redacted_diff),
@@ -410,6 +416,7 @@ def format_git_intake_summary(intake: Mapping[str, Any]) -> str:
         "Git work intake",
         f"Base: {intake.get('base')} ({str(intake.get('base_commit') or '')[:12]})",
         f"Head: {intake.get('head')} ({str(intake.get('head_commit') or '')[:12]})",
+        f"Diff base: {str(intake.get('diff_base_commit') or '')[:12]}",
         f"Changed files: {intake.get('changed_file_count')}",
         f"Hunks: {diff.get('hunk_count')}",
         f"Patch snapshot: {diff.get('snapshot_path')}",
