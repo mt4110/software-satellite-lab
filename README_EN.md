@@ -74,6 +74,19 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `docs/recall_context_builder_design.md`: first implementation design for Recall / Context Builder
 - `docs/recall_hit_quality_loop.md`: hit-quality visualization and lightweight evaluation loop for Recall
 - `docs/learning_finetune_prep_design.md`: M7 preview-only dataset candidate design for Learning and Fine-Tune Prep
+- `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench strategy hardening and two-week implementation design
+
+## Evidence-Gated Git Review
+
+```bash
+python3 scripts/satlab.py review git --base origin/main --head HEAD
+python3 scripts/satlab.py review verdict --from-latest --decision needs_fix --rationale "Needs one more verification step" --recall-usefulness useful
+python3 scripts/satlab.py review benchmark
+```
+
+- the active patch is excluded from prior evidence
+- weak, missing-source, and contradictory evidence can be shown, but never as positive support
+- the benchmark runs without API keys and checks self-recall, no-prior-evidence, missing-source, and secret redaction
 
 ## Git Rules
 

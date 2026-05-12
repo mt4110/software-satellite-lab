@@ -17,7 +17,7 @@ from workspace_state import DEFAULT_WORKSPACE_ID
 TASK_KINDS = ("review", "design", "proposal", "failure_analysis")
 DEFAULT_LIMIT = 12
 DEFAULT_CONTEXT_BUDGET_CHARS = 6000
-CONTEXT_BUNDLE_VERSION = 6
+CONTEXT_BUNDLE_VERSION = 7
 PASS_DEFINITION_CONTEXT_BUDGET_MULTIPLIER = 1.5
 FAILURE_STATUSES = {"quality_fail", "failed", "blocked", "error"}
 ACCEPTED_NOTE_KEYWORDS = ("accept", "accepted", "approved", "decision", "pass", "passed")
@@ -257,6 +257,9 @@ class RecallRequest:
     surface_filters: tuple[str, ...] = ()
     status_filters: tuple[str, ...] = ()
     pinned_event_ids: tuple[str, ...] = ()
+    exclude_event_ids: tuple[str, ...] = ()
+    recorded_before_utc: str | None = None
+    recorded_before_event_id: str | None = None
     limit: int = DEFAULT_LIMIT
     context_budget_chars: int = DEFAULT_CONTEXT_BUDGET_CHARS
     source_event_id: str | None = None
@@ -270,6 +273,9 @@ class RecallRequest:
             "surface_filters": list(self.surface_filters),
             "status_filters": list(self.status_filters),
             "pinned_event_ids": list(self.pinned_event_ids),
+            "exclude_event_ids": list(self.exclude_event_ids),
+            "recorded_before_utc": self.recorded_before_utc,
+            "recorded_before_event_id": self.recorded_before_event_id,
             "limit": self.limit,
             "context_budget_chars": self.context_budget_chars,
         }
@@ -736,6 +742,9 @@ def normalize_recall_request(request: Mapping[str, Any] | RecallRequest | None =
         surface_filters=_clean_string_list(payload.get("surface_filters"), lowercase=True),
         status_filters=_clean_string_list(payload.get("status_filters"), lowercase=True),
         pinned_event_ids=_clean_string_list(payload.get("pinned_event_ids")),
+        exclude_event_ids=_clean_string_list(payload.get("exclude_event_ids")),
+        recorded_before_utc=_clean_text(payload.get("recorded_before_utc")) or None,
+        recorded_before_event_id=_clean_text(payload.get("recorded_before_event_id")) or None,
         limit=_coerce_positive_int(payload.get("limit"), default=DEFAULT_LIMIT),
         context_budget_chars=_coerce_positive_int(
             payload.get("context_budget_chars"),
@@ -751,6 +760,28 @@ def _task_specific_status_queries(request: RecallRequest) -> tuple[str | None, .
     if request.task_kind == "failure_analysis":
         return ("quality_fail", "failed", "blocked", None)
     return (None,)
+
+
+def _event_allowed_by_request(
+    request: RecallRequest,
+    *,
+    event_id: str,
+    recorded_at_utc: str | None,
+) -> bool:
+    if event_id in set(request.exclude_event_ids):
+        return False
+    cutoff = _coerce_iso_datetime(request.recorded_before_utc)
+    recorded_at = _coerce_iso_datetime(recorded_at_utc)
+    if cutoff is not None and recorded_at is not None:
+        if recorded_at > cutoff:
+            return False
+        if (
+            recorded_at == cutoff
+            and request.recorded_before_event_id
+            and event_id >= request.recorded_before_event_id
+        ):
+            return False
+    return True
 
 
 def _search_queries(request: RecallRequest) -> list[str | None]:
@@ -836,6 +867,12 @@ def retrieve_candidates(
                     event_id = str(row.get("event_id") or "")
                     if not event_id:
                         continue
+                    if not _event_allowed_by_request(
+                        request,
+                        event_id=event_id,
+                        recorded_at_utc=row.get("recorded_at_utc"),
+                    ):
+                        continue
                     existing = candidates_by_event_id.get(event_id)
                     if existing is None:
                         candidates_by_event_id[event_id] = RecallCandidate.from_row(row, rank=rank)
@@ -849,6 +886,12 @@ def retrieve_candidates(
                 continue
             row = get_event(event_id)
             if not row:
+                continue
+            if not _event_allowed_by_request(
+                request,
+                event_id=event_id,
+                recorded_at_utc=row.get("recorded_at_utc"),
+            ):
                 continue
             candidates_by_event_id[event_id] = RecallCandidate.from_row(row, rank=10_000)
 
@@ -1157,6 +1200,30 @@ def _top_selected_reference_dict(unit: RecallSelectionUnit) -> dict[str, Any]:
     return {key: payload.get(key) for key in keys if key in payload}
 
 
+def _omitted_candidate_reference_dict(candidate: RecallCandidate, *, reason: str) -> dict[str, Any]:
+    payload = candidate.to_reference_dict()
+    keys = (
+        "event_id",
+        "score",
+        "reasons",
+        "block_title",
+        "prompt_excerpt",
+        "status",
+        "recorded_at_utc",
+        "session_id",
+        "session_surface",
+        "artifact_path",
+        "evidence_types",
+        "evidence_priority",
+        "event_contract_status",
+        "source_artifact_status",
+        "source_artifact_reasons",
+    )
+    reference = {key: payload.get(key) for key in keys if key in payload}
+    reference["omitted_reason"] = reason
+    return reference
+
+
 def _source_contract_payload(candidate: RecallCandidate | None) -> dict[str, Any]:
     if candidate is None:
         return {
@@ -1191,6 +1258,8 @@ def _miss_reason_detail(
         return None
     if miss_reason == "source_missing_from_index":
         return "source event is not present in the memory index"
+    if miss_reason == "excluded_current_review_subject":
+        return "source event is the active review subject and is excluded from prior evidence"
     if miss_reason == "not_retrieved":
         return "source event exists in the index but was absent from the candidate pool for this query"
     if miss_reason == "ranked_out_by_limit":
@@ -1220,6 +1289,8 @@ def _miss_diagnostics(
     diagnostics: list[str] = []
     if source_selected:
         return diagnostics
+    if miss_reason == "excluded_current_review_subject":
+        diagnostics.append("excluded_current_review_subject")
     if pool_status in {"missing_from_index", "not_in_candidate_pool"}:
         diagnostics.append(pool_status)
     elif pool_status == "unknown":
@@ -1315,6 +1386,52 @@ def _source_evaluation(
     source_event_id = _clean_text(request.source_event_id)
     if not source_event_id:
         return None
+    if source_event_id in set(request.exclude_event_ids):
+        get_event = getattr(index, "get_event", None)
+        source_row = get_event(source_event_id) if callable(get_event) else None
+        source_probe = None
+        if isinstance(source_row, Mapping):
+            source_probe = RecallCandidate.from_row(source_row, rank=10_000)
+            _annotate_source_contract([source_probe], root=root)
+            _evidence_priority_for_task(request, source_probe)
+        miss_reason = "excluded_current_review_subject"
+        pool_status = "excluded"
+        return {
+            "source_event_id": source_event_id,
+            "source_selected": False,
+            "source_rank": None,
+            "source_score": None,
+            "source_block_title": None,
+            "source_prompt_excerpt": source_probe.prompt_excerpt() if source_probe is not None else None,
+            "source_reasons": ["current-review-subject"],
+            "source_selected_via_group": False,
+            "source_group_member_count": None,
+            "source_grouped_by": None,
+            "source_group_event_id": None,
+            "source_group_prompt_excerpt": None,
+            "source_group_member_event_ids": [],
+            "source_group_member_labels": [],
+            "miss_reason": miss_reason,
+            "miss_reason_detail": _miss_reason_detail(
+                miss_reason,
+                pool_status=pool_status,
+                source_candidate=source_probe,
+            ),
+            "miss_diagnostics": _miss_diagnostics(
+                source_selected=False,
+                pool_status=pool_status,
+                miss_reason=miss_reason,
+                source_candidate=source_probe,
+            ),
+            "source_candidate_pool_status": pool_status,
+            "source_exists_in_index": bool(source_row) if callable(get_event) else None,
+            "source_evidence_types": list(source_probe.evidence_types) if source_probe is not None else [],
+            "source_evidence_priority": dict(source_probe.evidence_priority) if source_probe is not None else {},
+            "source_evidence_type_match": _source_evidence_type_match(source_probe),
+            **_source_contract_payload(source_probe),
+            "selected_count": len(selected_units),
+            "top_selected": [_top_selected_reference_dict(unit) for unit in selected_units[:3]],
+        }
 
     ranked_positions = {candidate.event_id: index for index, candidate in enumerate(ranked, start=1)}
     selected_unit = next((unit for unit in selected_units if unit.contains_event(source_event_id)), None)
@@ -1520,8 +1637,16 @@ def build_context_bundle(
         "surface_filters": list(normalized_request.surface_filters),
         "status_filters": list(normalized_request.status_filters),
         "pinned_event_ids": list(normalized_request.pinned_event_ids),
+        "exclude_event_ids": list(normalized_request.exclude_event_ids),
+        "recorded_before_utc": normalized_request.recorded_before_utc,
+        "recorded_before_event_id": normalized_request.recorded_before_event_id,
         "selected_count": len(selected_units),
         "omitted_count": omitted_count,
+        "omitted_candidates": [
+            _omitted_candidate_reference_dict(candidate, reason=omitted_reasons[candidate.event_id])
+            for candidate in ranked
+            if candidate.event_id in omitted_reasons
+        ][:10],
         "budget": {
             "context_budget_chars": normalized_request.context_budget_chars,
             "effective_context_budget_chars": effective_context_budget_chars,
@@ -1577,6 +1702,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional status filter. Repeat to add more than one.",
     )
     parser.add_argument(
+        "--exclude-event",
+        action="append",
+        default=[],
+        help="Event id to exclude from selected prior evidence. Repeatable.",
+    )
+    parser.add_argument(
+        "--recorded-before",
+        default=None,
+        help="Only recall events recorded at or before this UTC timestamp.",
+    )
+    parser.add_argument(
+        "--recorded-before-event",
+        default=None,
+        help="When timestamps tie, only recall event ids ordered before this event id.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=DEFAULT_LIMIT,
@@ -1618,6 +1759,9 @@ def main() -> int:
             "file_hints": args.file_hint,
             "surface_filters": args.surface_filter,
             "status_filters": args.status_filter,
+            "exclude_event_ids": args.exclude_event,
+            "recorded_before_utc": args.recorded_before,
+            "recorded_before_event_id": args.recorded_before_event,
             "limit": args.limit,
             "context_budget_chars": args.context_budget_chars,
         },

@@ -23,6 +23,7 @@ from evaluation_loop import (
     software_work_events_by_id,
 )
 from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
+from git_work_intake import capture_git_work_intake
 from memory_index import MemoryIndex, rebuild_memory_index
 from recall_context import DEFAULT_CONTEXT_BUDGET_CHARS, build_context_bundle
 from run_recall_demo import build_bundle_report
@@ -60,8 +61,11 @@ VERDICT_SIGNAL_KIND = {
     "reject": "rejection",
     "resolve": "review_resolved",
     "unresolve": "review_unresolved",
-    "needs-review": "review_unresolved",
+    "needs_review": "review_unresolved",
+    "needs_fix": "review_unresolved",
+    "needs_more_evidence": "review_unresolved",
 }
+RECALL_USEFULNESS_LABELS = ("useful", "irrelevant", "misleading", "not_checked")
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -353,6 +357,7 @@ def record_file_input(
     backend_adapter_kind: str | None = None,
     model_id: str | None = None,
     backend_metadata: Mapping[str, Any] | None = None,
+    temporal_role: str | None = None,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     root: Path | None = None,
     refresh_index: bool = True,
@@ -390,6 +395,9 @@ def record_file_input(
         f"Recorded {normalized_kind.replace('_', ' ')} input from {source_record['workspace_relative_path'] or source_record['path']}."
     )
     notes = [f"failure_memory_input: {normalized_kind}"]
+    cleaned_temporal_role = _clean_text(temporal_role)
+    if cleaned_temporal_role:
+        notes.append(f"temporal_role: {cleaned_temporal_role}")
     if note:
         notes.append(note)
     if quality_status == "fail":
@@ -433,6 +441,7 @@ def record_file_input(
             "input_schema_version": FAILURE_MEMORY_INPUT_SCHEMA_VERSION,
             "workspace_id": workspace_id,
             "input_kind": normalized_kind,
+            "temporal_role": cleaned_temporal_role,
             "note": _clean_text(note),
             "source_inputs": [source_record],
             "input_summary": summary,
@@ -458,6 +467,7 @@ def record_file_input(
         options={
             "workflow": "failure_memory_review",
             "input_kind": normalized_kind,
+            "temporal_role": cleaned_temporal_role,
             "source_input_path": str(resolved_source),
             "source_input_sha256": source_record["sha256"],
             "file_hints": summary.get("changed_files") if normalized_kind == "patch" else [],
@@ -781,6 +791,7 @@ def build_failure_recall(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     root: Path | None = None,
     source_event_id: str | None = None,
+    exclude_source_event: bool | None = None,
     status_filters: Iterable[str] | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     resolved_root = _resolve_root(root)
@@ -816,8 +827,17 @@ def build_failure_recall(
         workspace_id=workspace_id,
         patch_path=resolved_patch,
     )
+    should_exclude_source_event = bool(exclude_source_event) if exclude_source_event is not None else resolved_patch is not None
     if resolved_source_event_id:
         request["source_event_id"] = resolved_source_event_id
+        if should_exclude_source_event:
+            request["exclude_event_ids"] = [resolved_source_event_id]
+            request["temporal_role"] = "current_review_subject"
+            source_row = index.get_event(resolved_source_event_id)
+            recorded_before_utc = _clean_text((source_row or {}).get("recorded_at_utc"))
+            if recorded_before_utc is not None:
+                request["recorded_before_utc"] = recorded_before_utc
+                request["recorded_before_event_id"] = resolved_source_event_id
     bundle = build_context_bundle(
         request,
         root=resolved_root,
@@ -940,12 +960,13 @@ def format_failure_recall_report(recall: Mapping[str, Any]) -> str:
 
 
 def build_verdict_template(*, event_id: str | None = None, verdict: str = "reject", reason: str | None = None) -> dict[str, Any]:
+    normalized_verdict = verdict.strip().lower().replace("-", "_")
     return {
         "verdict": verdict,
         "event_id": event_id or "<event-id>",
         "reason": reason or "<short human reason>",
         "human_gate_required": True,
-        "records_evaluation_signal": verdict in VERDICT_SIGNAL_KIND,
+        "records_evaluation_signal": normalized_verdict in VERDICT_SIGNAL_KIND,
         "preview_only_learning": True,
     }
 
@@ -973,13 +994,24 @@ def record_human_verdict(
     reason: str,
     target_event_id: str | None = None,
     relation_kind: str | None = None,
+    follow_up: str | None = None,
+    recall_usefulness: str = "not_checked",
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     root: Path | None = None,
 ) -> tuple[dict[str, Any], Path, Path]:
     resolved_root = _resolve_root(root)
-    normalized_verdict = verdict.strip().lower()
+    normalized_verdict = verdict.strip().lower().replace("-", "_")
     if normalized_verdict not in VERDICT_SIGNAL_KIND:
         raise ValueError(f"Unsupported verdict `{verdict}`.")
+    cleaned_reason = _clean_text(reason)
+    if cleaned_reason is None:
+        raise ValueError("Human verdict requires a rationale.")
+    normalized_recall_usefulness = recall_usefulness.strip().lower().replace("-", "_")
+    if normalized_recall_usefulness not in RECALL_USEFULNESS_LABELS:
+        raise ValueError(
+            "Recall usefulness must be one of: " + ", ".join(RECALL_USEFULNESS_LABELS) + "."
+        )
+    cleaned_follow_up = _clean_text(follow_up)
     index_summary = rebuild_memory_index(root=resolved_root, workspace_id=workspace_id)
     event_log = read_event_log(Path(index_summary["event_log_path"]))
     events_by_id = {
@@ -999,13 +1031,15 @@ def record_human_verdict(
         source_event=source_event,
         target_event_id=target_event_id,
         relation_kind=relation_kind,
-        rationale=reason,
+        rationale=cleaned_reason,
         evidence={
             "human_verdict": normalized_verdict,
-            "decision_summary": reason,
+            "decision_summary": cleaned_reason,
+            "follow_up": cleaned_follow_up,
+            "recall_usefulness": normalized_recall_usefulness,
         },
         origin="satlab_cli",
-        tags=["human-verdict", normalized_verdict],
+        tags=["human-verdict", normalized_verdict, f"recall-{normalized_recall_usefulness}"],
     )
     append_evaluation_signal(
         evaluation_signal_log_path(workspace_id=workspace_id, root=resolved_root),
@@ -1038,7 +1072,9 @@ def record_human_verdict(
         "event_id": event_id,
         "verdict": normalized_verdict,
         "signal": signal,
-        "reason": reason,
+        "reason": cleaned_reason,
+        "follow_up": cleaned_follow_up,
+        "recall_usefulness": normalized_recall_usefulness,
         "paths": {
             "verdict_latest_path": str(latest_path),
             "verdict_run_path": str(run_path),
@@ -1154,6 +1190,118 @@ def _top_recalled_rows(recall: Mapping[str, Any] | None, *, limit: int = 5) -> l
         if isinstance(item, Mapping)
     ]
     return rows[:limit]
+
+
+POSITIVE_EVIDENCE_CLASSES = {"source_linked_prior", "manual_pin"}
+NON_POSITIVE_EVIDENCE_CLASSES = {
+    "current_review_subject",
+    "weak_match",
+    "missing_source",
+    "contradictory",
+}
+
+
+def _row_evidence_class(row: Mapping[str, Any], *, current_event_id: str | None) -> str:
+    event_id = _clean_text(row.get("event_id"))
+    if event_id is not None and event_id == current_event_id:
+        return "current_review_subject"
+
+    contract_status = _clean_text(row.get("event_contract_status"))
+    source_artifact_status = _clean_text(row.get("source_artifact_status"))
+    if contract_status in {"missing_source", "invalid_event_contract"} or source_artifact_status == "missing_source":
+        return "missing_source"
+
+    reasons = set(_string_list(row.get("reasons")))
+    evidence_types = set(_string_list(row.get("evidence_types")))
+    if {"test_fail", "test_pass"}.issubset(evidence_types) or {"accepted", "rejected"}.issubset(evidence_types):
+        return "contradictory"
+    if _clean_text(row.get("status")) == "mixed":
+        return "contradictory"
+
+    source_linked = contract_status == "ok" or source_artifact_status == "readable" or "source-artifact" in evidence_types
+    if not source_linked:
+        return "weak_match"
+
+    if "pinned" in reasons:
+        return "manual_pin"
+
+    score = row.get("score")
+    try:
+        score_value = float(score)
+    except (TypeError, ValueError):
+        score_value = 0.0
+    priority = _mapping_dict(row.get("evidence_priority"))
+    matched_task_evidence_types = _string_list(priority.get("matched_task_evidence_types"))
+    if score_value < 8.0 and "file-match" not in reasons and not matched_task_evidence_types:
+        return "weak_match"
+    return "source_linked_prior"
+
+
+def build_evidence_gate(
+    recall: Mapping[str, Any] | None,
+    *,
+    current_event_id: str | None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    rows = _top_recalled_rows(recall, limit=limit)
+    bundle = _mapping_dict(recall.get("bundle") if isinstance(recall, Mapping) else None)
+    omitted_rows = [
+        dict(item)
+        for item in bundle.get("omitted_candidates") or []
+        if isinstance(item, Mapping)
+    ][:limit]
+    classified_rows: list[dict[str, Any]] = []
+    positive_rows: list[dict[str, Any]] = []
+    warning_rows: list[dict[str, Any]] = []
+    class_counts: dict[str, int] = {}
+    critical_false_evidence_count = 0
+
+    for row in rows:
+        evidence_class = _row_evidence_class(row, current_event_id=current_event_id)
+        classified = {**row, "evidence_class": evidence_class}
+        classified_rows.append(classified)
+        class_counts[evidence_class] = class_counts.get(evidence_class, 0) + 1
+        if evidence_class in POSITIVE_EVIDENCE_CLASSES:
+            positive_rows.append(classified)
+        else:
+            warning_rows.append(classified)
+        if evidence_class == "current_review_subject":
+            critical_false_evidence_count += 1
+
+    for row in omitted_rows:
+        evidence_class = _row_evidence_class(row, current_event_id=current_event_id)
+        if evidence_class in POSITIVE_EVIDENCE_CLASSES:
+            evidence_class = "weak_match"
+        classified = {**row, "evidence_class": evidence_class}
+        classified_rows.append(classified)
+        warning_rows.append(classified)
+        class_counts[evidence_class] = class_counts.get(evidence_class, 0) + 1
+        if evidence_class == "current_review_subject":
+            critical_false_evidence_count += 1
+
+    source_evaluation = _mapping_dict(bundle.get("source_evaluation"))
+    source_miss_reason = _clean_text(source_evaluation.get("miss_reason"))
+    if source_miss_reason == "excluded_current_review_subject":
+        temporal_gate_status = "active_subject_excluded"
+    elif source_miss_reason:
+        temporal_gate_status = "checked"
+    else:
+        temporal_gate_status = "not_applicable"
+
+    return {
+        "positive_evidence_classes": sorted(POSITIVE_EVIDENCE_CLASSES),
+        "non_positive_evidence_classes": sorted(NON_POSITIVE_EVIDENCE_CLASSES),
+        "selected_count": len(rows),
+        "positive_count": len(positive_rows),
+        "warning_count": len(warning_rows),
+        "class_counts": dict(sorted(class_counts.items())),
+        "critical_false_evidence_count": critical_false_evidence_count,
+        "temporal_gate_status": temporal_gate_status,
+        "source_miss_reason": source_miss_reason,
+        "top_prior_evidence": positive_rows,
+        "non_positive_evidence": warning_rows,
+        "classified_recalled_evidence": classified_rows,
+    }
 
 
 def _markdown_table_cell(value: Any) -> str:
@@ -1299,7 +1447,17 @@ def build_review_risk_report(
     verdict = _verdict_for_event(raw_verdict, event_id=event_id)
     source_inputs = _source_inputs_from_latest(latest_input)
     risk_note = _mapping_dict((recall or {}).get("risk_note"))
-    recalled_rows = _top_recalled_rows(recall)
+    evidence_gate = build_evidence_gate(recall, current_event_id=event_id)
+    positive_recalled_rows = [
+        dict(item)
+        for item in evidence_gate.get("top_prior_evidence") or []
+        if isinstance(item, Mapping)
+    ]
+    non_positive_recalled_rows = [
+        dict(item)
+        for item in evidence_gate.get("non_positive_evidence") or []
+        if isinstance(item, Mapping)
+    ]
     learning_state = _learning_state_for_report(
         event_id=event_id,
         latest_verdict=verdict,
@@ -1335,21 +1493,22 @@ def build_review_risk_report(
     if event_id:
         lines.append(f"- Event: `{event_id}`")
 
-    lines.extend(("", "## Recalled Failure Memory", ""))
-    if recalled_rows:
+    lines.extend(("", "## Top Prior Evidence", ""))
+    if positive_recalled_rows:
         lines.extend(
             [
-                "| Rank | Prior outcome | Evidence path | Why it matters |",
-                "|---:|---|---|---|",
+                "| Rank | Evidence class | Prior outcome | Evidence path | Why it matters |",
+                "|---:|---|---|---|---|",
             ]
         )
-        for index, row in enumerate(recalled_rows, start=1):
+        for index, row in enumerate(positive_recalled_rows, start=1):
             reasons = ", ".join(_string_list(row.get("reasons"))[:4]) or "similar prior evidence"
             lines.append(
                 "| "
                 + " | ".join(
                     [
                         str(index),
+                        f"`{_markdown_table_cell(row.get('evidence_class') or '-')}`",
                         _markdown_table_cell(_clean_text(row.get("status")) or "-"),
                         f"`{_markdown_table_cell(row.get('artifact_path') or '-')}`",
                         _markdown_table_cell(reasons),
@@ -1358,7 +1517,35 @@ def build_review_risk_report(
                 + " |"
             )
     else:
-        lines.append("No similar failure memory was selected. Keep the result out of positive learning candidates until reviewed.")
+        lines.append("No source-linked prior evidence was selected. This is a no-prior-evidence review; do not promote weak recall as support.")
+
+    lines.extend(("", "## Evidence Gate Warnings", ""))
+    if non_positive_recalled_rows:
+        lines.extend(
+            [
+                "| Evidence class | Event | Why it is not positive support |",
+                "|---|---|---|",
+            ]
+        )
+        for row in non_positive_recalled_rows:
+            reasons = ", ".join(_string_list(row.get("reasons"))[:4]) or "insufficient source-linked support"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        f"`{_markdown_table_cell(row.get('evidence_class') or 'weak_match')}`",
+                        f"`{_markdown_table_cell(row.get('event_id') or '-')}`",
+                        _markdown_table_cell(reasons),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("- No weak, missing-source, contradictory, or self-recalled evidence was selected.")
+    source_evaluation = _mapping_dict(_mapping_dict((recall or {}).get("bundle")).get("source_evaluation"))
+    source_miss_reason = _clean_text(source_evaluation.get("miss_reason"))
+    if source_miss_reason:
+        lines.append(f"- Source event gate: `{source_miss_reason}`")
 
     lines.extend(
         [
@@ -1487,6 +1674,7 @@ def build_review_risk_report(
             "learning_preview_run_path": str(learning_run_path),
         },
         "source_inputs": source_inputs,
+        "evidence_gate": evidence_gate,
         "risk_note": risk_note,
         "learning_state": learning_state,
         "learning_preview_counts": _mapping_dict(learning_preview.get("counts")),
@@ -1495,6 +1683,127 @@ def build_review_risk_report(
     write_json(metadata_run, metadata)
     write_json(metadata_latest, metadata)
     return metadata, markdown, report_latest, report_run
+
+
+def record_latest_review_verdict(
+    *,
+    decision: str,
+    rationale: str,
+    follow_up: str | None = None,
+    recall_usefulness: str = "not_checked",
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> tuple[dict[str, Any], Path, Path]:
+    resolved_root = _resolve_root(root)
+    latest_metadata = _read_json_mapping(
+        report_metadata_latest_path(workspace_id=workspace_id, root=resolved_root)
+    )
+    event_id = _clean_text((latest_metadata or {}).get("event_id"))
+    if event_id is None:
+        latest_input = _latest_input_artifact(root=resolved_root, workspace_id=workspace_id)
+        event_id = _event_id_from_latest_input_artifact(latest_input)
+    if event_id is None:
+        raise ValueError("No latest review event found. Run `satlab review git` or `satlab report latest` first.")
+    return record_human_verdict(
+        verdict=decision,
+        event_id=event_id,
+        reason=rationale,
+        follow_up=follow_up,
+        recall_usefulness=recall_usefulness,
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+
+
+def _default_git_review_query(intake: Mapping[str, Any]) -> str:
+    changed_files = [
+        _clean_text(item.get("path"))
+        for item in intake.get("changed_files") or []
+        if isinstance(item, Mapping)
+    ]
+    test_log = _mapping_dict(intake.get("test_log"))
+    parts = [
+        "git review prior failure repair rejected missing source weak recall regression",
+        "test fail" if _clean_text(test_log.get("status")) == "fail" else None,
+        " ".join(item for item in changed_files if item),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def run_evidence_gated_git_review(
+    *,
+    base: str,
+    head: str = "HEAD",
+    test_log: Path | None = None,
+    query: str | None = None,
+    note: str | None = None,
+    limit: int = 5,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> tuple[dict[str, Any], str, Path, Path]:
+    resolved_root = _resolve_root(root)
+    intake, intake_latest_path, intake_run_path = capture_git_work_intake(
+        base=base,
+        head=head,
+        test_log=test_log,
+        note=note,
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+    diff_record = _mapping_dict(intake.get("diff"))
+    patch_snapshot = _clean_text(diff_record.get("snapshot_path"))
+    if patch_snapshot is None:
+        raise ValueError("Git intake did not produce a patch snapshot.")
+    patch_path = Path(patch_snapshot)
+    ingest = record_file_input(
+        input_kind="patch",
+        source_path=patch_path,
+        note=note or f"Evidence-gated git review {base}..{head}",
+        status="needs_review",
+        backend_metadata={
+            "git_intake_latest_path": str(intake_latest_path),
+            "git_intake_run_path": str(intake_run_path),
+            "base": intake.get("base"),
+            "head": intake.get("head"),
+            "base_commit": intake.get("base_commit"),
+            "head_commit": intake.get("head_commit"),
+        },
+        temporal_role="current_review_subject",
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+    recall, _recall_latest, _recall_run = build_failure_recall(
+        query=query or _default_git_review_query(intake),
+        patch_path=patch_path,
+        limit=limit,
+        workspace_id=workspace_id,
+        root=resolved_root,
+        source_event_id=_clean_text(ingest.get("event_id")),
+        exclude_source_event=True,
+    )
+    metadata, markdown, latest_path, run_path = build_review_risk_report(
+        workspace_id=workspace_id,
+        root=resolved_root,
+    )
+    metadata["git_review"] = {
+        "schema_name": "software-satellite-evidence-gated-git-review",
+        "schema_version": 1,
+        "base": intake.get("base"),
+        "head": intake.get("head"),
+        "base_commit": intake.get("base_commit"),
+        "head_commit": intake.get("head_commit"),
+        "intake_latest_path": str(intake_latest_path),
+        "intake_run_path": str(intake_run_path),
+        "input_event_id": ingest.get("event_id"),
+        "recall_selected_count": _mapping_dict(recall.get("bundle")).get("selected_count"),
+        "training_export_ready": False,
+    }
+    paths = _mapping_dict(metadata.get("paths"))
+    metadata_latest = Path(paths.get("report_metadata_latest_path") or report_metadata_latest_path(workspace_id=workspace_id, root=resolved_root))
+    metadata_run = Path(paths.get("report_metadata_run_path") or report_metadata_run_path(workspace_id=workspace_id, root=resolved_root))
+    write_json(metadata_run, metadata)
+    write_json(metadata_latest, metadata)
+    return metadata, markdown, latest_path, run_path
 
 
 def resolve_review_risk_pack_path(pack: Path | str, *, root: Path) -> Path:
@@ -1582,6 +1891,7 @@ def run_review_risk_pack(
         workspace_id=workspace_id,
         root=resolved_root,
         source_event_id=_clean_text(ingest.get("event_id")),
+        exclude_source_event=True,
     )
     metadata, markdown, latest_path, run_path = build_review_risk_report(
         workspace_id=workspace_id,
@@ -1654,6 +1964,7 @@ def format_verdict_result(result: Mapping[str, Any]) -> str:
             f"Recorded verdict: {result.get('verdict')}",
             f"Event: {result.get('event_id')}",
             f"Signal: {_mapping_dict(result.get('signal')).get('signal_kind')}",
+            f"Recall usefulness: {result.get('recall_usefulness') or 'not_checked'}",
             f"Snapshot: {paths.get('snapshot_run_path') or 'n/a'}",
             f"Learning preview: {paths.get('learning_preview_run_path') or 'n/a'}",
         ]

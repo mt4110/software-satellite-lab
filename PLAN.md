@@ -463,6 +463,32 @@ Validation:
 
 - a candidate model can be trained, evaluated, compared, and either adopted or rejected with clear evidence
 
+### M9. Evidence-Gated Git Review Workbench
+
+Goal:
+
+- compress the existing evidence ledger, recall, verdict, and validation layers into a one-command Git review workflow while preventing weak, missing, contradictory, or self-generated recall from being treated as prior evidence
+
+Deliverables:
+
+- git diff intake with base/head metadata, changed-file summaries, bounded hunk parsing, and dirty-tree warnings
+- active-review exclusion so the current patch can never appear as prior evidence
+- optional test-log capture with redaction, hashing, and pass/fail/unknown classification
+- evidence-gated Markdown/JSON report with source-linked prior evidence, weak-match, missing-source, contradictory, manual-pin, and no-prior-evidence states
+- `review verdict --from-latest` flow that records human decision, rationale, follow-up, and recall usefulness
+- review benchmark fixtures for self-recall, misleading matches, missing sources, huge diffs, binary diffs, deleted files, fake secrets, and contradictory verdicts
+- deterministic public demo check that requires no live model credentials
+
+Validation:
+
+- Top Prior Evidence never contains the active review event
+- missing-source, weak, or contradictory evidence is visible but never rendered as positive support
+- no-prior-evidence reports are honest and still produce a useful next action
+- critical false evidence count is 0 on benchmark fixtures
+- human verdict capture works from the latest report without manual event-id lookup
+- no training export or JSONL write path is enabled in M9
+- public demo runs from a fresh clone without API keys
+
 ## Immediate Operating Rule
 
 When in doubt:

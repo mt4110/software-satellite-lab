@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -161,6 +162,14 @@ class FailureMemoryReviewTests(unittest.TestCase):
 
             self.assertTrue(failure_result["event_id"])
             self.assertGreaterEqual(recall["bundle"]["selected_count"], 1)
+            self.assertNotIn(
+                patch_result["event_id"],
+                {item["event_id"] for item in recall["bundle"]["selected_candidates"]},
+            )
+            self.assertEqual(
+                recall["bundle"]["source_evaluation"]["miss_reason"],
+                "excluded_current_review_subject",
+            )
             self.assertEqual(verdict["signal"]["signal_kind"], "rejection")
             self.assertEqual(contract_check["source_artifact"]["checksum_status"], "verified")
             self.assertEqual(metadata["learning_state"]["state"], "blocked")
@@ -458,6 +467,115 @@ class FailureMemoryReviewTests(unittest.TestCase):
 
             self.assertNotEqual(metadata["pack_run"]["input_event_id"], first["event_id"])
             self.assertEqual(index_summary["event_count"], 2)
+
+    def test_evidence_gated_git_review_excludes_active_subject_and_redacts_test_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            app = root / "app.py"
+            app.write_text("print('hello')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            failure = root / "prior-failure.log"
+            failure.write_text("test failed in app.py when review evidence self-recalled\n", encoding="utf-8")
+            record_file_input(
+                input_kind="failure",
+                source_path=failure,
+                note="Prior self-recall regression in app.py",
+                root=root,
+            )
+
+            app.write_text("print('hello')\nprint('review')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "change app"], cwd=root, check=True, capture_output=True)
+            test_log = root / "test.log"
+            test_log.write_text(
+                "FAILED test_app.py\nOPENAI_API_KEY=sk-testsecret0000000000000000\n",
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "review",
+                        "git",
+                        "--base",
+                        base,
+                        "--head",
+                        "HEAD",
+                        "--test-log",
+                        str(test_log),
+                        "--workspace-id",
+                        "m9-test",
+                        "--format",
+                        "json",
+                    ]
+                )
+            metadata = json.loads(stdout.getvalue())
+            intake = json.loads(Path(metadata["git_review"]["intake_run_path"]).read_text(encoding="utf-8"))
+            test_snapshot = Path(intake["test_log"]["snapshot_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(metadata["workspace_id"], "m9-test")
+        self.assertEqual(metadata["evidence_gate"]["critical_false_evidence_count"], 0)
+        self.assertEqual(metadata["evidence_gate"]["temporal_gate_status"], "active_subject_excluded")
+        self.assertNotIn(
+            metadata["event_id"],
+            {
+                item["event_id"]
+                for item in metadata["evidence_gate"]["classified_recalled_evidence"]
+            },
+        )
+        self.assertEqual(intake["test_log"]["status"], "fail")
+        self.assertIn("m9-test", intake["test_log"]["snapshot_path"])
+        self.assertNotIn("sk-testsecret", test_snapshot)
+        self.assertIn("[REDACTED]", test_snapshot)
+        self.assertFalse(metadata["git_review"]["training_export_ready"])
+
+    def test_review_verdict_from_latest_records_usefulness_without_event_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            patch = _write_patch(root)
+            patch_input = record_file_input(
+                input_kind="patch",
+                source_path=patch,
+                note="Latest review subject",
+                root=root,
+            )
+            build_review_risk_report(root=root)
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "review",
+                        "verdict",
+                        "--from-latest",
+                        "--decision",
+                        "needs_fix",
+                        "--rationale",
+                        "Needs one more test around the gate.",
+                        "--recall-usefulness",
+                        "useful",
+                        "--format",
+                        "json",
+                    ]
+                )
+            verdict = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(verdict["event_id"], patch_input["event_id"])
+        self.assertEqual(verdict["verdict"], "needs_fix")
+        self.assertEqual(verdict["recall_usefulness"], "useful")
 
 
 if __name__ == "__main__":

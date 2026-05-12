@@ -16,9 +16,11 @@ from failure_memory_review import (
     format_proposal_comparison_result,
     format_verdict_template,
     format_verdict_result,
+    record_latest_review_verdict,
     record_file_input,
     record_human_verdict,
     record_proposal_comparison,
+    run_evidence_gated_git_review,
     run_review_risk_pack,
 )
 from demand_validation import (
@@ -36,6 +38,7 @@ from demand_validation import (
     write_demand_validation_templates,
 )
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
+from review_benchmark import format_review_benchmark_report, run_review_benchmark
 from satellite_pack import (
     PackManifestError,
     audit_pack_path,
@@ -166,6 +169,55 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--limit", type=int, default=5, help="Maximum selected recall items.")
     run_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     run_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    review_parser = subparsers.add_parser("review", help="Run evidence-gated review memory workflows.")
+    review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
+    review_git_parser = review_subparsers.add_parser(
+        "git",
+        help="Capture a git diff and generate an evidence-gated review report.",
+    )
+    review_git_parser.add_argument("--base", required=True, help="Base git ref.")
+    review_git_parser.add_argument("--head", default="HEAD", help="Head git ref.")
+    review_git_parser.add_argument("--test-log", type=Path, default=None, help="Optional local test log file.")
+    review_git_parser.add_argument("--query", default="", help="Optional recall query override.")
+    review_git_parser.add_argument("--note", default="", help="Optional review note.")
+    review_git_parser.add_argument("--limit", type=int, default=5, help="Maximum prior evidence rows.")
+    review_git_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    review_git_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    review_verdict_parser = review_subparsers.add_parser(
+        "verdict",
+        help="Record a human verdict for the latest evidence-gated review.",
+    )
+    review_verdict_parser.add_argument(
+        "--from-latest",
+        action="store_true",
+        required=True,
+        help="Use the latest review report event without manual event id lookup.",
+    )
+    review_verdict_parser.add_argument(
+        "--decision",
+        choices=("accept", "reject", "needs_fix", "needs_more_evidence"),
+        required=True,
+        help="Human decision for the latest review.",
+    )
+    review_verdict_parser.add_argument("--rationale", required=True, help="Human rationale for the decision.")
+    review_verdict_parser.add_argument("--follow-up", default="", help="Optional follow-up note.")
+    review_verdict_parser.add_argument(
+        "--recall-usefulness",
+        choices=("useful", "irrelevant", "misleading", "not_checked"),
+        default="not_checked",
+        help="Whether recalled evidence helped the decision.",
+    )
+    review_verdict_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    review_verdict_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    review_benchmark_parser = review_subparsers.add_parser(
+        "benchmark",
+        help="Run deterministic evidence-gate benchmark fixtures.",
+    )
+    review_benchmark_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    review_benchmark_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
 
     verdict_parser = subparsers.add_parser("verdict", help="Record or print a human verdict.")
     verdict_subparsers = verdict_parser.add_subparsers(dest="verdict_command", required=True)
@@ -454,6 +506,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(markdown)
         return 0
+
+    if args.command == "review" and args.review_command == "git":
+        try:
+            metadata, markdown, _latest_path, _run_path = run_evidence_gated_git_review(
+                base=args.base,
+                head=args.head,
+                test_log=args.test_log,
+                query=args.query.strip() or None,
+                note=args.note.strip() or None,
+                limit=args.limit,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(metadata, ensure_ascii=False, indent=2))
+        else:
+            print(markdown)
+        return 0
+
+    if args.command == "review" and args.review_command == "verdict":
+        try:
+            result, _latest_path, _run_path = record_latest_review_verdict(
+                decision=args.decision,
+                rationale=args.rationale,
+                follow_up=args.follow_up.strip() or None,
+                recall_usefulness=args.recall_usefulness,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(format_verdict_result(result))
+        return 0
+
+    if args.command == "review" and args.review_command == "benchmark":
+        report = run_review_benchmark(workspace_id=args.workspace_id)
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_review_benchmark_report(report))
+        return 0 if report.get("passed") else 1
 
     if args.command == "learning" and args.learning_command == "inspect":
         if not args.preview_only:
