@@ -236,6 +236,51 @@ class FailureMemoryReviewTests(unittest.TestCase):
             ],
         )
 
+    def test_changed_file_summary_parses_nul_delimited_diff_metadata(self) -> None:
+        name_status = "\0".join(
+            [
+                "R050",
+                "old name.txt",
+                "new name.txt",
+                "M",
+                "tab\tname.txt",
+                "",
+            ]
+        )
+        numstat = "\0".join(
+            [
+                "1\t0\t",
+                "old name.txt",
+                "new name.txt",
+                "2\t1\ttab\tname.txt",
+                "",
+            ]
+        )
+
+        changed_files, unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(unsupported, [])
+        self.assertEqual(
+            changed_files,
+            [
+                {
+                    "status": "R",
+                    "old_path": "old name.txt",
+                    "path": "new name.txt",
+                    "added": 1,
+                    "removed": 0,
+                    "binary": False,
+                },
+                {
+                    "status": "M",
+                    "path": "tab\tname.txt",
+                    "added": 2,
+                    "removed": 1,
+                    "binary": False,
+                },
+            ],
+        )
+
     def test_changed_file_summary_maps_compacted_rename_numstat_to_destination_path(self) -> None:
         name_status = "R100\tsrc/old/module.py\tsrc/new/module.py\n"
         numstat = "2\t2\tsrc/{old => new}/module.py\n"

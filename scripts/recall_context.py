@@ -772,7 +772,11 @@ def _event_allowed_by_request(
         return False
     cutoff = _coerce_iso_datetime(request.recorded_before_utc)
     recorded_at = _coerce_iso_datetime(recorded_at_utc)
-    if cutoff is not None and recorded_at is not None:
+    if request.recorded_before_utc and cutoff is None:
+        return False
+    if cutoff is not None:
+        if recorded_at is None:
+            return False
         if recorded_at > cutoff:
             return False
         if (

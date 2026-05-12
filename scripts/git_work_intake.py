@@ -221,6 +221,23 @@ def _redact_then_bound(text: str, *, max_chars: int) -> tuple[str, dict[str, Any
 
 
 def _parse_name_status(text: str) -> list[dict[str, Any]]:
+    if "\0" in text:
+        fields = text.split("\0")
+        files: list[dict[str, Any]] = []
+        index = 0
+        while index < len(fields):
+            status = fields[index]
+            index += 1
+            if not status:
+                continue
+            if status.startswith(("R", "C")) and index + 1 < len(fields):
+                files.append({"status": status[:1], "old_path": fields[index], "path": fields[index + 1]})
+                index += 2
+            elif index < len(fields):
+                files.append({"status": status, "path": fields[index]})
+                index += 1
+        return files
+
     files: list[dict[str, Any]] = []
     for line in text.splitlines():
         parts = line.split("\t")
@@ -246,6 +263,32 @@ def _normalize_numstat_path(path: str) -> str:
 def _parse_numstat(text: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     stats: dict[str, dict[str, Any]] = {}
     unsupported: list[dict[str, Any]] = []
+    if "\0" in text:
+        fields = text.split("\0")
+        index = 0
+        while index < len(fields):
+            header = fields[index]
+            index += 1
+            if not header:
+                continue
+            parts = header.split("\t", 2)
+            if len(parts) < 3:
+                continue
+            added_text, removed_text, path = parts[0], parts[1], parts[2]
+            if path == "" and index + 1 < len(fields):
+                path = fields[index + 1]
+                index += 2
+            if added_text == "-" or removed_text == "-":
+                stats[path] = {"added": None, "removed": None, "binary": True}
+                unsupported.append({"kind": "binary", "path": path})
+                continue
+            stats[path] = {
+                "added": int(added_text),
+                "removed": int(removed_text),
+                "binary": False,
+            }
+        return stats, unsupported
+
     for line in text.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -357,8 +400,8 @@ def capture_git_work_intake(
         ["diff", "--no-ext-diff", "--find-renames", diff_base_commit, head],
         max_chars=max_diff_chars,
     )
-    name_status = _run_git(resolved_root, ["diff", "--name-status", "--find-renames", diff_base_commit, head])
-    numstat = _run_git(resolved_root, ["diff", "--numstat", "--find-renames", diff_base_commit, head])
+    name_status = _run_git(resolved_root, ["diff", "--name-status", "--find-renames", "-z", diff_base_commit, head])
+    numstat = _run_git(resolved_root, ["diff", "--numstat", "--find-renames", "-z", diff_base_commit, head])
     changed_files, unsupported_components = _summarize_changed_files(name_status, numstat)
     if "GIT binary patch" in diff_text or "Binary files " in diff_text:
         unsupported_components.append({"kind": "binary_diff_marker", "path": None})
@@ -390,7 +433,7 @@ def capture_git_work_intake(
         "note": _clean_text(note),
         "dirty_tree": dirty,
         "diff": {
-            "source": "git diff --no-ext-diff --find-renames <merge-base(base, head)> <head>",
+            "source": "git diff --no-ext-diff --find-renames <merge-base(base, head)> <head>; metadata uses -z",
             "raw_sha256": diff_source_bounds["raw_sha256"],
             "raw_sha256_scope": diff_source_bounds["raw_sha256_scope"],
             "captured_sha256": _sha256_text(redacted_diff),

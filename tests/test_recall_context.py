@@ -152,6 +152,29 @@ class RecallContextTests(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertFalse(blocked)
 
+    def test_temporal_gate_rejects_unordered_candidate_when_cutoff_is_requested(self) -> None:
+        request = normalize_recall_request(
+            {
+                "task_kind": "review",
+                "query_text": "review gate",
+                "recorded_before_utc": "2026-05-12T00:00:00+00:00",
+            }
+        )
+
+        missing_timestamp = _event_allowed_by_request(
+            request,
+            event_id="local-default:chat-main:legacy",
+            recorded_at_utc=None,
+        )
+        malformed_timestamp = _event_allowed_by_request(
+            request,
+            event_id="local-default:chat-main:legacy",
+            recorded_at_utc="not-a-timestamp",
+        )
+
+        self.assertFalse(missing_timestamp)
+        self.assertFalse(malformed_timestamp)
+
     def test_rank_candidates_handles_mixed_timezone_timestamps(self) -> None:
         request = normalize_recall_request(
             {
