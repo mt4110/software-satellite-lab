@@ -21,6 +21,7 @@ class TestGate:
 PUBLIC_DEMO_GATES = (
     TestGate("tests/test_satellite_pack.py", timeout_seconds=45, budget_seconds=15.0),
     TestGate("tests/test_failure_memory_review.py", timeout_seconds=60, budget_seconds=20.0),
+    TestGate("tests/test_review_benchmark.py", timeout_seconds=60, budget_seconds=20.0),
     TestGate("tests/test_evaluation_loop.py", timeout_seconds=90, budget_seconds=35.0),
     TestGate("tests/test_backend_swap.py", timeout_seconds=120, budget_seconds=60.0),
     TestGate("tests/test_demand_validation.py", timeout_seconds=90, budget_seconds=30.0),

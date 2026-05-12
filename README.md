@@ -73,6 +73,19 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `docs/recall_context_builder_design.md`: 最初に取り掛かる Recall / Context Builder 設計
 - `docs/recall_hit_quality_loop.md`: Recall ヒット品質の可視化と軽量評価ループ
 - `docs/learning_finetune_prep_design.md`: M7 Learning and Fine-Tune Prep の preview-only dataset 候補設計
+- `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench の戦略ハードニングと2週間実装設計
+
+## Evidence-Gated Git Review
+
+```bash
+python3 scripts/satlab.py review git --base origin/main --head HEAD
+python3 scripts/satlab.py review verdict --from-latest --decision needs_fix --rationale "追加検証が必要" --recall-usefulness useful
+python3 scripts/satlab.py review benchmark
+```
+
+- 現在レビュー中の patch は prior evidence から除外されます
+- weak / missing-source / contradictory evidence は表示されても positive support にはなりません
+- benchmark は API key なしで self-recall / no-prior-evidence / missing-source / secret redaction を検証します
 
 ## Git ルール
 

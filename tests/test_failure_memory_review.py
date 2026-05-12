@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,15 +17,23 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from failure_memory_review import (  # noqa: E402
+    build_evidence_gate,
     build_failure_recall,
     build_review_risk_report,
     record_file_input,
     record_human_verdict,
+    record_latest_review_verdict,
     record_proposal_comparison,
     run_review_risk_pack,
     summarize_patch,
 )
 from evaluation_loop import evaluation_comparison_log_path, read_evaluation_comparisons  # noqa: E402
+from git_work_intake import (  # noqa: E402
+    _summarize_changed_files,
+    _test_status_from_log,
+    capture_git_work_intake,
+    redact_text,
+)
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
@@ -117,6 +126,211 @@ class FailureMemoryReviewTests(unittest.TestCase):
             self.assertEqual(summary["changed_file_count"], 2)
             self.assertGreater(summary["added_lines"], 1600)
 
+    def test_git_intake_redacts_env_names_and_boundary_secrets_before_final_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            app = root / "app.py"
+            app.write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            app.write_text(
+                "print('base')\n" + ("x" * 120) + "sk-" + ("a" * 32) + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "secret fixture"], cwd=root, check=True, capture_output=True)
+            test_log = root / "test.log"
+            test_log.write_text(("x" * 85) + "sk-" + ("b" * 32) + "\n", encoding="utf-8")
+
+            intake, _latest_path, _run_path = capture_git_work_intake(
+                base=base,
+                head="HEAD",
+                test_log=test_log,
+                root=root,
+                max_diff_chars=180,
+                max_test_log_chars=100,
+            )
+            patch_snapshot = Path(intake["diff"]["snapshot_path"]).read_text(encoding="utf-8")
+            test_snapshot = Path(intake["test_log"]["snapshot_path"]).read_text(encoding="utf-8")
+            env_redacted, env_report = redact_text("OPENAI_API_KEY=plain_secret_without_known_prefix\n")
+
+        self.assertNotIn("sk-", patch_snapshot)
+        self.assertNotIn("sk-", test_snapshot)
+        self.assertEqual(env_redacted, "OPENAI_API_KEY=[REDACTED]\n")
+        self.assertTrue(env_report["redacted"])
+
+    def test_git_intake_uses_merge_base_diff_for_branch_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            (root / "shared.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "shared.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            merge_base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            subprocess.run(["git", "checkout", "-b", "feature"], cwd=root, check=True, capture_output=True)
+            (root / "feature_only.txt").write_text("feature\n", encoding="utf-8")
+            subprocess.run(["git", "add", "feature_only.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "feature"], cwd=root, check=True, capture_output=True)
+
+            subprocess.run(["git", "checkout", "master"], cwd=root, check=True, capture_output=True)
+            (root / "base_only.txt").write_text("base branch\n", encoding="utf-8")
+            subprocess.run(["git", "add", "base_only.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "base branch change"], cwd=root, check=True, capture_output=True)
+
+            intake, _latest_path, _run_path = capture_git_work_intake(
+                base="master",
+                head="feature",
+                root=root,
+            )
+            patch_snapshot = Path(intake["diff"]["snapshot_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(intake["diff_base_commit"], merge_base)
+        self.assertEqual([item["path"] for item in intake["changed_files"]], ["feature_only.txt"])
+        self.assertIn("feature_only.txt", patch_snapshot)
+        self.assertNotIn("base_only.txt", patch_snapshot)
+
+    def test_test_log_status_treats_zero_error_summaries_as_pass(self) -> None:
+        self.assertEqual(_test_status_from_log("0 errors\n"), "pass")
+        self.assertEqual(_test_status_from_log("no errors\n"), "pass")
+        self.assertEqual(_test_status_from_log("0 error\n"), "pass")
+        self.assertEqual(_test_status_from_log("no failure\n"), "pass")
+        self.assertEqual(_test_status_from_log("Failures: 0, Errors: 0\n"), "pass")
+        self.assertEqual(_test_status_from_log("Tests run: 10, Failures: 0, Errors: 0\n"), "pass")
+
+    def test_test_log_status_keeps_real_failures_as_fail(self) -> None:
+        self.assertEqual(_test_status_from_log("1 error\n"), "fail")
+        self.assertEqual(_test_status_from_log("0 failed, 1 error\n"), "fail")
+        self.assertEqual(_test_status_from_log("Traceback (most recent call last)\n"), "fail")
+        self.assertEqual(_test_status_from_log("Failures: 1, Errors: 0\n"), "fail")
+        self.assertEqual(_test_status_from_log("Failures: 0, Errors: 2\n"), "fail")
+
+    def test_changed_file_summary_maps_rename_numstat_to_destination_path(self) -> None:
+        name_status = "R100\told_name.py\tnew_name.py\nC100\tsource.py\tcopy.py\n"
+        numstat = "3\t1\told_name.py => new_name.py\n5\t0\tsource.py => copy.py\n"
+
+        changed_files, unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(unsupported, [])
+        self.assertEqual(
+            changed_files,
+            [
+                {
+                    "status": "R",
+                    "old_path": "old_name.py",
+                    "path": "new_name.py",
+                    "added": 3,
+                    "removed": 1,
+                    "binary": False,
+                },
+                {
+                    "status": "C",
+                    "old_path": "source.py",
+                    "path": "copy.py",
+                    "added": 5,
+                    "removed": 0,
+                    "binary": False,
+                },
+            ],
+        )
+
+    def test_changed_file_summary_parses_nul_delimited_diff_metadata(self) -> None:
+        name_status = "\0".join(
+            [
+                "R050",
+                "old name.txt",
+                "new name.txt",
+                "M",
+                "tab\tname.txt",
+                "",
+            ]
+        )
+        numstat = "\0".join(
+            [
+                "1\t0\t",
+                "old name.txt",
+                "new name.txt",
+                "2\t1\ttab\tname.txt",
+                "",
+            ]
+        )
+
+        changed_files, unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(unsupported, [])
+        self.assertEqual(
+            changed_files,
+            [
+                {
+                    "status": "R",
+                    "old_path": "old name.txt",
+                    "path": "new name.txt",
+                    "added": 1,
+                    "removed": 0,
+                    "binary": False,
+                },
+                {
+                    "status": "M",
+                    "path": "tab\tname.txt",
+                    "added": 2,
+                    "removed": 1,
+                    "binary": False,
+                },
+            ],
+        )
+
+    def test_changed_file_summary_maps_compacted_rename_numstat_to_destination_path(self) -> None:
+        name_status = "R100\tsrc/old/module.py\tsrc/new/module.py\n"
+        numstat = "2\t2\tsrc/{old => new}/module.py\n"
+
+        changed_files, _unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(changed_files[0]["path"], "src/new/module.py")
+        self.assertEqual(changed_files[0]["added"], 2)
+        self.assertEqual(changed_files[0]["removed"], 2)
+
+    def test_evidence_gate_metrics_scan_beyond_display_limit(self) -> None:
+        recall = {
+            "bundle": {
+                "selected_candidates": [
+                    {
+                        "event_id": f"prior-{index}",
+                        "score": 12,
+                        "reasons": ["file-match"],
+                        "evidence_types": ["source-artifact", "test_fail"],
+                        "event_contract_status": "ok",
+                    }
+                    for index in range(5)
+                ]
+                + [
+                    {
+                        "event_id": "current",
+                        "score": 12,
+                        "reasons": ["file-match"],
+                        "evidence_types": ["source-artifact"],
+                        "event_contract_status": "ok",
+                    }
+                ],
+                "omitted_candidates": [],
+            }
+        }
+
+        gate = build_evidence_gate(recall, current_event_id="current", limit=5)
+
+        self.assertEqual(gate["selected_count"], 6)
+        self.assertEqual(gate["critical_false_evidence_count"], 1)
+        self.assertIn(
+            "current",
+            {item["event_id"] for item in gate["classified_recalled_evidence"]},
+        )
+
     def test_file_first_review_loop_records_recall_verdict_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -161,6 +375,14 @@ class FailureMemoryReviewTests(unittest.TestCase):
 
             self.assertTrue(failure_result["event_id"])
             self.assertGreaterEqual(recall["bundle"]["selected_count"], 1)
+            self.assertNotIn(
+                patch_result["event_id"],
+                {item["event_id"] for item in recall["bundle"]["selected_candidates"]},
+            )
+            self.assertEqual(
+                recall["bundle"]["source_evaluation"]["miss_reason"],
+                "excluded_current_review_subject",
+            )
             self.assertEqual(verdict["signal"]["signal_kind"], "rejection")
             self.assertEqual(contract_check["source_artifact"]["checksum_status"], "verified")
             self.assertEqual(metadata["learning_state"]["state"], "blocked")
@@ -458,6 +680,134 @@ class FailureMemoryReviewTests(unittest.TestCase):
 
             self.assertNotEqual(metadata["pack_run"]["input_event_id"], first["event_id"])
             self.assertEqual(index_summary["event_count"], 2)
+
+    def test_evidence_gated_git_review_excludes_active_subject_and_redacts_test_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=root, check=True)
+            app = root / "app.py"
+            app.write_text("print('hello')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            failure = root / "prior-failure.log"
+            failure.write_text("test failed in app.py when review evidence self-recalled\n", encoding="utf-8")
+            record_file_input(
+                input_kind="failure",
+                source_path=failure,
+                note="Prior self-recall regression in app.py",
+                root=root,
+            )
+
+            app.write_text("print('hello')\nprint('review')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "change app"], cwd=root, check=True, capture_output=True)
+            test_log = root / "test.log"
+            test_log.write_text(
+                "FAILED test_app.py\nOPENAI_API_KEY=sk-testsecret0000000000000000\n",
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "review",
+                        "git",
+                        "--base",
+                        base,
+                        "--head",
+                        "HEAD",
+                        "--test-log",
+                        str(test_log),
+                        "--workspace-id",
+                        "m9-test",
+                        "--format",
+                        "json",
+                    ]
+                )
+            metadata = json.loads(stdout.getvalue())
+            intake = json.loads(Path(metadata["git_review"]["intake_run_path"]).read_text(encoding="utf-8"))
+            test_snapshot = Path(intake["test_log"]["snapshot_path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(metadata["workspace_id"], "m9-test")
+        self.assertEqual(metadata["evidence_gate"]["critical_false_evidence_count"], 0)
+        self.assertEqual(metadata["evidence_gate"]["temporal_gate_status"], "active_subject_excluded")
+        self.assertNotIn(
+            metadata["event_id"],
+            {
+                item["event_id"]
+                for item in metadata["evidence_gate"]["classified_recalled_evidence"]
+            },
+        )
+        self.assertEqual(intake["test_log"]["status"], "fail")
+        self.assertIn("m9-test", intake["test_log"]["snapshot_path"])
+        self.assertNotIn("sk-testsecret", test_snapshot)
+        self.assertIn("[REDACTED]", test_snapshot)
+        self.assertFalse(metadata["git_review"]["training_export_ready"])
+
+    def test_review_verdict_from_latest_records_usefulness_without_event_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            patch = _write_patch(root)
+            patch_input = record_file_input(
+                input_kind="patch",
+                source_path=patch,
+                note="Latest review subject",
+                root=root,
+            )
+            build_review_risk_report(root=root)
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "review",
+                        "verdict",
+                        "--from-latest",
+                        "--decision",
+                        "needs_fix",
+                        "--rationale",
+                        "Needs one more test around the gate.",
+                        "--recall-usefulness",
+                        "useful",
+                        "--format",
+                        "json",
+                    ]
+                )
+            verdict = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(verdict["event_id"], patch_input["event_id"])
+        self.assertEqual(verdict["verdict"], "needs_fix")
+        self.assertEqual(verdict["recall_usefulness"], "useful")
+
+    def test_review_verdict_from_latest_requires_review_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            failure = root / "failure.log"
+            failure.write_text("standalone failure input\n", encoding="utf-8")
+            record_file_input(
+                input_kind="failure",
+                source_path=failure,
+                note="Not a latest review subject",
+                root=root,
+            )
+
+            with self.assertRaisesRegex(ValueError, "No latest review metadata"):
+                record_latest_review_verdict(
+                    decision="needs_fix",
+                    rationale="Should not attach to a generic latest input.",
+                    root=root,
+                )
 
 
 if __name__ == "__main__":
