@@ -435,26 +435,34 @@ def _is_unverified_agent_claim(event: Mapping[str, Any]) -> bool:
     )
 
 
+def _path_fingerprints(value: Any, *, root: Path) -> set[str]:
+    text = _clean_text(value)
+    if text is None:
+        return set()
+    fingerprints = {text}
+    resolved_path = _resolve_path(text, root=root)
+    if resolved_path is not None:
+        fingerprints.add(str(resolved_path))
+        try:
+            fingerprints.add(str(resolved_path.relative_to(root)))
+        except ValueError:
+            pass
+    return fingerprints
+
+
 def _event_fingerprints(event: Mapping[str, Any], refs: list[dict[str, Any]], *, root: Path) -> set[str]:
     fingerprints = {_clean_text(event.get("event_id")) or ""}
     source_refs = _mapping_dict(event.get("source_refs"))
     legacy_artifact_ref = _mapping_dict(source_refs.get("artifact_ref"))
-    for value in (
-        legacy_artifact_ref.get("artifact_path"),
-        legacy_artifact_ref.get("artifact_sha256"),
-        legacy_artifact_ref.get("sha256"),
-    ):
+    fingerprints.update(_path_fingerprints(legacy_artifact_ref.get("artifact_path"), root=root))
+    for value in (legacy_artifact_ref.get("artifact_sha256"), legacy_artifact_ref.get("sha256")):
         text = _clean_text(value)
         if text:
             fingerprints.add(text)
     for ref in refs:
-        for value in (
-            ref.get("artifact_id"),
-            ref.get("sha256"),
-            ref.get("original_path"),
-            ref.get("repo_relative_path"),
-            _mapping_dict(ref.get("git")).get("blob_sha"),
-        ):
+        fingerprints.update(_path_fingerprints(ref.get("original_path"), root=root))
+        fingerprints.update(_path_fingerprints(ref.get("repo_relative_path"), root=root))
+        for value in (ref.get("artifact_id"), ref.get("sha256"), _mapping_dict(ref.get("git")).get("blob_sha")):
             text = _clean_text(value)
             if text:
                 fingerprints.add(text)
@@ -474,10 +482,8 @@ def _active_subject_matches(
     subject = _clean_text(active_subject)
     if subject is None:
         return False
-    subject_fingerprints = {subject}
-    resolved_subject = _resolve_path(subject, root=root)
-    if resolved_subject is not None:
-        subject_fingerprints.add(str(resolved_subject))
+    subject_fingerprints = _path_fingerprints(subject, root=root)
+    subject_fingerprints.add(subject)
     return bool(subject_fingerprints & _event_fingerprints(event, refs, root=root))
 
 

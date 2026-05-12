@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from artifact_vault import capture_artifact, format_artifact_inspection, inspect_artifact
+from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
 from evidence_support import build_evidence_support_result, format_evidence_support_result
 from failure_memory_review import (
     build_failure_recall,
@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     artifact_capture_parser.add_argument("--path", type=Path, required=True, help="Local source artifact path.")
     artifact_capture_parser.add_argument(
         "--kind",
-        choices=("patch", "test_log", "transcript", "review_note", "candidate_output", "source_file", "ci_log", "unknown"),
+        choices=tuple(sorted(ARTIFACT_KINDS)),
         default="unknown",
         help="Artifact kind.",
     )

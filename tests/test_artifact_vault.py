@@ -15,10 +15,19 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from artifact_vault import artifact_ref_object_verified, capture_artifact, inspect_artifact, load_artifact_ref  # noqa: E402
-from satlab import main as satlab_main  # noqa: E402
+from artifact_vault import ARTIFACT_KINDS  # noqa: E402
+from satlab import build_parser, main as satlab_main  # noqa: E402
 
 
 class ArtifactVaultTests(unittest.TestCase):
+    def test_satlab_artifact_kind_choices_stay_in_sync_with_vault(self) -> None:
+        parser = build_parser()
+        artifact_parser = parser._subparsers._group_actions[0].choices["artifact"]
+        capture_parser = artifact_parser._subparsers._group_actions[0].choices["capture"]
+        kind_action = next(action for action in capture_parser._actions if "--kind" in action.option_strings)
+
+        self.assertEqual(tuple(kind_action.choices), tuple(sorted(ARTIFACT_KINDS)))
+
     def test_captures_text_artifact_and_computes_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

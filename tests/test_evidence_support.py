@@ -158,6 +158,26 @@ class EvidenceSupportTests(unittest.TestCase):
         self.assertTrue(result["active_review_excluded"])
         self.assertEqual(result["support_class"], "current_review_subject")
 
+    def test_current_review_subject_can_match_absolute_source_path_for_relative_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "relative-evidence.txt"
+            source.write_text("verified local evidence\n", encoding="utf-8")
+            ref = capture_artifact("relative-evidence.txt", kind="review_note", root=root)
+            event = _event(event_id="event-current-relative-source", ref=ref)
+
+            result = build_evidence_support_result(
+                "event-current-relative-source",
+                event=event,
+                active_subject=str(source),
+                requested_polarity="positive",
+                root=root,
+            )
+
+        self.assertFalse(result["can_support_decision"])
+        self.assertTrue(result["active_review_excluded"])
+        self.assertEqual(result["support_class"], "current_review_subject")
+
     def test_future_evidence_cannot_support_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
