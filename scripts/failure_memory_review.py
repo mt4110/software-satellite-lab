@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from artifact_vault import capture_artifact
 from artifact_schema import build_artifact_payload, build_prompt_record, build_runtime_record, read_artifact, write_artifact
 from evaluation_loop import (
     append_evaluation_comparison,
@@ -55,6 +56,13 @@ INPUT_KIND_ROLE = {
     "proposal": "proposal_input",
     "repair": "repair_input",
     "review_note": "review_note_input",
+}
+INPUT_KIND_ARTIFACT_KIND = {
+    "patch": "patch",
+    "failure": "test_log",
+    "proposal": "candidate_output",
+    "repair": "review_note",
+    "review_note": "review_note",
 }
 VERDICT_SIGNAL_KIND = {
     "accept": "acceptance",
@@ -379,6 +387,11 @@ def record_file_input(
     role = INPUT_KIND_ROLE[normalized_kind]
     source_record = _source_input_record(resolved_source, role=role, root=resolved_root)
     summary = summarize_file_input(resolved_source, input_kind=normalized_kind)
+    artifact_vault_ref = capture_artifact(
+        source_path,
+        kind=INPUT_KIND_ARTIFACT_KIND.get(normalized_kind, "unknown"),
+        root=resolved_root,
+    )
     artifact_path = input_run_path(workspace_id=workspace_id, root=resolved_root)
     latest_path = latest_input_path(workspace_id=workspace_id, root=resolved_root)
     quality_status = _quality_status_for_input(normalized_kind, normalized_status)
@@ -444,6 +457,7 @@ def record_file_input(
             "temporal_role": cleaned_temporal_role,
             "note": _clean_text(note),
             "source_inputs": [source_record],
+            "artifact_vault_refs": [artifact_vault_ref],
             "input_summary": summary,
             "validation": validation,
         },
@@ -470,6 +484,7 @@ def record_file_input(
             "temporal_role": cleaned_temporal_role,
             "source_input_path": str(resolved_source),
             "source_input_sha256": source_record["sha256"],
+            "artifact_vault_refs": [artifact_vault_ref],
             "file_hints": summary.get("changed_files") if normalized_kind == "patch" else [],
             "record_source_checksums": True,
             **backend_options,
@@ -491,6 +506,7 @@ def record_file_input(
         "input_kind": normalized_kind,
         "status": normalized_status,
         "source_inputs": [source_record],
+        "artifact_vault_refs": [artifact_vault_ref],
         "input_summary": summary,
         "artifact_path": str(artifact_path),
         "latest_artifact_path": str(latest_path) if write_latest else None,
