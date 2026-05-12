@@ -223,11 +223,20 @@ def _parse_name_status(text: str) -> list[dict[str, Any]]:
         if not parts:
             continue
         status = parts[0]
-        if status.startswith("R") and len(parts) >= 3:
-            files.append({"status": "R", "old_path": parts[1], "path": parts[2]})
+        if status.startswith(("R", "C")) and len(parts) >= 3:
+            files.append({"status": status[:1], "old_path": parts[1], "path": parts[2]})
         elif len(parts) >= 2:
             files.append({"status": status, "path": parts[1]})
     return files
+
+
+def _normalize_numstat_path(path: str) -> str:
+    if "=>" not in path:
+        return path
+    braced = re.search(r"\{([^{}]*?)\s*=>\s*([^{}]*?)\}", path)
+    if braced:
+        return f"{path[: braced.start()]}{braced.group(2).strip()}{path[braced.end() :]}"
+    return path.rsplit("=>", 1)[1].strip()
 
 
 def _parse_numstat(text: str) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -237,7 +246,8 @@ def _parse_numstat(text: str) -> tuple[dict[str, dict[str, Any]], list[dict[str,
         parts = line.split("\t")
         if len(parts) < 3:
             continue
-        added_text, removed_text, path = parts[0], parts[1], parts[2]
+        added_text, removed_text, raw_path = parts[0], parts[1], parts[2]
+        path = _normalize_numstat_path(raw_path)
         if added_text == "-" or removed_text == "-":
             stats[path] = {"added": None, "removed": None, "binary": True}
             unsupported.append({"kind": "binary", "path": path})

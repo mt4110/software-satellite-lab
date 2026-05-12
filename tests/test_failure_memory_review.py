@@ -27,7 +27,7 @@ from failure_memory_review import (  # noqa: E402
     summarize_patch,
 )
 from evaluation_loop import evaluation_comparison_log_path, read_evaluation_comparisons  # noqa: E402
-from git_work_intake import capture_git_work_intake, redact_text  # noqa: E402
+from git_work_intake import _summarize_changed_files, capture_git_work_intake, redact_text  # noqa: E402
 from memory_index import rebuild_memory_index  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 from software_work_events import build_event_contract_check, read_event_log  # noqa: E402
@@ -157,6 +157,45 @@ class FailureMemoryReviewTests(unittest.TestCase):
         self.assertNotIn("sk-", test_snapshot)
         self.assertEqual(env_redacted, "OPENAI_API_KEY=[REDACTED]\n")
         self.assertTrue(env_report["redacted"])
+
+    def test_changed_file_summary_maps_rename_numstat_to_destination_path(self) -> None:
+        name_status = "R100\told_name.py\tnew_name.py\nC100\tsource.py\tcopy.py\n"
+        numstat = "3\t1\told_name.py => new_name.py\n5\t0\tsource.py => copy.py\n"
+
+        changed_files, unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(unsupported, [])
+        self.assertEqual(
+            changed_files,
+            [
+                {
+                    "status": "R",
+                    "old_path": "old_name.py",
+                    "path": "new_name.py",
+                    "added": 3,
+                    "removed": 1,
+                    "binary": False,
+                },
+                {
+                    "status": "C",
+                    "old_path": "source.py",
+                    "path": "copy.py",
+                    "added": 5,
+                    "removed": 0,
+                    "binary": False,
+                },
+            ],
+        )
+
+    def test_changed_file_summary_maps_compacted_rename_numstat_to_destination_path(self) -> None:
+        name_status = "R100\tsrc/old/module.py\tsrc/new/module.py\n"
+        numstat = "2\t2\tsrc/{old => new}/module.py\n"
+
+        changed_files, _unsupported = _summarize_changed_files(name_status, numstat)
+
+        self.assertEqual(changed_files[0]["path"], "src/new/module.py")
+        self.assertEqual(changed_files[0]["added"], 2)
+        self.assertEqual(changed_files[0]["removed"], 2)
 
     def test_evidence_gate_metrics_scan_beyond_display_limit(self) -> None:
         recall = {
