@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
+from evidence_support import build_evidence_support_result, format_evidence_support_result
 from failure_memory_review import (
     build_failure_recall,
     build_review_risk_report,
@@ -81,6 +83,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     event_report_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     event_report_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    artifact_parser = subparsers.add_parser("artifact", help="Capture and inspect local immutable artifact refs.")
+    artifact_subparsers = artifact_parser.add_subparsers(dest="artifact_command", required=True)
+    artifact_capture_parser = artifact_subparsers.add_parser(
+        "capture",
+        help="Capture a local source artifact into the file-first artifact vault.",
+    )
+    artifact_capture_parser.add_argument("--path", type=Path, required=True, help="Local source artifact path.")
+    artifact_capture_parser.add_argument(
+        "--kind",
+        choices=tuple(sorted(ARTIFACT_KINDS)),
+        default="unknown",
+        help="Artifact kind.",
+    )
+    artifact_capture_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    artifact_inspect_parser = artifact_subparsers.add_parser(
+        "inspect",
+        help="Inspect a captured artifact ref and verify the local vault object when present.",
+    )
+    artifact_inspect_parser.add_argument("--artifact", required=True, help="Artifact id.")
+    artifact_inspect_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    evidence_parser = subparsers.add_parser("evidence", help="Classify whether evidence can support a decision.")
+    evidence_subparsers = evidence_parser.add_subparsers(dest="evidence_command", required=True)
+    evidence_support_parser = evidence_subparsers.add_parser(
+        "support",
+        help="Run the Evidence Support Kernel for one software-work event.",
+    )
+    evidence_support_parser.add_argument("--event", required=True, help="Software-work event id.")
+    evidence_support_parser.add_argument(
+        "--review-started-at",
+        default=None,
+        help="Optional ISO-8601 review start time. Evidence at or after this time cannot support the review.",
+    )
+    evidence_support_parser.add_argument(
+        "--active-subject",
+        default=None,
+        help="Optional active review event id, artifact id, sha256, path, or blob fingerprint to exclude.",
+    )
+    evidence_support_parser.add_argument(
+        "--polarity",
+        choices=("positive", "negative", "risk", "diagnostic", "none"),
+        default=None,
+        help="Optional requested support polarity. Defaults to event-derived polarity.",
+    )
+    evidence_support_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    evidence_support_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     recall_parser = subparsers.add_parser("recall", help="Recall source-linked software-work memory.")
     recall_subparsers = recall_parser.add_subparsers(dest="recall_command", required=True)
@@ -355,6 +405,51 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "artifact" and args.artifact_command == "capture":
+        result = capture_artifact(args.path, kind=args.kind, root=args.root)
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(
+                "\n".join(
+                    [
+                        f"Artifact: {result['artifact_id']}",
+                        f"Kind: {result['kind']}",
+                        f"Source state: {result['source_state']}",
+                        f"Capture state: {result['capture_state']}",
+                        f"SHA-256: {result.get('sha256') or 'n/a'}",
+                        "Redaction: best-effort only; do not treat captured logs as safe to upload.",
+                    ]
+                )
+            )
+        return 0 if result.get("capture_state") in {"captured", "ref_only"} else 1
+
+    if args.command == "artifact" and args.artifact_command == "inspect":
+        try:
+            inspection = inspect_artifact(args.artifact, root=args.root)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(inspection, ensure_ascii=False, indent=2))
+        else:
+            print(format_artifact_inspection(inspection))
+        return 0 if inspection.get("object_verified") or inspection.get("ref", {}).get("capture_state") != "captured" else 1
+
+    if args.command == "evidence" and args.evidence_command == "support":
+        result = build_evidence_support_result(
+            args.event,
+            review_started_at=args.review_started_at,
+            active_subject=args.active_subject,
+            requested_polarity=args.polarity,
+            workspace_id=args.workspace_id,
+            root=args.root,
+        )
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(format_evidence_support_result(result))
+        return 0 if result.get("can_support_decision") else 1
 
     if args.command == "pack" and args.pack_command == "inspect":
         try:

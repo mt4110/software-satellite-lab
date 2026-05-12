@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Artifact Ref",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "artifact_id",
+    "kind",
+    "original_path",
+    "vault_path",
+    "repo_relative_path",
+    "sha256",
+    "size_bytes",
+    "mime_hint",
+    "source_state",
+    "capture_state",
+    "git",
+    "redaction",
+    "report_excerpt",
+    "captured_at_utc"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-artifact-ref"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^artifact_[A-Za-z0-9_-]+$"
+    },
+    "kind": {
+      "enum": [
+        "patch",
+        "test_log",
+        "transcript",
+        "review_note",
+        "candidate_output",
+        "source_file",
+        "ci_log",
+        "unknown"
+      ]
+    },
+    "original_path": {
+      "type": "string"
+    },
+    "vault_path": {
+      "type": ["string", "null"]
+    },
+    "repo_relative_path": {
+      "type": ["string", "null"]
+    },
+    "sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "size_bytes": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "mime_hint": {
+      "type": ["string", "null"]
+    },
+    "source_state": {
+      "enum": [
+        "present",
+        "missing",
+        "redacted",
+        "oversize",
+        "binary_refused",
+        "outside_workspace",
+        "symlink_refused"
+      ]
+    },
+    "capture_state": {
+      "enum": ["captured", "ref_only", "refused"]
+    },
+    "git": {
+      "type": "object",
+      "required": ["commit", "blob_sha", "dirty_tree"],
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "type": ["string", "null"]
+        },
+        "blob_sha": {
+          "type": ["string", "null"]
+        },
+        "dirty_tree": {
+          "type": "boolean"
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": [
+        "applied",
+        "secret_like_tokens",
+        "long_lines_truncated",
+        "binary_bytes_refused",
+        "rules_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "secret_like_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "long_lines_truncated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "binary_bytes_refused": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rules_version": {
+          "const": 1
+        }
+      }
+    },
+    "report_excerpt": {
+      "type": "object",
+      "required": ["text", "best_effort_redaction", "never_upload_notice"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "best_effort_redaction": {
+          "const": true
+        },
+        "never_upload_notice": {
+          "type": "string"
+        }
+      }
+    },
+    "captured_at_utc": {
+      "type": "string"
+    }
+  }
+}

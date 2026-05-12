@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Evidence Support Result",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "event_id",
+    "support_class",
+    "can_support_decision",
+    "support_polarity",
+    "blockers",
+    "warnings",
+    "artifact_refs",
+    "active_review_excluded",
+    "checked_at_utc"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-evidence-support-result"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "type": "string"
+    },
+    "support_class": {
+      "enum": [
+        "source_linked_prior",
+        "negative_prior",
+        "current_review_subject",
+        "future_evidence",
+        "missing_source",
+        "modified_source",
+        "weak_match",
+        "contradictory",
+        "manual_pin_diagnostic",
+        "unverified_agent_claim",
+        "unknown"
+      ]
+    },
+    "can_support_decision": {
+      "type": "boolean"
+    },
+    "support_polarity": {
+      "enum": ["positive", "negative", "risk", "diagnostic", "none"]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "active_review_excluded": {
+      "type": "boolean"
+    },
+    "checked_at_utc": {
+      "type": "string"
+    }
+  }
+}
