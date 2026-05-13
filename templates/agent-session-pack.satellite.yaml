@@ -1,0 +1,60 @@
+schema_name: software-satellite-evidence-pack-v1
+schema_version: 1
+metadata:
+  pack_id: agent-session-pack
+  version: 1.0.0
+  title: Agent Session Pack
+  summary: Normalize local session bundles and produce support-gated intake evidence.
+  license: MIT
+input_kinds:
+  - agent_session_bundle
+  - diff
+  - transcript
+  - test_log
+  - ci_log
+artifact_policy:
+  selected_roots:
+    - artifacts
+    - examples/agent_session_bundles
+  path_mode: selected_roots_only
+  link_policy: refuse_links
+  missing_source_policy: block
+recall_policy:
+  mode: agent_session
+  max_items: 0
+  require_source_refs: true
+support_policy:
+  required_kernel: evidence_support_v1
+  requested_polarity: positive
+  require_source_linked_evidence: true
+  require_support_kernel: true
+report_sections:
+  - id: intake
+    title: Intake
+    source: input_summary
+  - id: support
+    title: Support
+    source: support_kernel
+  - id: benchmark
+    title: Benchmark
+    source: benchmark_summary
+benchmark_fixtures:
+  - id: passing_log_support
+    input_kind: test_log
+    artifact_name: passing_log
+    fixture_text: One local verification passed.
+    requested_polarity: positive
+    expected_support_class: source_linked_prior
+    expected_can_support_decision: true
+redaction_policy:
+  mode: best_effort_local
+  token_handling: redact_known_tokens
+output_schema_refs:
+  - evidence_support.schema.json
+  - agent_session_bundle.schema.json
+  - evidence_graph.schema.json
+core_transform_refs:
+  - artifact_capture
+  - agent_session_intake
+  - support_gate
+  - markdown_report

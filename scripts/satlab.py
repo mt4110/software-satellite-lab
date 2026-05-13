@@ -24,6 +24,17 @@ from evidence_graph import (
     format_evidence_trace_markdown,
 )
 from evidence_lint import build_evidence_lint_report, format_evidence_lint_report
+from evidence_pack_v1 import (
+    EvidencePackV1Error,
+    audit_evidence_pack_v1_path,
+    builtin_pack_list,
+    format_evidence_pack_v1_audit_report,
+    format_evidence_pack_v1_test_report,
+    is_evidence_pack_v1_path,
+    lock_evidence_pack_v1_path,
+    scaffold_evidence_pack_v1,
+    test_evidence_pack_v1_path,
+)
 from evidence_support import build_evidence_support_result, format_evidence_support_result
 from failure_memory_review import (
     build_failure_recall,
@@ -292,8 +303,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate a Satellite Evidence Pack manifest and write a permission summary artifact.",
     )
     audit_parser.add_argument("pack", type=Path, help="Manifest file or pack directory.")
+    audit_parser.add_argument("--strict", action="store_true", help="Use the strict Evidence Pack v1 policy gate when applicable.")
     audit_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     audit_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    scaffold_parser = pack_subparsers.add_parser(
+        "scaffold",
+        help="Write a built-in Evidence Pack v1 manifest template.",
+    )
+    scaffold_parser.add_argument("--kind", choices=("failure-memory", "agent-session"), required=True, help="Built-in pack kind.")
+    scaffold_parser.add_argument("--output", type=Path, required=True, help="Output manifest path.")
+    scaffold_parser.add_argument("--force", action="store_true", help="Overwrite an existing output with different content.")
+    scaffold_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pack_test_parser = pack_subparsers.add_parser(
+        "test",
+        help="Run local Evidence Pack v1 benchmark fixtures through the support kernel.",
+    )
+    pack_test_parser.add_argument("pack", type=Path, help="Manifest file or pack directory.")
+    pack_test_parser.add_argument("--strict", action="store_true", help="Block on every policy issue before running fixtures.")
+    pack_test_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    pack_test_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    lock_parser = pack_subparsers.add_parser(
+        "lock",
+        help="Write an Evidence Pack v1 lockfile that detects manifest mutation.",
+    )
+    lock_parser.add_argument("pack", type=Path, help="Manifest file or pack directory.")
+    lock_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    list_parser = pack_subparsers.add_parser(
+        "list",
+        help="List built-in Evidence Pack v1 templates.",
+    )
+    list_parser.add_argument("--builtin", action="store_true", required=True, help="List built-in pack templates.")
+    list_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     run_parser = pack_subparsers.add_parser(
         "run",
@@ -682,12 +726,35 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "pack" and args.pack_command == "audit":
         try:
+            if is_evidence_pack_v1_path(args.pack):
+                audit, latest_path, run_path = audit_evidence_pack_v1_path(
+                    args.pack,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                    strict=args.strict,
+                )
+                if args.format == "json":
+                    print(
+                        json.dumps(
+                            {
+                                "audit": audit,
+                                "audit_latest_path": str(latest_path) if latest_path is not None else None,
+                                "audit_run_path": str(run_path) if run_path is not None else None,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                else:
+                    print(format_evidence_pack_v1_audit_report(audit))
+                return 1 if audit.get("verdict") == "block" else 0
+
             audit, latest_path, run_path = audit_pack_path(
                 args.pack,
                 workspace_id=args.workspace_id,
                 root=args.root,
             )
-        except PackManifestError as exc:
+        except (PackManifestError, EvidencePackV1Error) as exc:
             parser.error(str(exc))
         if args.format == "json":
             print(
@@ -704,6 +771,65 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_pack_audit_report(audit))
         return 1 if audit.get("verdict") == "block" else 0
+
+    if args.command == "pack" and args.pack_command == "scaffold":
+        try:
+            result = scaffold_evidence_pack_v1(args.kind, args.output, overwrite=args.force)
+        except EvidencePackV1Error as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            status = result.get("status")
+            verb = "Up to date" if status == "unchanged" else "Wrote" if status == "written" else "Overwrote"
+            print(f"{verb} {result['kind']} Evidence Pack v1 template: {result['output_path']}")
+        return 0
+
+    if args.command == "pack" and args.pack_command == "test":
+        try:
+            result, latest_path, run_path = test_evidence_pack_v1_path(
+                args.pack,
+                workspace_id=args.workspace_id,
+                root=args.root,
+                strict=args.strict,
+            )
+        except (PackManifestError, EvidencePackV1Error) as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(
+                json.dumps(
+                    {
+                        "test": result,
+                        "test_latest_path": str(latest_path) if latest_path is not None else None,
+                        "test_run_path": str(run_path) if run_path is not None else None,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print(format_evidence_pack_v1_test_report(result))
+        return 0 if result.get("passed") else 1
+
+    if args.command == "pack" and args.pack_command == "lock":
+        try:
+            lock, lock_path = lock_evidence_pack_v1_path(args.pack, root=args.root)
+        except (PackManifestError, EvidencePackV1Error) as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps({"lock": lock, "lock_path": str(lock_path)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"Evidence Pack v1 lock: {lock_path}")
+            print(f"Manifest SHA-256: {lock['manifest_sha256']}")
+        return 0
+
+    if args.command == "pack" and args.pack_command == "list":
+        packs = builtin_pack_list()
+        if args.format == "json":
+            print(json.dumps({"builtin_packs": packs}, ensure_ascii=False, indent=2))
+        else:
+            print("\n".join(f"{item['kind']}: {item['template_filename']}" for item in packs))
+        return 0
 
     if args.command == "event" and args.event_command == "ingest":
         input_kind = "patch"
