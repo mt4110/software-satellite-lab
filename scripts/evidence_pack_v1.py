@@ -103,6 +103,7 @@ FIELD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 REMOTE_URL_RE = re.compile(r"\b(?:https?|ftp)://", re.IGNORECASE)
 PATH_TRAVERSAL_RE = re.compile(r"(^|[\\/])\.\.([\\/]|$)")
 GLOB_TOKEN_RE = re.compile(r"[*?\[]")
+FIXTURE_TEXT_PATH_RE = re.compile(r"^\$\.benchmark_fixtures\[\d+\]\.fixture_text$")
 
 DENIED_KEY_PATTERNS: dict[str, re.Pattern[str]] = {
     "python_field": re.compile(r"(^|[_-])python([_-]|$)|\.py$", re.IGNORECASE),
@@ -231,6 +232,14 @@ def _iter_manifest_strings(value: Any, *, path: str = "$") -> list[tuple[str, st
             strings.extend(_iter_manifest_strings(item, path=f"{path}[{index}]"))
         return strings
     return []
+
+
+def _is_fixture_text_path(path: str) -> bool:
+    return bool(FIXTURE_TEXT_PATH_RE.match(path))
+
+
+def _redacted_value_evidence(path: str, pattern_name: str) -> str:
+    return f"{path}: matched {pattern_name}"
 
 
 def _append_unknown_key_issues(
@@ -677,9 +686,11 @@ def build_policy_security_checks(
                 if pattern.search(key):
                     key_hits[name].append(f"{path}={key}")
         for path, value in _iter_manifest_strings(manifest):
+            if _is_fixture_text_path(path):
+                continue
             for name, pattern in DENIED_VALUE_PATTERNS.items():
                 if pattern.search(value):
-                    value_hits[name].append(f"{path}={value}")
+                    value_hits[name].append(_redacted_value_evidence(path, name))
 
     denied_runtime = [
         *key_hits["python_field"],

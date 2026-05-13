@@ -176,6 +176,18 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertEqual(audit["verdict"], "block")
         self.assertEqual(_security_statuses(audit)["no_external_or_privileged_access"], "block")
 
+    def test_denied_value_evidence_does_not_record_raw_secret_literals(self) -> None:
+        manifest = _load_failure_pack()
+        manifest["metadata"]["summary"] = "password=super-secret-token"
+
+        audit = _blocked_audit(manifest)
+        evidence_text = json.dumps(audit["security_checks"], ensure_ascii=False)
+
+        self.assertEqual(audit["verdict"], "block")
+        self.assertIn("$.metadata.summary: matched secret_access_content", evidence_text)
+        self.assertNotIn("super-secret-token", evidence_text)
+        self.assertNotIn("password=super-secret-token", evidence_text)
+
     def test_repo_write_fails(self) -> None:
         manifest = _load_failure_pack()
         manifest["artifact_policy"]["write_repo"] = True
@@ -406,6 +418,18 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         recorded_at = result["fixture_results"][0]["event_recorded_at_utc"]
         self.assertNotEqual(recorded_at, "2026-05-12T00:00:00+00:00")
         datetime.fromisoformat(recorded_at)
+
+    def test_fixture_text_is_input_data_not_denied_manifest_behavior(self) -> None:
+        manifest = _load_failure_pack()
+        manifest["benchmark_fixtures"][0]["fixture_text"] = (
+            "CI log: python -m pytest failed while fetching https://example.test/details"
+        )
+
+        audit = build_evidence_pack_v1_audit(manifest, manifest_path=FAILURE_PACK, root=REPO_ROOT, strict=True)
+
+        self.assertEqual(audit["verdict"], "pass")
+        evidence_text = json.dumps(audit["security_checks"], ensure_ascii=False)
+        self.assertNotIn("$.benchmark_fixtures[0].fixture_text", evidence_text)
 
     def test_non_strict_pack_test_runs_fixtures_for_draft_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
