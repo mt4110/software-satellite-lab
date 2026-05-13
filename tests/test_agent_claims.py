@@ -124,6 +124,12 @@ class AgentClaimsTests(unittest.TestCase):
         self.assertTrue(log_indicates_tests_failed(log_text))
         self.assertFalse(log_indicates_tests_passed(log_text))
 
+    def test_tap_not_ok_is_a_failed_test_signal(self) -> None:
+        log_text = "not ok 1 widget trims cache key\n"
+
+        self.assertTrue(log_indicates_tests_failed(log_text))
+        self.assertFalse(log_indicates_tests_passed(log_text))
+
 
 if __name__ == "__main__":
     unittest.main()

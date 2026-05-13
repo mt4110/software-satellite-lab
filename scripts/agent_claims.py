@@ -66,12 +66,13 @@ PATH_RE = r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
 TEST_FAIL_RE = re.compile(
     r"(?:\btests?\s+failed\b|\bfailed\s+tests?\b|\btest\s+failure\b|"
     r"\btest\s+errors?\b|\b[1-9]\d*\s+(?:failed|failures?|errors?)\b|"
-    r"\bFAILED\b|\bFAILURES?\b|\berror:)",
+    r"\bFAILED\b|\bFAILURES?\b|\bnot\s+ok\b|\berror:)",
     re.IGNORECASE,
 )
 TEST_PASS_RE = re.compile(
-    r"\b(?:tests?\s+passed|all\s+tests\s+passed|"
-    r"\d+\s+passed|PASS(?:ED)?|OK|success(?:ful)?)\b",
+    r"(?:\b(?:tests?\s+passed|all\s+tests\s+passed|"
+    r"\d+\s+passed|PASS(?:ED)?|success(?:ful)?)\b|"
+    r"\bOK\b(?:\s*\([^)]*\))?)",
     re.IGNORECASE,
 )
 ZERO_FAILURE_COUNT_RE = re.compile(r"\b0\s+(?:failed|failures?|errors?)\b", re.IGNORECASE)

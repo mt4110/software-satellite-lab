@@ -145,6 +145,43 @@ class AgentSessionIntakeTests(unittest.TestCase):
         self.assertTrue(event["content"]["options"]["verified_claims_held_for_patch_evidence"])
         self.assertFalse(support["can_support_decision"])
 
+    def test_missing_diff_preserves_verified_failing_log_as_risk_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            transcript = root / "transcript.md"
+            transcript.write_text("Bug fixed: retry cache now trims whitespace.\n", encoding="utf-8")
+            test_log = root / "test.txt"
+            test_log.write_text("not ok 1 cache key trims whitespace\n", encoding="utf-8")
+            bundle = build_agent_session_bundle(
+                agent_label="generic",
+                diff=root / "missing.diff",
+                transcript=transcript,
+                test_log=test_log,
+            )
+
+            result = ingest_agent_session_bundle(
+                bundle,
+                workspace_id="m13-missing-diff-risk",
+                root=root,
+                refresh_index=False,
+                write_latest=False,
+            )
+            event = result["software_work_event"]
+            support = build_evidence_support_result(
+                event["event_id"],
+                event=event,
+                requested_polarity="risk",
+                root=root,
+            )
+
+        self.assertIn("missing_diff", result["diagnostics"])
+        self.assertEqual(event["outcome"]["status"], "failed")
+        self.assertEqual(event["outcome"]["quality_status"], "fail")
+        self.assertIn("test_fail", event["content"]["options"]["evidence_types"])
+        self.assertTrue(event["content"]["options"]["verified_claims_held_for_patch_evidence"])
+        self.assertTrue(support["can_support_decision"])
+        self.assertEqual(support["support_class"], "negative_prior")
+
     def test_failing_test_log_records_risk_signal_without_transcript_failure_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -237,6 +274,38 @@ class AgentSessionIntakeTests(unittest.TestCase):
         self.assertIn("transcript_claim_read_capped", result["diagnostics"])
         self.assertLessEqual(len(transcript_ref["report_excerpt"]["text"]), 80)
 
+    def test_refused_symlink_transcript_does_not_contribute_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            diff = root / "patch.diff"
+            diff.write_text("+small\n", encoding="utf-8")
+            target = root / "target-transcript.md"
+            target.write_text("All tests passed.\n", encoding="utf-8")
+            link = root / "transcript-link.md"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+            bundle = build_agent_session_bundle(agent_label="generic", diff=diff, transcript=link)
+
+            result = ingest_agent_session_bundle(
+                bundle,
+                workspace_id="m13-symlink-transcript",
+                root=root,
+                refresh_index=False,
+                write_latest=False,
+            )
+
+        transcript_ref = next(
+            item["artifact_ref"]
+            for item in result["captured_artifacts"]
+            if item["bundle_kind"] == "transcript"
+        )
+        self.assertEqual(transcript_ref["capture_state"], "refused")
+        self.assertEqual(transcript_ref["source_state"], "symlink_refused")
+        self.assertEqual(result["claim_counts"]["total"], 0)
+        self.assertIn("transcript_claim_read_symlink_refused", result["diagnostics"])
+
     def test_intake_makes_no_network_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -303,6 +372,32 @@ class AgentSessionIntakeTests(unittest.TestCase):
         self.assertTrue(result["software_work_event"]["content"]["options"]["export_policy"]["no_provider_hub"])
         self.assertTrue(result["software_work_event"]["content"]["options"]["export_policy"]["no_vector_export"])
         self.assertIn("declared_export_allowed_ignored", result["diagnostics"])
+
+    def test_privacy_flags_are_required_by_runtime_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            diff = root / "patch.diff"
+            diff.write_text("+small\n", encoding="utf-8")
+            bundle = {
+                "schema_name": "software-satellite-agent-session-bundle",
+                "schema_version": 1,
+                "agent_label": "manual",
+                "task": {"title": "Privacy fixture", "goal": "Require explicit privacy metadata."},
+                "artifacts": [{"kind": "diff", "path": str(diff)}],
+                "privacy": {
+                    "contains_user_text": True,
+                    "export_allowed": False,
+                },
+            }
+
+            with self.assertRaisesRegex(ValueError, "privacy.contains_private_code"):
+                ingest_agent_session_bundle(
+                    bundle,
+                    workspace_id="m13-privacy-required",
+                    root=root,
+                    refresh_index=False,
+                    write_latest=False,
+                )
 
     def test_invalid_agent_label_in_bundle_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

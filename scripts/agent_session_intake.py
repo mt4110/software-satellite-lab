@@ -68,6 +68,7 @@ BUNDLE_KIND_TO_VAULT_KIND = {
     "source_comparison": "candidate_output",
     "unknown": "unknown",
 }
+RISK_EVIDENCE_TYPES = {"test_fail", "review_unresolved"}
 
 DEFAULT_TRANSCRIPT_CLAIM_READ_CHARS = 64 * 1024
 DEFAULT_MAX_CAPTURE_BYTES = 2 * 1024 * 1024
@@ -143,11 +144,17 @@ def _path_inside_root(path: Path, *, root: Path) -> bool:
 
 
 def _read_text_for_claims(path: str | Path, *, root: Path, max_chars: int) -> tuple[str | None, bool, str | None]:
-    resolved = _resolve_path(path, root=root)
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if candidate.is_symlink():
+        return None, False, "symlink_refused"
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError):
+        resolved = candidate.absolute()
     if not _path_inside_root(resolved, root=root):
         return None, False, "outside_workspace"
-    if resolved.is_symlink():
-        return None, False, "symlink_refused"
     if not resolved.is_file():
         return None, False, "missing"
     try:
@@ -250,8 +257,10 @@ def validate_agent_session_bundle(bundle: Mapping[str, Any]) -> list[str]:
     privacy = _mapping_dict(bundle.get("privacy"))
     if not privacy:
         issues.append("privacy metadata is required")
-    elif "export_allowed" not in privacy:
-        issues.append("privacy.export_allowed is required")
+    else:
+        for key in ("contains_private_code", "contains_user_text", "export_allowed"):
+            if key not in privacy:
+                issues.append(f"privacy.{key} is required")
     return issues
 
 
@@ -442,6 +451,9 @@ def _extract_bundle_claims(
         source = _clean_text(item.get("bundle_kind")) or "transcript"
         if path is None:
             continue
+        if _clean_text(ref.get("capture_state")) == "refused":
+            diagnostics.append(f"{source}_claim_read_{_clean_text(ref.get('source_state')) or 'capture_refused'}")
+            continue
         text, capped, read_issue = _read_text_for_claims(
             path,
             root=root,
@@ -591,13 +603,17 @@ def _combined_quality_status(
 
 
 def _status_from_intake(*, diagnostics: list[str], quality_status: str | None) -> str:
-    if "missing_diff" in diagnostics:
-        return "diagnostic"
     if quality_status == "fail":
         return "failed"
     if quality_status == "pass":
         return "verified"
+    if "missing_diff" in diagnostics:
+        return "diagnostic"
     return "needs_review"
+
+
+def _risk_evidence_types(values: Iterable[str]) -> list[str]:
+    return [value for value in values if value in RISK_EVIDENCE_TYPES]
 
 
 def _build_session_event(
@@ -620,25 +636,18 @@ def _build_session_event(
     claims_can_support_patch = "missing_diff" not in diagnostics
     claim_status = claim_quality_status(claims)
     log_status = _clean_text(verification_log_signal.get("quality_status"))
-    quality_status = (
-        _combined_quality_status(claim_status=claim_status, log_status=log_status)
-        if claims_can_support_patch
-        else None
-    )
-    evidence_types = (
-        _dedupe_texts(
-            [
-                *claim_evidence_types(claims),
-                *[
-                    str(item)
-                    for item in verification_log_signal.get("evidence_types") or []
-                    if isinstance(item, str)
-                ],
-            ]
-        )
-        if claims_can_support_patch
-        else []
-    )
+    claim_evidence = claim_evidence_types(claims)
+    log_evidence = [
+        str(item)
+        for item in verification_log_signal.get("evidence_types") or []
+        if isinstance(item, str)
+    ]
+    if claims_can_support_patch:
+        quality_status = _combined_quality_status(claim_status=claim_status, log_status=log_status)
+        evidence_types = _dedupe_texts([*claim_evidence, *log_evidence])
+    else:
+        quality_status = "fail" if "fail" in {claim_status, log_status} else None
+        evidence_types = _dedupe_texts(_risk_evidence_types([*claim_evidence, *log_evidence]))
     status = _status_from_intake(diagnostics=diagnostics, quality_status=quality_status)
     task = _mapping_dict(bundle.get("task"))
     privacy = _mapping_dict(bundle.get("privacy"))
