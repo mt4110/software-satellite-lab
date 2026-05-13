@@ -844,11 +844,12 @@ def evidence_pack_v1_audit_latest_path(*, workspace_id: str = DEFAULT_WORKSPACE_
 
 
 def evidence_pack_v1_audit_run_path(pack_id: str, *, workspace_id: str = DEFAULT_WORKSPACE_ID, root: Path | None = None) -> Path:
+    pack_id_slug = pack_id_path_segment(pack_id)
     return (
         evidence_pack_v1_artifact_root(workspace_id=workspace_id, root=root)
         / "audits"
         / "runs"
-        / f"{timestamp_slug()}-{pack_id}-audit.json"
+        / f"{timestamp_slug()}-{pack_id_slug}-audit.json"
     )
 
 
@@ -857,11 +858,12 @@ def evidence_pack_v1_test_latest_path(*, workspace_id: str = DEFAULT_WORKSPACE_I
 
 
 def evidence_pack_v1_test_run_path(pack_id: str, *, workspace_id: str = DEFAULT_WORKSPACE_ID, root: Path | None = None) -> Path:
+    pack_id_slug = pack_id_path_segment(pack_id)
     return (
         evidence_pack_v1_artifact_root(workspace_id=workspace_id, root=root)
         / "tests"
         / "runs"
-        / f"{timestamp_slug()}-{pack_id}-test.json"
+        / f"{timestamp_slug()}-{pack_id_slug}-test.json"
     )
 
 
@@ -869,6 +871,12 @@ def pack_id_from_manifest(manifest: Mapping[str, Any] | Any) -> str:
     metadata = manifest.get("metadata") if isinstance(manifest, Mapping) else None
     pack_id = metadata.get("pack_id") if isinstance(metadata, Mapping) else None
     return _clean_text(pack_id) or "unknown-pack"
+
+
+def pack_id_path_segment(pack_id: str | None) -> str:
+    cleaned = (pack_id or "unknown-pack").strip().lower()
+    slug = re.sub(r"[^a-z0-9-]+", "-", cleaned).strip("-")
+    return slug or "unknown-pack"
 
 
 def manifest_sha256(path: Path) -> str:

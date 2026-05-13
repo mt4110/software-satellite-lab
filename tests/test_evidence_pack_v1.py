@@ -30,6 +30,7 @@ from evidence_pack_v1 import (  # noqa: E402
     test_evidence_pack_v1_path as run_evidence_pack_v1_test,
 )
 from satellite_pack import load_pack_manifest  # noqa: E402
+from workspace_state import DEFAULT_WORKSPACE_ID  # noqa: E402
 
 
 FAILURE_PACK = REPO_ROOT / "templates" / "failure-memory-pack.satellite.yaml"
@@ -247,6 +248,38 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertEqual(audit["verdict"], "block")
         self.assertEqual(_security_statuses(audit)["path_boundary"], "block")
         self.assertIn("$.artifact_policy.selected_roots[0]", audit["security_checks"][0]["evidence"])
+
+    def test_invalid_pack_id_cannot_escape_audit_or_test_run_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _copy_schema_refs(root)
+            manifest = _load_failure_pack()
+            manifest["metadata"]["pack_id"] = "../../../tmp/pwn"
+            manifest_path = _write_manifest(root, manifest)
+
+            audit, _audit_latest, audit_run = audit_evidence_pack_v1_path(
+                manifest_path,
+                root=root,
+                strict=False,
+                write_artifact=True,
+            )
+            result, _test_latest, test_run = run_evidence_pack_v1_test(
+                manifest_path,
+                root=root,
+                strict=False,
+                write_artifact=True,
+            )
+
+        audit_runs = root / "artifacts" / "satellite_evidence_pack_v1" / DEFAULT_WORKSPACE_ID / "audits" / "runs"
+        test_runs = root / "artifacts" / "satellite_evidence_pack_v1" / DEFAULT_WORKSPACE_ID / "tests" / "runs"
+        self.assertEqual(audit["verdict"], "needs_review")
+        self.assertEqual(result["audit_verdict"], "needs_review")
+        self.assertEqual(audit_run.parent.resolve(), audit_runs.resolve())
+        self.assertEqual(test_run.parent.resolve(), test_runs.resolve())
+        self.assertIn("tmp-pwn", audit_run.name)
+        self.assertIn("tmp-pwn", test_run.name)
+        self.assertFalse((root / "tmp" / "pwn-audit.json").exists())
+        self.assertFalse((root / "tmp" / "pwn-test.json").exists())
 
     def test_symlink_traversal_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
