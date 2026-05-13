@@ -24,6 +24,7 @@ from evidence_pack_v1 import (  # noqa: E402
     audit_evidence_pack_v1_path,
     build_evidence_pack_v1_audit,
     evidence_pack_v1_lock_path,
+    is_evidence_pack_v1_path,
     lock_evidence_pack_v1_path,
     scaffold_evidence_pack_v1,
     test_evidence_pack_v1_path as run_evidence_pack_v1_test,
@@ -80,6 +81,18 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(audits), 2)
         self.assertTrue(all(audit["verdict"] == "pass" for audit in audits))
+
+    def test_v1_detection_requires_explicit_schema_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = _load_failure_pack()
+            manifest["schema_name"] = "software-satellite-evidence-pack"
+            manifest_path = _write_manifest(root, manifest)
+
+            detected = is_evidence_pack_v1_path(manifest_path)
+
+        self.assertFalse(detected)
+        self.assertTrue(is_evidence_pack_v1_path(FAILURE_PACK))
 
     def test_unknown_field_fails_strict_audit(self) -> None:
         manifest = _load_failure_pack()
@@ -340,6 +353,31 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertFalse(payload["test"]["api_key_required"])
         self.assertTrue(payload["test"]["passed"])
+
+    def test_cli_pack_test_rejects_legacy_manifest_without_v1_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "satlab.py"),
+                    "--root",
+                    str(root),
+                    "pack",
+                    "test",
+                    str(REPO_ROOT / "templates" / "review-risk-pack.satellite.yaml"),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            v1_artifact_root = root / "artifacts" / "satellite_evidence_pack_v1"
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("pack test supports only explicit Evidence Pack v1 manifests", completed.stderr)
+        self.assertFalse(v1_artifact_root.exists())
 
     def test_pack_output_goes_through_support_kernel(self) -> None:
         result = run_evidence_pack_v1_test(

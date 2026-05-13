@@ -860,9 +860,7 @@ def is_evidence_pack_v1_path(pack_path: Path) -> bool:
         manifest, _manifest_path = load_evidence_pack_v1_manifest(pack_path)
     except (OSError, PackManifestError, EvidencePackV1Error, json.JSONDecodeError):
         return False
-    if manifest.get("schema_name") == PACK_V1_SCHEMA_NAME:
-        return True
-    return any(key in manifest for key in ("metadata", "input_kinds", "artifact_policy", "core_transform_refs"))
+    return manifest.get("schema_name") == PACK_V1_SCHEMA_NAME
 
 
 def _manifest_core_transforms(manifest: Mapping[str, Any] | Any) -> list[str]:
@@ -1109,6 +1107,11 @@ def test_evidence_pack_v1_path(
 ) -> tuple[dict[str, Any], Path | None, Path | None]:
     resolved_root = _resolve_root(root)
     manifest, manifest_path = load_evidence_pack_v1_manifest(pack_path)
+    if manifest.get("schema_name") != PACK_V1_SCHEMA_NAME:
+        raise EvidencePackV1Error(
+            f"{manifest_path}: pack test requires an explicit Evidence Pack v1 schema_name "
+            f"({PACK_V1_SCHEMA_NAME})."
+        )
     audit = build_evidence_pack_v1_audit(
         manifest,
         manifest_path=manifest_path,

@@ -26,6 +26,7 @@ from evidence_graph import (
 from evidence_lint import build_evidence_lint_report, format_evidence_lint_report
 from evidence_pack_v1 import (
     EvidencePackV1Error,
+    PACK_V1_SCHEMA_NAME,
     audit_evidence_pack_v1_path,
     builtin_pack_list,
     format_evidence_pack_v1_audit_report,
@@ -787,6 +788,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "pack" and args.pack_command == "test":
         try:
+            if not is_evidence_pack_v1_path(args.pack):
+                parser.error(
+                    "pack test supports only explicit Evidence Pack v1 manifests "
+                    f"(schema_name: {PACK_V1_SCHEMA_NAME})."
+                )
             result, latest_path, run_path = test_evidence_pack_v1_path(
                 args.pack,
                 workspace_id=args.workspace_id,
