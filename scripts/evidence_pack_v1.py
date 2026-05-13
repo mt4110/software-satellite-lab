@@ -351,7 +351,7 @@ def _validate_artifact_policy(value: Any, issues: list[dict[str, Any]], *, root:
             root_text,
             f"$.artifact_policy.selected_roots[{index}]",
             root=root,
-            allow_missing=True,
+            allow_missing=False,
             allow_schema_ref=False,
         )
 

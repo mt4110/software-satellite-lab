@@ -50,6 +50,8 @@ def _write_manifest(root: Path, manifest: dict, filename: str = "pack.satellite.
 def _copy_schema_refs(root: Path) -> None:
     schemas = root / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
+    (root / "artifacts").mkdir(parents=True, exist_ok=True)
+    (root / "examples" / "review_memory_benchmark").mkdir(parents=True, exist_ok=True)
     for name in (
         "agent_session_bundle.schema.json",
         "evidence_graph.schema.json",
@@ -225,6 +227,16 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
 
         self.assertEqual(audit["verdict"], "block")
         self.assertEqual(_security_statuses(audit)["path_boundary"], "block")
+
+    def test_selected_roots_must_exist_when_missing_source_policy_blocks(self) -> None:
+        manifest = _load_failure_pack()
+        manifest["artifact_policy"]["selected_roots"] = ["missing/local/source-root"]
+
+        audit = _blocked_audit(manifest)
+
+        self.assertEqual(audit["verdict"], "block")
+        self.assertEqual(_security_statuses(audit)["path_boundary"], "block")
+        self.assertIn("$.artifact_policy.selected_roots[0]", audit["security_checks"][0]["evidence"])
 
     def test_symlink_traversal_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
