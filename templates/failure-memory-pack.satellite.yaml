@@ -1,0 +1,57 @@
+schema_name: software-satellite-evidence-pack-v1
+schema_version: 1
+metadata:
+  pack_id: failure-memory-pack
+  version: 1.0.0
+  title: Failure Memory Pack
+  summary: Recall source-linked prior failures and produce a support-gated Markdown report.
+  license: MIT
+input_kinds:
+  - failure
+  - patch
+  - software_work_event
+artifact_policy:
+  selected_roots:
+    - examples/review_memory_benchmark
+  path_mode: selected_roots_only
+  link_policy: refuse_links
+  missing_source_policy: block
+recall_policy:
+  mode: failure_memory
+  max_items: 5
+  require_source_refs: true
+support_policy:
+  required_kernel: evidence_support_v1
+  requested_polarity: risk
+  require_source_linked_evidence: true
+  require_support_kernel: true
+report_sections:
+  - id: summary
+    title: Summary
+    source: support_kernel
+  - id: recalled_failures
+    title: Recalled Failures
+    source: recall_summary
+  - id: benchmark
+    title: Benchmark
+    source: benchmark_summary
+benchmark_fixtures:
+  - id: failure_log_risk
+    input_kind: failure
+    artifact_name: failure_log
+    fixture_text: Local regression failed while verifying cache behavior.
+    requested_polarity: risk
+    expected_support_class: negative_prior
+    expected_can_support_decision: true
+redaction_policy:
+  mode: best_effort_local
+  token_handling: redact_known_tokens
+output_schema_refs:
+  - evidence_support.schema.json
+  - evidence_graph.schema.json
+  - review_memory_fixture.schema.json
+core_transform_refs:
+  - artifact_capture
+  - support_gate
+  - recall_failure
+  - markdown_report
