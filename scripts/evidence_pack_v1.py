@@ -486,6 +486,25 @@ def _validate_redaction_policy(value: Any, issues: list[dict[str, Any]]) -> None
         _validate_string(issues, value.get("token_handling"), "$.redaction_policy.token_handling", allowed={"redact_known_tokens"})
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _path_chain_to_root(path: Path, root: Path) -> list[Path]:
+    chain: list[Path] = []
+    current = path
+    while _path_is_within(current, root):
+        chain.append(current)
+        if current == root:
+            break
+        current = current.parent
+    return chain
+
+
 def _validate_local_path_ref(
     issues: list[dict[str, Any]],
     value: str,
@@ -510,26 +529,23 @@ def _validate_local_path_ref(
         return
     if allow_schema_ref:
         candidate = Path("schemas") / candidate
-    candidate_path = root / candidate
+    resolved_root = root.resolve()
+    candidate_path = (resolved_root / candidate).absolute()
     try:
-        candidate_is_symlink = candidate_path.is_symlink() or any(
-            parent.is_symlink()
-            for parent in candidate_path.parents
-            if str(parent).startswith(str(root))
-        )
+        candidate_is_symlink = any(item.is_symlink() for item in _path_chain_to_root(candidate_path, resolved_root))
     except OSError:
         candidate_is_symlink = False
-    resolved = candidate_path.resolve()
-    if not str(resolved).startswith(str(root) + "/") and resolved != root:
+    try:
+        resolved = candidate_path.resolve()
+    except (OSError, RuntimeError):
+        issues.append(_issue(path, "Path could not be resolved safely.", check_id="path_boundary", actual=value))
+        return
+    if not _path_is_within(resolved, resolved_root):
         issues.append(_issue(path, "Path must remain inside the repository root.", check_id="path_boundary", actual=value))
         return
     try:
         exists = resolved.exists()
-        resolved_is_symlink = resolved.is_symlink() or any(
-            parent.is_symlink()
-            for parent in resolved.parents
-            if str(parent).startswith(str(root))
-        )
+        resolved_is_symlink = any(item.is_symlink() for item in _path_chain_to_root(resolved, resolved_root))
     except OSError:
         exists = False
         resolved_is_symlink = False
@@ -944,7 +960,10 @@ def build_evidence_pack_v1_audit(
         if check.get("status") == "block"
         and check.get("check_id") != "schema_validity"
     )
-    verdict = "block" if blocked_reasons else "pass"
+    if blocked_reasons:
+        verdict = "block" if strict else "needs_review"
+    else:
+        verdict = "pass"
     return {
         "schema_name": PACK_V1_AUDIT_SCHEMA_NAME,
         "schema_version": PACK_V1_SCHEMA_VERSION,
@@ -965,6 +984,7 @@ def build_evidence_pack_v1_audit(
         },
         "security_checks": security_checks,
         "blocked_reasons": blocked_reasons,
+        "strict_blocking_enforced": bool(strict),
         "lock_status": lock_status,
         "policy_boundaries": {
             "executable_plugin_runtime": "blocked",
@@ -1026,7 +1046,7 @@ def _event_for_fixture(fixture: Mapping[str, Any], artifact_ref: Mapping[str, An
         "schema_version": 1,
         "event_id": f"pack-fixture:{pack_id}:{fixture.get('id')}",
         "event_kind": "evidence_pack_v1_fixture",
-        "recorded_at_utc": "2026-05-12T00:00:00+00:00",
+        "recorded_at_utc": timestamp_utc(),
         "workspace": {"workspace_id": "pack-v1-test"},
         "session": {"session_id": f"pack-fixture:{pack_id}", "surface": "pack_test", "mode": "policy_kernel"},
         "outcome": {"status": status, "quality_status": quality_status, "execution_status": status},
@@ -1074,6 +1094,7 @@ def _run_fixture(fixture: Mapping[str, Any], *, pack_id: str) -> dict[str, Any]:
         "actual_support_class": support.get("support_class"),
         "expected_can_support_decision": expected_can_support,
         "actual_can_support_decision": support.get("can_support_decision"),
+        "event_recorded_at_utc": event.get("recorded_at_utc"),
         "support_result": support,
     }
 

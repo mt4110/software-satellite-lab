@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -87,6 +88,16 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         audit = _blocked_audit(manifest)
 
         self.assertEqual(audit["verdict"], "block")
+        self.assertEqual(_security_statuses(audit)["unknown_fields"], "block")
+
+    def test_unknown_field_is_needs_review_without_strict(self) -> None:
+        manifest = _load_failure_pack()
+        manifest["plugin_runtime"] = {"enabled": True}
+
+        audit = build_evidence_pack_v1_audit(manifest, manifest_path=FAILURE_PACK, root=REPO_ROOT, strict=False)
+
+        self.assertEqual(audit["verdict"], "needs_review")
+        self.assertFalse(audit["strict_blocking_enforced"])
         self.assertEqual(_security_statuses(audit)["unknown_fields"], "block")
 
     def test_python_field_fails(self) -> None:
@@ -343,6 +354,47 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertEqual(result["support_kernel_result_count"], result["fixture_count"])
         self.assertEqual(result["fixture_results"][0]["support_result"]["schema_name"], "software-satellite-evidence-support-result")
         self.assertEqual(result["fixture_results"][0]["support_result"]["support_polarity"], "risk")
+        recorded_at = result["fixture_results"][0]["event_recorded_at_utc"]
+        self.assertNotEqual(recorded_at, "2026-05-12T00:00:00+00:00")
+        datetime.fromisoformat(recorded_at)
+
+    def test_non_strict_pack_test_runs_fixtures_for_draft_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _copy_schema_refs(root)
+            manifest = _load_failure_pack()
+            manifest["plugin_runtime"] = {"enabled": True}
+            manifest_path = _write_manifest(root, manifest)
+
+            result = run_evidence_pack_v1_test(
+                manifest_path,
+                root=root,
+                strict=False,
+                write_artifact=False,
+            )[0]
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["audit_verdict"], "needs_review")
+        self.assertEqual(result["fixture_count"], 1)
+
+    def test_strict_pack_test_blocks_draft_manifest_before_fixtures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _copy_schema_refs(root)
+            manifest = _load_failure_pack()
+            manifest["plugin_runtime"] = {"enabled": True}
+            manifest_path = _write_manifest(root, manifest)
+
+            result = run_evidence_pack_v1_test(
+                manifest_path,
+                root=root,
+                strict=True,
+                write_artifact=False,
+            )[0]
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["audit_verdict"], "block")
+        self.assertEqual(result["fixture_count"], 0)
 
     def test_scaffold_writes_builtin_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
