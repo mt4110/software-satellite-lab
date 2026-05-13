@@ -513,6 +513,27 @@ def _is_absolute_or_drive_rooted_path(value: str) -> bool:
     return bool(windows_candidate.drive or windows_candidate.root or windows_candidate.is_absolute())
 
 
+def _safe_fixture_artifact_path(fixture_root: Path, artifact_name: str) -> tuple[Path | None, str | None]:
+    if _is_absolute_or_drive_rooted_path(artifact_name):
+        return None, "Fixture artifact_name must be relative to the fixture sandbox."
+    candidate = Path(artifact_name).expanduser()
+    if str(candidate).startswith("~"):
+        return None, "Fixture artifact_name must not use a home-directory shortcut."
+    if PATH_TRAVERSAL_RE.search(artifact_name):
+        return None, "Fixture artifact_name must not contain path traversal."
+    if GLOB_TOKEN_RE.search(artifact_name):
+        return None, "Fixture artifact_name must not contain glob tokens."
+    candidate_path = fixture_root / candidate
+    try:
+        resolved_root = fixture_root.resolve()
+        resolved = candidate_path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None, "Fixture artifact_name could not be resolved safely."
+    if not _path_is_within(resolved, resolved_root):
+        return None, "Fixture artifact_name must remain inside the fixture sandbox."
+    return candidate_path, None
+
+
 def _validate_local_path_ref(
     issues: list[dict[str, Any]],
     value: str,
@@ -1069,12 +1090,34 @@ def _event_for_fixture(fixture: Mapping[str, Any], artifact_ref: Mapping[str, An
     }
 
 
+def _fixture_failure_result(fixture: Mapping[str, Any], message: str) -> dict[str, Any]:
+    expected_class = _clean_text(fixture.get("expected_support_class"))
+    expected_can_support = fixture.get("expected_can_support_decision")
+    return {
+        "fixture_id": fixture.get("id"),
+        "passed": False,
+        "support_kernel_used": False,
+        "expected_support_class": expected_class,
+        "actual_support_class": None,
+        "expected_can_support_decision": expected_can_support,
+        "actual_can_support_decision": None,
+        "fixture_artifact_error": message,
+        "support_result": None,
+    }
+
+
 def _run_fixture(fixture: Mapping[str, Any], *, pack_id: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmpdir:
         fixture_root = Path(tmpdir)
         artifact_name = _clean_text(fixture.get("artifact_name")) or "fixture.txt"
-        fixture_path = fixture_root / artifact_name
-        fixture_path.write_text(str(fixture.get("fixture_text") or ""), encoding="utf-8")
+        fixture_path, path_error = _safe_fixture_artifact_path(fixture_root, artifact_name)
+        if path_error is not None or fixture_path is None:
+            return _fixture_failure_result(fixture, path_error or "Fixture artifact_name is not safe.")
+        fixture_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fixture_path.write_text(str(fixture.get("fixture_text") or ""), encoding="utf-8")
+        except OSError as exc:
+            return _fixture_failure_result(fixture, f"Fixture artifact could not be written: {exc}")
         input_kind = _clean_text(fixture.get("input_kind")) or "review_note"
         artifact_ref = capture_artifact(
             fixture_path,

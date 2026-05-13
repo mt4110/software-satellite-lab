@@ -426,6 +426,29 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertEqual(result["audit_verdict"], "needs_review")
         self.assertEqual(result["fixture_count"], 1)
 
+    def test_non_strict_pack_test_does_not_write_unsafe_fixture_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _copy_schema_refs(root)
+            escaped_path = root / "escaped-fixture.txt"
+            manifest = _load_failure_pack()
+            manifest["benchmark_fixtures"][0]["artifact_name"] = str(escaped_path)
+            manifest_path = _write_manifest(root, manifest)
+
+            result = run_evidence_pack_v1_test(
+                manifest_path,
+                root=root,
+                strict=False,
+                write_artifact=False,
+            )[0]
+
+        self.assertFalse(escaped_path.exists())
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["audit_verdict"], "needs_review")
+        self.assertEqual(result["fixture_count"], 1)
+        self.assertFalse(result["fixture_results"][0]["support_kernel_used"])
+        self.assertIn("fixture sandbox", result["fixture_results"][0]["fixture_artifact_error"])
+
     def test_strict_pack_test_blocks_draft_manifest_before_fixtures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
