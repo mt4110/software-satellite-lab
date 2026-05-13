@@ -194,6 +194,17 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertEqual(audit["verdict"], "block")
         self.assertEqual(_security_statuses(audit)["path_boundary"], "block")
 
+    def test_windows_absolute_paths_fail_on_posix(self) -> None:
+        for selected_root in ("C:\\Windows", "\\\\server\\share"):
+            with self.subTest(selected_root=selected_root):
+                manifest = _load_failure_pack()
+                manifest["artifact_policy"]["selected_roots"] = [selected_root]
+
+                audit = _blocked_audit(manifest)
+
+                self.assertEqual(audit["verdict"], "block")
+                self.assertEqual(_security_statuses(audit)["path_boundary"], "block")
+
     def test_file_glob_fails(self) -> None:
         manifest = _load_failure_pack()
         manifest["artifact_policy"]["selected_roots"] = ["artifacts/*.json"]

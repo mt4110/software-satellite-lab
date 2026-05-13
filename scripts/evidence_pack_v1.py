@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
 
 from artifact_vault import capture_artifact
@@ -505,6 +505,14 @@ def _path_chain_to_root(path: Path, root: Path) -> list[Path]:
     return chain
 
 
+def _is_absolute_or_drive_rooted_path(value: str) -> bool:
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return True
+    windows_candidate = PureWindowsPath(value)
+    return bool(windows_candidate.drive or windows_candidate.root or windows_candidate.is_absolute())
+
+
 def _validate_local_path_ref(
     issues: list[dict[str, Any]],
     value: str,
@@ -520,10 +528,10 @@ def _validate_local_path_ref(
         issues.append(_issue(path, "Path traversal is not allowed.", check_id="path_traversal", actual=value))
     if GLOB_TOKEN_RE.search(value):
         issues.append(_issue(path, "File globs are not allowed in Evidence Pack v1.", check_id="file_glob", actual=value))
-    candidate = Path(value).expanduser()
-    if candidate.is_absolute():
+    if _is_absolute_or_drive_rooted_path(value):
         issues.append(_issue(path, "Absolute paths are not allowed.", check_id="path_boundary", actual=value))
         return
+    candidate = Path(value).expanduser()
     if str(candidate).startswith("~"):
         issues.append(_issue(path, "Home-directory shortcuts are not allowed.", check_id="path_boundary", actual=value))
         return
