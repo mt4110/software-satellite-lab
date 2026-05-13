@@ -84,6 +84,16 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertGreaterEqual(len(audits), 2)
         self.assertTrue(all(audit["verdict"] == "pass" for audit in audits))
 
+    def test_builtin_packs_do_not_require_generated_artifact_root(self) -> None:
+        manifests = [_load_failure_pack(), load_pack_manifest(AGENT_PACK)]
+
+        for manifest in manifests:
+            with self.subTest(pack_id=manifest["metadata"]["pack_id"]):
+                roots = manifest["artifact_policy"]["selected_roots"]
+
+                self.assertNotIn("artifacts", roots)
+                self.assertTrue(all((REPO_ROOT / root).exists() for root in roots))
+
     def test_v1_detection_requires_explicit_schema_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

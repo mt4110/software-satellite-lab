@@ -12,7 +12,6 @@ input_kinds:
   - software_work_event
 artifact_policy:
   selected_roots:
-    - artifacts
     - examples/review_memory_benchmark
   path_mode: selected_roots_only
   link_policy: refuse_links

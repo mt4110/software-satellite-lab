@@ -14,7 +14,6 @@ input_kinds:
   - ci_log
 artifact_policy:
   selected_roots:
-    - artifacts
     - examples/agent_session_bundles
   path_mode: selected_roots_only
   link_policy: refuse_links
