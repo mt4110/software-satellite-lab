@@ -23,6 +23,7 @@ from gemma_runtime import repo_root, timestamp_utc
 from memory_index import default_memory_index_path
 from software_work_events import (
     build_event_contract_report,
+    iter_agent_session_intake_events,
     iter_agent_lane_events,
     iter_capability_matrix_events,
     iter_workspace_events,
@@ -649,6 +650,7 @@ def _load_events_read_only(*, root: Path, workspace_id: str) -> tuple[list[dict[
 
     capability_matrix_errors: list[dict[str, str]] = []
     agent_lane_errors: list[dict[str, str]] = []
+    agent_session_intake_errors: list[dict[str, str]] = []
     workspace_events = iter_workspace_events(root=root, workspace_id=workspace_id)
     capability_events = iter_capability_matrix_events(
         root=root,
@@ -660,8 +662,13 @@ def _load_events_read_only(*, root: Path, workspace_id: str) -> tuple[list[dict[
         workspace_id=workspace_id,
         errors=agent_lane_errors,
     )
+    agent_session_intake_events = iter_agent_session_intake_events(
+        root=root,
+        workspace_id=workspace_id,
+        errors=agent_session_intake_errors,
+    )
     events = sorted(
-        [*workspace_events, *capability_events, *agent_events],
+        [*workspace_events, *capability_events, *agent_events, *agent_session_intake_events],
         key=lambda item: (
             str(item.get("recorded_at_utc") or ""),
             str(item.get("event_id") or ""),
@@ -678,6 +685,9 @@ def _load_events_read_only(*, root: Path, workspace_id: str) -> tuple[list[dict[
         "agent_lane_event_count": len(agent_events),
         "agent_lane_error_count": len(agent_lane_errors),
         "agent_lane_errors": agent_lane_errors,
+        "agent_session_intake_event_count": len(agent_session_intake_events),
+        "agent_session_intake_error_count": len(agent_session_intake_errors),
+        "agent_session_intake_errors": agent_session_intake_errors,
     }
 
 

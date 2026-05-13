@@ -1,0 +1,2 @@
+tests/test_cache.py::test_key_trims FAILED
+AssertionError: expected trimmed key

@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Sequence
 
 from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
+from agent_session_intake import (
+    SUPPORTED_AGENT_LABELS,
+    build_agent_session_bundle,
+    build_pr_bundle,
+    format_agent_session_intake_result,
+    ingest_agent_session_bundle,
+    ingest_agent_session_bundle_path,
+)
 from evidence_graph import (
     build_evidence_graph,
     build_evidence_impact_report,
@@ -120,6 +128,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     artifact_inspect_parser.add_argument("--artifact", required=True, help="Artifact id.")
     artifact_inspect_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    intake_parser = subparsers.add_parser("intake", help="Ingest local file-first artifacts from external work sessions.")
+    intake_subparsers = intake_parser.add_subparsers(dest="intake_command", required=True)
+    agent_session_parser = intake_subparsers.add_parser(
+        "agent-session",
+        help="Normalize a local agent session bundle or loose files into software-work evidence.",
+    )
+    agent_session_parser.add_argument("--bundle", type=Path, default=None, help="Agent session bundle JSON.")
+    agent_session_parser.add_argument(
+        "--agent",
+        choices=SUPPORTED_AGENT_LABELS,
+        default="generic",
+        help="Agent label metadata only; no provider integration is enabled.",
+    )
+    agent_session_parser.add_argument("--diff", type=Path, default=None, help="Local diff or patch file.")
+    agent_session_parser.add_argument("--transcript", type=Path, default=None, help="Local transcript file.")
+    agent_session_parser.add_argument("--test-log", type=Path, default=None, help="Local test log file.")
+    agent_session_parser.add_argument("--ci-log", type=Path, default=None, help="Local CI log file.")
+    agent_session_parser.add_argument("--note", default="", help="Short note for the intake.")
+    agent_session_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    agent_session_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pr_bundle_parser = intake_subparsers.add_parser(
+        "pr-bundle",
+        help="Normalize local PR diff, review, and CI log files as a file-first bundle.",
+    )
+    pr_bundle_parser.add_argument("--diff", type=Path, required=True, help="Local PR diff file.")
+    pr_bundle_parser.add_argument("--review", type=Path, default=None, help="Local review note file.")
+    pr_bundle_parser.add_argument("--ci-log", type=Path, default=None, help="Local CI log file.")
+    pr_bundle_parser.add_argument("--note", default="", help="Short note for the intake.")
+    pr_bundle_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    pr_bundle_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     evidence_parser = subparsers.add_parser("evidence", help="Classify whether evidence can support a decision.")
     evidence_subparsers = evidence_parser.add_subparsers(dest="evidence_command", required=True)
@@ -506,6 +546,65 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_artifact_inspection(inspection))
         return 0 if inspection.get("object_verified") or inspection.get("ref", {}).get("capture_state") != "captured" else 1
+
+    if args.command == "intake" and args.intake_command == "agent-session":
+        has_loose_files = any(
+            value is not None
+            for value in (args.diff, args.transcript, args.test_log, args.ci_log)
+        )
+        if args.bundle is not None and has_loose_files:
+            parser.error("intake agent-session accepts either --bundle or loose file arguments, not both.")
+        if args.bundle is None and not has_loose_files:
+            parser.error("intake agent-session requires --bundle or at least one local artifact file.")
+        try:
+            if args.bundle is not None:
+                result = ingest_agent_session_bundle_path(
+                    args.bundle,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            else:
+                bundle = build_agent_session_bundle(
+                    agent_label=args.agent,
+                    diff=args.diff,
+                    transcript=args.transcript,
+                    test_log=args.test_log,
+                    ci_log=args.ci_log,
+                    note=args.note.strip() or None,
+                )
+                result = ingest_agent_session_bundle(
+                    bundle,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(format_agent_session_intake_result(result))
+        return 0
+
+    if args.command == "intake" and args.intake_command == "pr-bundle":
+        try:
+            bundle = build_pr_bundle(
+                diff=args.diff,
+                review=args.review,
+                ci_log=args.ci_log,
+                note=args.note.strip() or None,
+            )
+            result = ingest_agent_session_bundle(
+                bundle,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(format_agent_session_intake_result(result))
+        return 0
 
     if args.command == "evidence" and args.evidence_command == "support":
         result = build_evidence_support_result(

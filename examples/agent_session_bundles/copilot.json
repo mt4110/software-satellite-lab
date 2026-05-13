@@ -1,0 +1,33 @@
+{
+  "schema_name": "software-satellite-agent-session-bundle",
+  "schema_version": 1,
+  "agent_label": "copilot",
+  "session_started_at_utc": "2026-05-12T02:00:00Z",
+  "session_finished_at_utc": "2026-05-12T02:06:00Z",
+  "task": {
+    "title": "Review wording patch",
+    "goal": "Capture a local IDE-assistant change without treating the transcript as verified evidence."
+  },
+  "artifacts": [
+    {
+      "kind": "diff",
+      "path": "examples/agent_session_bundles/files/copilot.diff"
+    },
+    {
+      "kind": "transcript",
+      "path": "examples/agent_session_bundles/files/copilot-transcript.md"
+    }
+  ],
+  "declared_claims": [
+    {
+      "claim": "reviewer requested change",
+      "source": "transcript",
+      "verification": "unverified"
+    }
+  ],
+  "privacy": {
+    "contains_private_code": true,
+    "contains_user_text": true,
+    "export_allowed": false
+  }
+}

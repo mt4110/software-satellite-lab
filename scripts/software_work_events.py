@@ -29,6 +29,7 @@ EVENT_CONTRACT_CHECK_SCHEMA_NAME = "software-satellite-event-contract-check"
 EVENT_CONTRACT_CHECK_SCHEMA_VERSION = 1
 EVENT_CONTRACT_REPORT_SCHEMA_NAME = "software-satellite-event-contract-report"
 EVENT_CONTRACT_REPORT_SCHEMA_VERSION = 1
+AGENT_SESSION_INTAKE_RESULT_SCHEMA_NAME = "software-satellite-agent-session-intake-result"
 
 
 def _resolve_root(root: Path | None = None) -> Path:
@@ -49,6 +50,14 @@ def workspace_event_log_path(
 
 def capability_matrix_root(root: Path | None = None) -> Path:
     return _resolve_root(root) / "artifacts" / "capability_matrix"
+
+
+def agent_session_intake_root(
+    *,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    root: Path | None = None,
+) -> Path:
+    return _resolve_root(root) / "artifacts" / "agent_session_intake" / workspace_id
 
 
 def _clean_text(value: Any) -> str | None:
@@ -991,6 +1000,47 @@ def iter_agent_lane_events(
         )
         for run in runs
     ]
+    events.sort(key=lambda item: str(item.get("recorded_at_utc") or ""))
+    return events
+
+
+def iter_agent_session_intake_events(
+    *,
+    root: Path | None = None,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    errors: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_root = _resolve_root(root)
+    intake_root = agent_session_intake_root(workspace_id=workspace_id, root=resolved_root)
+    run_paths = sorted((intake_root / "runs").glob("*.json"))
+    latest_path = intake_root / "latest.json"
+    paths = run_paths or ([latest_path] if latest_path.is_file() else [])
+    events_by_id: dict[str, dict[str, Any]] = {}
+
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            if errors is not None:
+                errors.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if payload.get("schema_name") != AGENT_SESSION_INTAKE_RESULT_SCHEMA_NAME:
+            continue
+        event = payload.get("software_work_event")
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("schema_name") != EVENT_SCHEMA_NAME:
+            if errors is not None:
+                errors.append({"path": str(path), "error": "missing software work event schema"})
+            continue
+        event_id = _clean_text(event.get("event_id"))
+        if event_id is None:
+            continue
+        events_by_id[event_id] = copy.deepcopy(dict(event))
+
+    events = list(events_by_id.values())
     events.sort(key=lambda item: str(item.get("recorded_at_utc") or ""))
     return events
 

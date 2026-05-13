@@ -103,6 +103,7 @@
                   "enum": [
                     "patch",
                     "test_log",
+                    "command_log",
                     "transcript",
                     "review_note",
                     "candidate_output",

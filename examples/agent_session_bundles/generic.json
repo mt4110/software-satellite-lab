@@ -1,0 +1,37 @@
+{
+  "schema_name": "software-satellite-agent-session-bundle",
+  "schema_version": 1,
+  "agent_label": "generic",
+  "session_started_at_utc": "2026-05-12T00:00:00Z",
+  "session_finished_at_utc": "2026-05-12T00:08:00Z",
+  "task": {
+    "title": "Patch session",
+    "goal": "Record a local patch session with transcript and test log evidence."
+  },
+  "artifacts": [
+    {
+      "kind": "diff",
+      "path": "examples/agent_session_bundles/files/generic.diff"
+    },
+    {
+      "kind": "transcript",
+      "path": "examples/agent_session_bundles/files/generic-transcript.md"
+    },
+    {
+      "kind": "test_log",
+      "path": "examples/agent_session_bundles/files/generic-test.txt"
+    }
+  ],
+  "declared_claims": [
+    {
+      "claim": "tests passed",
+      "source": "transcript",
+      "verification": "unverified"
+    }
+  ],
+  "privacy": {
+    "contains_private_code": true,
+    "contains_user_text": true,
+    "export_allowed": false
+  }
+}
