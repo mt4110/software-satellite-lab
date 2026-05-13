@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Backend Adoption Dossier",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "dossier_id",
+    "workspace_id",
+    "generated_at_utc",
+    "decision_question",
+    "adoption_scope",
+    "baseline_metadata",
+    "candidate_metadata",
+    "source_linked_task_outcomes",
+    "failures_and_regressions",
+    "human_verdicts_and_rationale",
+    "evidence_support_summary",
+    "cost_latency_metadata",
+    "rollback_plan",
+    "benchmark_gate",
+    "evidence_lint_gate",
+    "rule_evaluation",
+    "recommendation",
+    "exit_gate",
+    "notes"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-backend-adoption-dossier"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "dossier_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at_utc": {
+      "type": "string",
+      "minLength": 1
+    },
+    "comparison_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "decision_question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adoption_scope": {
+      "type": "object",
+      "required": [
+        "workflow_kind",
+        "repo_scope",
+        "risk_scope"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workflow_kind": {
+          "type": "string",
+          "enum": [
+            "review_git",
+            "agent_session_intake",
+            "pack_report",
+            "backend_compare",
+            "learning_inspection"
+          ]
+        },
+        "repo_scope": {
+          "type": "string",
+          "enum": [
+            "current_repo",
+            "fixture_only",
+            "dogfood_only"
+          ]
+        },
+        "risk_scope": {
+          "type": "string",
+          "enum": [
+            "experimental",
+            "default_candidate",
+            "default_backend"
+          ]
+        }
+      }
+    },
+    "baseline_metadata": {
+      "$ref": "#/$defs/backend_metadata"
+    },
+    "candidate_metadata": {
+      "$ref": "#/$defs/backend_metadata"
+    },
+    "source_linked_task_outcomes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task_outcome"
+      }
+    },
+    "failures_and_regressions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task_outcome"
+      }
+    },
+    "human_verdicts_and_rationale": {
+      "type": "object",
+      "required": [
+        "comparison_outcome",
+        "winner_event_id",
+        "rationale",
+        "criteria",
+        "human_rationale_present"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "comparison_outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "winner_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rationale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "human_rationale_present": {
+          "type": "boolean"
+        }
+      }
+    },
+    "evidence_support_summary": {
+      "type": "object"
+    },
+    "cost_latency_metadata": {
+      "type": "object"
+    },
+    "rollback_plan": {
+      "type": "object",
+      "required": [
+        "present",
+        "source",
+        "plan"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "present": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "provided",
+            "derived_from_baseline",
+            "absent"
+          ]
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "benchmark_gate": {
+      "type": "object"
+    },
+    "evidence_lint_gate": {
+      "type": "object"
+    },
+    "rule_evaluation": {
+      "type": "object",
+      "required": [
+        "blockers",
+        "warnings",
+        "rules"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "rules": {
+          "type": "object"
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": [
+        "value",
+        "rationale",
+        "allowed_values"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "value": {
+          "type": "string",
+          "enum": [
+            "adopt",
+            "reject",
+            "experiment_only",
+            "insufficient_evidence"
+          ]
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "allowed_values": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "adopt",
+              "reject",
+              "experiment_only",
+              "insufficient_evidence"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "exit_gate": {
+      "type": "object",
+      "required": [
+        "adoption_without_source_blocked",
+        "adoption_without_human_rationale_blocked",
+        "adoption_without_rollback_blocked",
+        "negative_evidence_visible",
+        "no_live_api_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "adoption_without_source_blocked": {
+          "const": true
+        },
+        "adoption_without_human_rationale_blocked": {
+          "const": true
+        },
+        "adoption_without_rollback_blocked": {
+          "const": true
+        },
+        "negative_evidence_visible": {
+          "type": "boolean"
+        },
+        "no_live_api_required": {
+          "const": true
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "backend_metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "backend_id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "adapter_kind": {
+          "type": "string"
+        },
+        "compatibility_status": {
+          "type": "string"
+        }
+      }
+    },
+    "task_outcome": {
+      "type": "object",
+      "required": [
+        "role",
+        "comparison_role",
+        "event_id",
+        "positive_support",
+        "risk_support",
+        "source_artifact_refs",
+        "source_linked",
+        "failure_or_regression"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "candidate",
+            "baseline",
+            "other"
+          ]
+        },
+        "comparison_role": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "positive_support": {
+          "type": "object"
+        },
+        "risk_support": {
+          "type": "object"
+        },
+        "source_artifact_refs": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "source_linked": {
+          "type": "boolean"
+        },
+        "failure_or_regression": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

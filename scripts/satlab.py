@@ -15,6 +15,11 @@ from agent_session_intake import (
     ingest_agent_session_bundle,
     ingest_agent_session_bundle_path,
 )
+from backend_adoption_dossier import (
+    build_backend_adoption_dossier_from_comparison_id,
+    build_backend_adoption_dossier_from_review,
+    format_backend_adoption_dossier_markdown,
+)
 from evidence_graph import (
     build_evidence_graph,
     build_evidence_impact_report,
@@ -289,6 +294,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     proposals_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     proposals_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    backend_parser = subparsers.add_parser("backend", help="Inspect backend/model adoption evidence without provider hubs.")
+    backend_subparsers = backend_parser.add_subparsers(dest="backend_command", required=True)
+    backend_dossier_parser = backend_subparsers.add_parser(
+        "dossier",
+        help="Build a source-linked backend/model adoption dossier from local comparison evidence.",
+    )
+    dossier_source = backend_dossier_parser.add_mutually_exclusive_group(required=True)
+    dossier_source.add_argument("--comparison", default=None, help="Evaluation comparison id to inspect.")
+    dossier_source.add_argument("--from-review", default=None, help="Review metadata path or review event/run id to inspect.")
+    backend_dossier_parser.add_argument("--candidate-backend", default=None, help="Candidate backend id, model id, or event id.")
+    backend_dossier_parser.add_argument("--baseline-backend", default=None, help="Baseline backend id, model id, or event id.")
+    backend_dossier_parser.add_argument(
+        "--workflow-kind",
+        choices=("review_git", "agent_session_intake", "pack_report", "backend_compare", "learning_inspection"),
+        default=None,
+        help="Scoped workflow kind for the adoption question.",
+    )
+    backend_dossier_parser.add_argument(
+        "--repo-scope",
+        choices=("current_repo", "fixture_only", "dogfood_only"),
+        default="current_repo",
+        help="Repository scope for the adoption question.",
+    )
+    backend_dossier_parser.add_argument(
+        "--risk-scope",
+        choices=("experimental", "default_candidate", "default_backend"),
+        default="experimental",
+        help="Risk scope; default-backend adoption remains separately gated.",
+    )
+    backend_dossier_parser.add_argument("--rollback-plan", default=None, help="Explicit rollback plan. Empty means absent.")
+    backend_dossier_parser.add_argument("--benchmark-report", type=Path, default=None, help="Optional local JSON benchmark report.")
+    backend_dossier_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat missing or failing benchmark evidence as a strict adoption gate.",
+    )
+    backend_dossier_parser.add_argument(
+        "--lint",
+        action="store_true",
+        help="Also run the local Evidence Lint gate while building the dossier.",
+    )
+    backend_dossier_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    backend_dossier_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
 
     pack_parser = subparsers.add_parser("pack", help="Inspect and audit declarative Satellite Evidence Packs.")
     pack_subparsers = pack_parser.add_subparsers(dest="pack_command", required=True)
@@ -933,6 +982,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(format_proposal_comparison_result(result))
+        return 0
+
+    if args.command == "backend" and args.backend_command == "dossier":
+        try:
+            if args.comparison is not None:
+                dossier = build_backend_adoption_dossier_from_comparison_id(
+                    args.comparison,
+                    candidate_backend=args.candidate_backend,
+                    baseline_backend=args.baseline_backend,
+                    workflow_kind=args.workflow_kind or "backend_compare",
+                    repo_scope=args.repo_scope,
+                    risk_scope=args.risk_scope,
+                    rollback_plan=args.rollback_plan,
+                    benchmark_report_path=args.benchmark_report,
+                    strict=args.strict,
+                    run_evidence_lint=args.lint,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            else:
+                dossier = build_backend_adoption_dossier_from_review(
+                    args.from_review,
+                    candidate_backend=args.candidate_backend,
+                    baseline_backend=args.baseline_backend,
+                    workflow_kind=args.workflow_kind or "review_git",
+                    repo_scope=args.repo_scope,
+                    risk_scope=args.risk_scope,
+                    rollback_plan=args.rollback_plan,
+                    benchmark_report_path=args.benchmark_report,
+                    strict=args.strict,
+                    run_evidence_lint=args.lint,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(dossier, ensure_ascii=False, indent=2))
+        else:
+            print(format_backend_adoption_dossier_markdown(dossier))
+        if args.strict and dossier.get("recommendation", {}).get("value") != "adopt":
+            return 1
         return 0
 
     if args.command == "pack" and args.pack_command == "run":
