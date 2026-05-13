@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Derived Evidence Graph",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "workspace_id",
+    "generated_at_utc",
+    "derived",
+    "rebuildable",
+    "source_of_truth_policy",
+    "target_identity_model",
+    "counts",
+    "graph_digest",
+    "nodes",
+    "edges"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-derived-evidence-graph"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "workspace_id": {
+      "type": "string"
+    },
+    "generated_at_utc": {
+      "type": "string"
+    },
+    "derived": {
+      "const": true
+    },
+    "rebuildable": {
+      "const": true
+    },
+    "source_of_truth_policy": {
+      "type": "object",
+      "required": [
+        "graph_is_derived",
+        "does_not_edit_event_logs",
+        "does_not_edit_artifact_refs",
+        "does_not_edit_verdicts",
+        "does_not_edit_comparison_records"
+      ],
+      "properties": {
+        "graph_is_derived": { "const": true },
+        "does_not_edit_event_logs": { "const": true },
+        "does_not_edit_artifact_refs": { "const": true },
+        "does_not_edit_verdicts": { "const": true },
+        "does_not_edit_comparison_records": { "const": true }
+      }
+    },
+    "target_identity_model": {
+      "type": "object",
+      "required": ["algorithm", "version"],
+      "properties": {
+        "algorithm": { "type": "string" },
+        "version": { "const": 1 }
+      }
+    },
+    "counts": {
+      "type": "object"
+    },
+    "graph_digest": {
+      "type": "string"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "node_kind",
+          "source_id",
+          "support_class",
+          "can_support_decision",
+          "polarity",
+          "quality_status",
+          "created_at_utc"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "node_id": { "type": "string" },
+          "node_kind": {
+            "enum": [
+              "artifact",
+              "event",
+              "signal",
+              "recall",
+              "review",
+              "comparison",
+              "learning_candidate",
+              "backend_candidate"
+            ]
+          },
+          "source_id": { "type": "string" },
+          "support_class": {
+            "enum": [
+              "source_linked_prior",
+              "negative_prior",
+              "current_review_subject",
+              "future_evidence",
+              "missing_source",
+              "modified_source",
+              "weak_match",
+              "contradictory",
+              "manual_pin_diagnostic",
+              "unverified_agent_claim",
+              "unknown"
+            ]
+          },
+          "can_support_decision": { "type": "boolean" },
+          "polarity": {
+            "enum": ["positive", "negative", "risk", "neutral", "unknown"]
+          },
+          "quality_status": {
+            "enum": [
+              "verified",
+              "human_accepted",
+              "human_rejected",
+              "failed",
+              "unresolved",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "target_fingerprint": {
+            "type": ["string", "null"]
+          },
+          "created_at_utc": {
+            "type": ["string", "null"]
+          },
+          "metadata": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "edge_id",
+          "from_node_id",
+          "to_node_id",
+          "relation_kind",
+          "strength",
+          "causal_validity",
+          "created_by",
+          "explanation"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "edge_id": { "type": "string" },
+          "from_node_id": { "type": "string" },
+          "to_node_id": { "type": "string" },
+          "relation_kind": {
+            "enum": [
+              "derives_from",
+              "recalls",
+              "repairs",
+              "contradicts",
+              "evaluates",
+              "selects",
+              "rejects",
+              "supersedes",
+              "excludes",
+              "uses_artifact"
+            ]
+          },
+          "strength": {
+            "enum": ["strong", "weak", "manual_pin", "diagnostic_only"]
+          },
+          "causal_validity": {
+            "enum": ["valid", "invalid", "unknown"]
+          },
+          "created_by": {
+            "enum": ["core", "human", "pack", "benchmark_fixture"]
+          },
+          "explanation": { "type": "string" },
+          "metadata": { "type": "object" }
+        }
+      }
+    }
+  }
+}

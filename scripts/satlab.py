@@ -7,6 +7,15 @@ from pathlib import Path
 from typing import Sequence
 
 from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
+from evidence_graph import (
+    build_evidence_graph,
+    build_evidence_impact_report,
+    build_evidence_trace,
+    format_evidence_graph_markdown,
+    format_evidence_impact_markdown,
+    format_evidence_trace_markdown,
+)
+from evidence_lint import build_evidence_lint_report, format_evidence_lint_report
 from evidence_support import build_evidence_support_result, format_evidence_support_result
 from failure_memory_review import (
     build_failure_recall,
@@ -131,6 +140,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evidence_support_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     evidence_support_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    evidence_graph_parser = evidence_subparsers.add_parser(
+        "graph",
+        help="Build a derived, rebuildable graph of local evidence relations.",
+    )
+    evidence_graph_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    evidence_graph_parser.add_argument("--format", choices=("md", "json"), default="json", help="Output format.")
+
+    evidence_lint_parser = evidence_subparsers.add_parser(
+        "lint",
+        help="Lint the derived evidence graph for decision-support blockers.",
+    )
+    evidence_lint_parser.add_argument("--strict", action="store_true", help="Return non-zero when hard-fail rules trigger.")
+    evidence_lint_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    evidence_lint_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    evidence_trace_parser = evidence_subparsers.add_parser(
+        "trace",
+        help="Trace why one event can or cannot support a decision.",
+    )
+    evidence_trace_parser.add_argument("--event", required=True, help="Software-work event id.")
+    evidence_trace_parser.add_argument("--why-blocked", action="store_true", help="Show blocker reasons explicitly.")
+    evidence_trace_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    evidence_trace_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    evidence_impact_parser = evidence_subparsers.add_parser(
+        "impact",
+        help="List graph evidence affected by a changed path.",
+    )
+    evidence_impact_parser.add_argument("--path", required=True, help="Repo path to inspect.")
+    evidence_impact_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    evidence_impact_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
 
     recall_parser = subparsers.add_parser("recall", help="Recall source-linked software-work memory.")
     recall_subparsers = recall_parser.add_subparsers(dest="recall_command", required=True)
@@ -450,6 +491,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_evidence_support_result(result))
         return 0 if result.get("can_support_decision") else 1
+
+    if args.command == "evidence" and args.evidence_command == "graph":
+        graph = build_evidence_graph(
+            workspace_id=args.workspace_id,
+            root=args.root,
+        )
+        if args.format == "json":
+            print(json.dumps(graph, ensure_ascii=False, indent=2))
+        else:
+            print(format_evidence_graph_markdown(graph), end="")
+        return 0
+
+    if args.command == "evidence" and args.evidence_command == "lint":
+        report = build_evidence_lint_report(
+            workspace_id=args.workspace_id,
+            root=args.root,
+            strict=args.strict,
+        )
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_evidence_lint_report(report))
+        return 1 if args.strict and report.get("verdict") == "fail" else 0
+
+    if args.command == "evidence" and args.evidence_command == "trace":
+        trace = build_evidence_trace(
+            args.event,
+            workspace_id=args.workspace_id,
+            root=args.root,
+            why_blocked=args.why_blocked,
+        )
+        if args.format == "json":
+            print(json.dumps(trace, ensure_ascii=False, indent=2))
+        else:
+            print(format_evidence_trace_markdown(trace), end="")
+        return 0 if trace.get("found") else 1
+
+    if args.command == "evidence" and args.evidence_command == "impact":
+        report = build_evidence_impact_report(
+            args.path,
+            workspace_id=args.workspace_id,
+            root=args.root,
+        )
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_evidence_impact_markdown(report), end="")
+        return 0
 
     if args.command == "pack" and args.pack_command == "inspect":
         try:
