@@ -189,6 +189,7 @@ def review_memory_miss_report_markdown_run_path(
 def _fixture_workspace_root(
     *,
     run_id: str,
+    suite_id: str,
     fixture_id: str,
     workspace_id: str,
     root: Path,
@@ -197,6 +198,7 @@ def _fixture_workspace_root(
         review_memory_benchmark_root(workspace_id=workspace_id, root=root)
         / "fixture_workspaces"
         / run_id
+        / _safe_slug(suite_id)
         / _safe_slug(fixture_id)
     )
 
@@ -513,7 +515,14 @@ def _evaluate_fixture(
     top_k: int = DEFAULT_TOP_K,
 ) -> dict[str, Any]:
     fixture_id = _clean_text(fixture.get("fixture_id")) or "fixture"
-    fixture_root = _fixture_workspace_root(run_id=run_id, fixture_id=fixture_id, workspace_id=workspace_id, root=root)
+    suite_id = _clean_text(fixture.get("suite_id")) or "suite"
+    fixture_root = _fixture_workspace_root(
+        run_id=run_id,
+        suite_id=suite_id,
+        fixture_id=fixture_id,
+        workspace_id=workspace_id,
+        root=root,
+    )
     fixture_root.mkdir(parents=True, exist_ok=True)
     current = _mapping_dict(fixture.get("current_event"))
     current_event_id = _clean_text(current.get("event_id")) or f"{fixture_id}:current"
@@ -539,7 +548,7 @@ def _evaluate_fixture(
             review_started_at=review_started_at,
             active_subject=current_event_id,
             requested_polarity=_requested_polarity(fixture, candidate),
-            root=_fixture_workspace_root(run_id=run_id, fixture_id=fixture_id, workspace_id=workspace_id, root=root),
+            root=fixture_root,
             checked_at_utc="2026-05-12T00:00:00+00:00",
         )
         item = _support_item(fixture=fixture, ranked_item=row, support=support, rank=rank)
@@ -591,7 +600,7 @@ def _evaluate_fixture(
     )
     result = {
         "fixture_id": fixture_id,
-        "suite_id": _clean_text(fixture.get("suite_id")) or "suite",
+        "suite_id": suite_id,
         "suite_kind": _clean_text(fixture.get("suite_kind")) or "synthetic",
         "category": _clean_text(fixture.get("category")) or "unknown",
         "description": _clean_text(fixture.get("description")) or "",
@@ -698,7 +707,7 @@ def _gate_pass(value: Any, op: str, expected: float | int) -> bool:
 def _build_exit_gate(metrics: Mapping[str, Any], all_fixtures_passed: bool) -> dict[str, Any]:
     synthetic = _mapping_dict(metrics.get("synthetic"))
     values = {
-        "critical_false_support": int(synthetic.get("critical_false_support") or 0),
+        "critical_false_support": int(metrics.get("critical_false_support") or 0),
         "synthetic_positive_support_precision": float(synthetic.get("positive_support_precision") or 0.0),
         "synthetic_useful_recall_at_5": float(synthetic.get("useful_recall_at_5") or 0.0),
         "no_evidence_honesty": float(synthetic.get("no_evidence_honesty") or 0.0),
@@ -947,6 +956,7 @@ def _format_gate_table(report: Mapping[str, Any]) -> list[str]:
 
 
 def format_review_memory_eval_report(report: Mapping[str, Any], *, spartan: bool = False) -> str:
+    all_metrics = _mapping_dict(report.get("metrics"))
     synthetic = _mapping_dict(_mapping_dict(report.get("metrics")).get("synthetic"))
     dogfood = _mapping_dict(_mapping_dict(report.get("metrics")).get("dogfood"))
     dogfood_recall = dogfood.get("useful_recall_at_5")
@@ -956,7 +966,7 @@ def format_review_memory_eval_report(report: Mapping[str, Any], *, spartan: bool
         "",
         f"- Result: {'pass' if report.get('passed') else 'fail'}",
         f"- Fixtures: {int(synthetic.get('passed_count') or 0)}/{int(synthetic.get('fixture_count') or 0)} synthetic passed",
-        f"- Critical false support: {int(synthetic.get('critical_false_support') or 0)}",
+        f"- Critical false support: {int(all_metrics.get('critical_false_support') or 0)}",
         f"- Positive support precision: {synthetic.get('positive_support_precision')}",
         f"- Useful Recall@5: {synthetic.get('useful_recall_at_5')}",
         f"- No-evidence honesty: {synthetic.get('no_evidence_honesty')}",

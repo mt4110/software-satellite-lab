@@ -285,6 +285,167 @@ class ReviewMemoryEvalTests(unittest.TestCase):
                     generated_at_utc="2026-05-12T12:00:00+00:00",
                 )
 
+    def test_fixture_validator_rejects_missing_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            suite_path = _write_suite(
+                root,
+                _suite(
+                    [
+                        {
+                            "fixture_id": "missing-required-fields",
+                            "category": "true_prior_failure",
+                            "description": "Malformed fixture should be rejected before evaluation.",
+                            "query": "review malformed fixture",
+                            "current_event": {
+                                "event_id": "fixture:malformed:current",
+                                "target_paths": [],
+                            },
+                            "candidate_events": [
+                                {
+                                    "event_id": "fixture:malformed:prior",
+                                    "status": "failed",
+                                    "quality_status": "fail",
+                                    "artifact_kind": "test_log",
+                                    "artifact_behavior": "captured",
+                                    "source_path": "sources/malformed.log",
+                                    "source_text": "FAILED malformed fixture\n",
+                                    "target_paths": ["scripts/malformed.py"],
+                                    "evidence_types": ["test_fail"],
+                                }
+                            ],
+                            "expected": {
+                                "requires_support": True,
+                                "support_polarity": "risk",
+                            },
+                        }
+                    ]
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "review_started_at_utc"):
+                run_review_memory_eval(
+                    suite=suite_path,
+                    workspace_id="missing-required-fields-test",
+                    root=root,
+                    generated_at_utc="2026-05-12T12:00:00+00:00",
+                )
+
+    def test_combined_critical_false_support_blocks_dogfood_exit_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            suite_path = _write_suite(
+                root,
+                {
+                    "schema_name": "software-satellite-review-memory-fixture-suite",
+                    "schema_version": 1,
+                    "suite_id": "dogfood-critical-false",
+                    "suite_kind": "dogfood",
+                    "fixtures": [
+                        {
+                            "fixture_id": "dogfood-false-support",
+                            "category": "weak_text_match_trap",
+                            "description": "Dogfood false support should fail the combined critical false support gate.",
+                            "query": "review dogfood false support scripts/dogfood.py",
+                            "requested_polarity": "positive",
+                            "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+                            "current_event": {
+                                "event_id": "fixture:dogfood:false-support:current",
+                                "target_paths": ["scripts/dogfood.py"],
+                            },
+                            "candidate_events": [
+                                {
+                                    "event_id": "fixture:dogfood:false-support:prior",
+                                    "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+                                    "status": "accepted",
+                                    "quality_status": "pass",
+                                    "artifact_kind": "review_note",
+                                    "artifact_behavior": "captured",
+                                    "source_path": "sources/dogfood.md",
+                                    "source_text": "Accepted dogfood note for scripts/dogfood.py, but fixture expects no support.",
+                                    "target_paths": ["scripts/dogfood.py"],
+                                    "evidence_types": ["human_acceptance"],
+                                    "expected": {
+                                        "support": False,
+                                        "useful": False,
+                                    },
+                                }
+                            ],
+                            "expected": {
+                                "no_strong_evidence": True,
+                                "miss_reason": "weak_match_overfiltered",
+                            },
+                        }
+                    ],
+                },
+            )
+
+            report = run_review_memory_eval(
+                suite=suite_path,
+                workspace_id="dogfood-critical-false-test",
+                root=root,
+                generated_at_utc="2026-05-12T12:00:00+00:00",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["metrics"]["critical_false_support"], 1)
+        critical_gate = next(
+            check
+            for check in report["exit_gate"]["checks"]
+            if check["metric"] == "critical_false_support"
+        )
+        self.assertFalse(critical_gate["passed"])
+
+    def test_same_fixture_id_in_different_suites_uses_distinct_workspaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            suite_dir = root / "suites"
+            suite_dir.mkdir()
+            for suite_id in ("suite-a", "suite-b"):
+                (suite_dir / f"{suite_id}.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_name": "software-satellite-review-memory-fixture-suite",
+                            "schema_version": 1,
+                            "suite_id": suite_id,
+                            "suite_kind": "synthetic",
+                            "fixtures": [
+                                {
+                                    "fixture_id": "shared-fixture-id",
+                                    "category": "no_prior_evidence",
+                                    "description": "Same fixture id in separate suites should not collide.",
+                                    "query": f"review no prior {suite_id}",
+                                    "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+                                    "current_event": {
+                                        "event_id": f"fixture:{suite_id}:current",
+                                        "target_paths": [f"scripts/{suite_id}.py"],
+                                    },
+                                    "candidate_events": [],
+                                    "expected": {
+                                        "no_strong_evidence": True,
+                                    },
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            report = run_review_memory_eval(
+                suite=suite_dir,
+                workspace_id="suite-workspace-collision-test",
+                root=root,
+                generated_at_utc="2026-05-12T12:00:00+00:00",
+            )
+
+        workspaces = {result["fixture_workspace"] for result in report["fixture_results"]}
+        self.assertTrue(report["passed"])
+        self.assertEqual(len(report["fixture_results"]), 2)
+        self.assertEqual(len(workspaces), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

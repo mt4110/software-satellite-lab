@@ -61,6 +61,12 @@ def _list_of_mappings(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
+def _has_nonempty_string_list(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(_clean_text(item) is not None for item in value)
+
+
 def _resolve_suite_path(path: str | Path | None, *, root: Path | None = None) -> Path:
     resolved_root = Path(root or repo_root()).resolve()
     if path is None:
@@ -127,11 +133,22 @@ def load_review_memory_fixture_suites(path: str | Path | None = None, *, root: P
 
 def load_review_memory_fixtures(path: str | Path | None = None, *, root: Path | None = None) -> list[dict[str, Any]]:
     fixtures: list[dict[str, Any]] = []
+    seen_fixture_keys: dict[tuple[str, str], str] = {}
     for suite in load_review_memory_fixture_suites(path, root=root):
         suite_id = _clean_text(suite.get("suite_id")) or "suite"
         suite_kind = _clean_text(suite.get("suite_kind")) or "synthetic"
         source_path = _clean_text(suite.get("_source_path"))
         for fixture in _list_of_mappings(suite.get("fixtures")):
+            fixture_id = _clean_text(fixture.get("fixture_id")) or ""
+            fixture_key = (suite_id, fixture_id)
+            if fixture_id and fixture_key in seen_fixture_keys:
+                raise ValueError(
+                    "Duplicate review memory fixture id "
+                    f"`{fixture_id}` in suite `{suite_id}`: "
+                    f"{seen_fixture_keys[fixture_key]} and {source_path or 'unknown'}."
+                )
+            if fixture_id:
+                seen_fixture_keys[fixture_key] = source_path or "unknown"
             fixtures.append(
                 {
                     "suite_id": suite_id,
@@ -158,7 +175,8 @@ def validate_review_memory_fixture_suite(suite: Mapping[str, Any]) -> list[str]:
         issues.append("fixtures must contain at least one fixture")
     seen_ids: set[str] = set()
     for index, fixture in enumerate(fixtures):
-        prefix = f"fixtures[{index}]"
+        source_path = _clean_text(suite.get("_source_path"))
+        prefix = f"{source_path}:fixtures[{index}]" if source_path else f"fixtures[{index}]"
         fixture_id = _clean_text(fixture.get("fixture_id"))
         if fixture_id is None:
             issues.append(f"{prefix}.fixture_id is required")
@@ -169,15 +187,42 @@ def validate_review_memory_fixture_suite(suite: Mapping[str, Any]) -> list[str]:
         category = _clean_text(fixture.get("category"))
         if category not in FIXTURE_CATEGORIES:
             issues.append(f"{prefix}.category must be one of the M12 fixture categories")
+        if _clean_text(fixture.get("description")) is None:
+            issues.append(f"{prefix}.description is required")
+        if _clean_text(fixture.get("query")) is None:
+            issues.append(f"{prefix}.query is required")
+        if _clean_text(fixture.get("review_started_at_utc")) is None:
+            issues.append(f"{prefix}.review_started_at_utc is required")
         expected = _mapping_dict(fixture.get("expected"))
         if not expected:
             issues.append(f"{prefix}.expected is required")
+        elif not (
+            isinstance(expected.get("requires_support"), bool)
+            or isinstance(expected.get("no_strong_evidence"), bool)
+        ):
+            issues.append(f"{prefix}.expected must declare requires_support or no_strong_evidence")
+        raw_candidates = fixture.get("candidate_events")
+        if raw_candidates is not None and not isinstance(raw_candidates, list):
+            issues.append(f"{prefix}.candidate_events must be an array")
         candidates = _list_of_mappings(fixture.get("candidate_events"))
         if category not in {"no_prior_evidence"} and not candidates:
             issues.append(f"{prefix}.candidate_events must not be empty")
         current = _mapping_dict(fixture.get("current_event"))
         if _clean_text(current.get("event_id")) is None:
             issues.append(f"{prefix}.current_event.event_id is required")
+        if not _has_nonempty_string_list(current.get("target_paths")):
+            issues.append(f"{prefix}.current_event.target_paths must contain at least one path")
+        for candidate_index, candidate in enumerate(candidates):
+            candidate_prefix = f"{prefix}.candidate_events[{candidate_index}]"
+            if _clean_text(candidate.get("event_id")) is None:
+                issues.append(f"{candidate_prefix}.event_id is required")
+            candidate_expected = _mapping_dict(candidate.get("expected"))
+            if not isinstance(candidate_expected.get("support"), bool):
+                issues.append(f"{candidate_prefix}.expected.support must be a boolean")
+            if not isinstance(candidate_expected.get("useful"), bool):
+                issues.append(f"{candidate_prefix}.expected.useful must be a boolean")
+            if not _has_nonempty_string_list(candidate.get("target_paths")):
+                issues.append(f"{candidate_prefix}.target_paths must contain at least one path")
     return issues
 
 
