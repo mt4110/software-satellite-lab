@@ -424,6 +424,34 @@ class EvidencePackV1PolicyKernelTests(unittest.TestCase):
         self.assertIn("pack test supports only explicit Evidence Pack v1 manifests", completed.stderr)
         self.assertFalse(v1_artifact_root.exists())
 
+    def test_cli_pack_test_preserves_manifest_parse_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "broken.satellite.json"
+            manifest_path.write_text("{not-json", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "satlab.py"),
+                    "--root",
+                    str(root),
+                    "pack",
+                    "test",
+                    str(manifest_path),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            v1_artifact_root = root / "artifacts" / "satellite_evidence_pack_v1"
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("invalid JSON manifest", completed.stderr)
+        self.assertNotIn("pack test supports only explicit Evidence Pack v1 manifests", completed.stderr)
+        self.assertFalse(v1_artifact_root.exists())
+
     def test_pack_output_goes_through_support_kernel(self) -> None:
         result = run_evidence_pack_v1_test(
             FAILURE_PACK,

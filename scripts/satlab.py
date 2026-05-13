@@ -32,6 +32,7 @@ from evidence_pack_v1 import (
     format_evidence_pack_v1_audit_report,
     format_evidence_pack_v1_test_report,
     is_evidence_pack_v1_path,
+    load_evidence_pack_v1_manifest,
     lock_evidence_pack_v1_path,
     scaffold_evidence_pack_v1,
     test_evidence_pack_v1_path,
@@ -788,7 +789,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "pack" and args.pack_command == "test":
         try:
-            if not is_evidence_pack_v1_path(args.pack):
+            manifest, _manifest_path = load_evidence_pack_v1_manifest(args.pack)
+            if manifest.get("schema_name") != PACK_V1_SCHEMA_NAME:
                 parser.error(
                     "pack test supports only explicit Evidence Pack v1 manifests "
                     f"(schema_name: {PACK_V1_SCHEMA_NAME})."
