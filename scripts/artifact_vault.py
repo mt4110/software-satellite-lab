@@ -19,6 +19,7 @@ ARTIFACT_REF_SCHEMA_VERSION = 1
 ARTIFACT_KINDS = {
     "patch",
     "test_log",
+    "command_log",
     "transcript",
     "review_note",
     "candidate_output",

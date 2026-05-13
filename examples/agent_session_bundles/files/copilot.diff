@@ -1,0 +1,6 @@
+diff --git a/ui/button.ts b/ui/button.ts
+--- a/ui/button.ts
++++ b/ui/button.ts
+@@ -1 +1 @@
+-export const label = "Send";
++export const label = "Submit";

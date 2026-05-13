@@ -1,0 +1,31 @@
+{
+  "schema_name": "software-satellite-agent-session-bundle",
+  "schema_version": 1,
+  "agent_label": "claude_code",
+  "session_started_at_utc": "2026-05-12T01:00:00Z",
+  "session_finished_at_utc": "2026-05-12T01:10:00Z",
+  "task": {
+    "title": "Retry bound patch",
+    "goal": "Capture a local terminal-assistant patch and test evidence."
+  },
+  "artifacts": [
+    {
+      "kind": "diff",
+      "path": "examples/agent_session_bundles/files/claude-code.diff"
+    },
+    {
+      "kind": "transcript",
+      "path": "examples/agent_session_bundles/files/claude-code-transcript.md"
+    },
+    {
+      "kind": "test_log",
+      "path": "examples/agent_session_bundles/files/claude-code-test.txt"
+    }
+  ],
+  "declared_claims": [],
+  "privacy": {
+    "contains_private_code": true,
+    "contains_user_text": true,
+    "export_allowed": false
+  }
+}

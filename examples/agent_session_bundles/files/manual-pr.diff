@@ -1,0 +1,6 @@
+diff --git a/docs/checklist.md b/docs/checklist.md
+--- a/docs/checklist.md
++++ b/docs/checklist.md
+@@ -1 +1,2 @@
+ - Capture local evidence.
++- Preserve privacy metadata.

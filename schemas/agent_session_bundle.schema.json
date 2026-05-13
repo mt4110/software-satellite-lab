@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Agent Session Bundle",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "agent_label",
+    "task",
+    "artifacts",
+    "privacy"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-agent-session-bundle"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "agent_label": {
+      "enum": [
+        "generic",
+        "claude_code",
+        "copilot",
+        "aider",
+        "openhands",
+        "manual",
+        "unknown"
+      ]
+    },
+    "session_started_at_utc": {
+      "type": "string"
+    },
+    "session_finished_at_utc": {
+      "type": "string"
+    },
+    "task": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": true,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "goal": {
+          "type": "string"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "additionalProperties": true,
+        "properties": {
+          "kind": {
+            "enum": [
+              "diff",
+              "patch",
+              "transcript",
+              "test_log",
+              "ci_log",
+              "command_log",
+              "review",
+              "review_note",
+              "human_verdict",
+              "source_comparison",
+              "unknown"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "declared_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim"],
+        "additionalProperties": true,
+        "properties": {
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string"
+          },
+          "verification": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "required": [
+        "contains_private_code",
+        "contains_user_text",
+        "export_allowed"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "contains_private_code": {
+          "type": "boolean"
+        },
+        "contains_user_text": {
+          "type": "boolean"
+        },
+        "export_allowed": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

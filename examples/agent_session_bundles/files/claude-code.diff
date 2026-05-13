@@ -1,0 +1,7 @@
+diff --git a/scripts/retry.py b/scripts/retry.py
+--- a/scripts/retry.py
++++ b/scripts/retry.py
+@@ -1,2 +1,3 @@
+ def retry_count():
++    return 3
+     return 1

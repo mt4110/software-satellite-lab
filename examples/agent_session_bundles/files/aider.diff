@@ -1,0 +1,7 @@
+diff --git a/scripts/cache.py b/scripts/cache.py
+--- a/scripts/cache.py
++++ b/scripts/cache.py
+@@ -1,2 +1,3 @@
+ def key(value):
++    value = value.strip()
+     return value.lower()
