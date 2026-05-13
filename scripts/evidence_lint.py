@@ -168,8 +168,18 @@ def build_evidence_lint_report(
     strict: bool = False,
     generated_at_utc: str | None = None,
 ) -> dict[str, Any]:
-    resolved_graph = dict(graph) if isinstance(graph, Mapping) else build_evidence_graph(root=root, workspace_id=workspace_id)
-    generated_at = generated_at_utc or timestamp_utc()
+    generated_at = generated_at_utc or (
+        _clean_text(graph.get("generated_at_utc")) if isinstance(graph, Mapping) else None
+    ) or timestamp_utc()
+    resolved_graph = (
+        dict(graph)
+        if isinstance(graph, Mapping)
+        else build_evidence_graph(
+            root=root,
+            workspace_id=workspace_id,
+            generated_at_utc=generated_at,
+        )
+    )
     issues: list[dict[str, Any]] = []
 
     for schema_issue in validate_evidence_graph_snapshot(resolved_graph):

@@ -158,6 +158,36 @@ class EvidenceGraphTests(unittest.TestCase):
         self.assertTrue(any(edge["relation_kind"] == "evaluates" for edge in graph["edges"]))
         self.assertTrue(relations)
 
+    def test_graph_validator_rejects_missing_required_fields(self) -> None:
+        graph = build_evidence_graph(events=[], generated_at_utc="2026-05-12T00:00:00+00:00")
+        graph["nodes"] = [
+            {
+                "node_id": "node_event_bad",
+                "node_kind": "event",
+                "support_class": "source_linked_prior",
+                "can_support_decision": True,
+                "polarity": "positive",
+                "quality_status": "verified",
+            }
+        ]
+        graph["edges"] = [
+            {
+                "edge_id": "edge_bad",
+                "from_node_id": "node_event_bad",
+                "to_node_id": "node_event_bad",
+                "relation_kind": "evaluates",
+                "strength": "strong",
+                "causal_validity": "valid",
+                "created_by": "core",
+            }
+        ]
+
+        issue_paths = {issue["path"] for issue in validate_evidence_graph_snapshot(graph)}
+
+        self.assertIn("$.nodes[0].source_id", issue_paths)
+        self.assertIn("$.nodes[0].created_at_utc", issue_paths)
+        self.assertIn("$.edges[0].explanation", issue_paths)
+
     def test_recall_relation_stores_support_class(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -263,6 +293,19 @@ class EvidenceGraphTests(unittest.TestCase):
 
         self.assertTrue(trace["support"]["can_support_decision"])
         self.assertIn("Support class: source_linked_prior", markdown)
+
+    def test_trace_relations_show_opposite_node_for_incoming_artifact_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ref = _captured_ref(root)
+            events = [_event(event_id="event-trace", ref=ref)]
+            graph = build_evidence_graph(events=events, root=root)
+
+            trace = build_evidence_trace("event-trace", graph=graph)
+            markdown = format_evidence_trace_markdown(trace)
+
+        self.assertIn("artifact:", markdown)
+        self.assertNotIn("uses_artifact valid event:event-trace", markdown)
 
     def test_target_identity_hashes_paths_hunks_and_issue_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

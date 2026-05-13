@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -127,6 +128,24 @@ class EvidenceLintTests(unittest.TestCase):
         self.assertEqual(report["verdict"], "pass")
         self.assertEqual(report["hard_fail_count"], 0)
         self.assertTrue(report["exit_gate"]["support_kernel_decisions_match_graph_nodes"])
+
+    def test_lint_passes_generated_at_to_internally_built_graph(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_build_evidence_graph(**kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            graph = _graph([])
+            graph["generated_at_utc"] = kwargs["generated_at_utc"]
+            return graph
+
+        with patch("evidence_lint.build_evidence_graph", side_effect=fake_build_evidence_graph):
+            report = build_evidence_lint_report(
+                strict=True,
+                generated_at_utc="2026-05-12T00:00:00+00:00",
+            )
+
+        self.assertEqual(captured["generated_at_utc"], "2026-05-12T00:00:00+00:00")
+        self.assertEqual(report["generated_at_utc"], "2026-05-12T00:00:00+00:00")
 
     def test_missing_source_positive_support_fails_lint(self) -> None:
         graph = _graph(

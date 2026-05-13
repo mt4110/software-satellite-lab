@@ -1418,10 +1418,20 @@ def validate_evidence_graph_snapshot(graph: Mapping[str, Any]) -> list[dict[str,
         issues.append({"path": "$.schema_name", "message": "Unexpected evidence graph schema name."})
     if graph.get("schema_version") != EVIDENCE_GRAPH_SCHEMA_VERSION:
         issues.append({"path": "$.schema_version", "message": "Unsupported evidence graph schema version."})
+    if _clean_text(graph.get("workspace_id")) is None:
+        issues.append({"path": "$.workspace_id", "message": "Workspace id is required."})
+    if _clean_text(graph.get("generated_at_utc")) is None:
+        issues.append({"path": "$.generated_at_utc", "message": "Graph generation timestamp is required."})
     if graph.get("derived") is not True:
         issues.append({"path": "$.derived", "message": "Evidence graph must be marked derived."})
     if graph.get("rebuildable") is not True:
         issues.append({"path": "$.rebuildable", "message": "Evidence graph must be marked rebuildable."})
+    if not isinstance(graph.get("target_identity_model"), Mapping):
+        issues.append({"path": "$.target_identity_model", "message": "Target identity model is required."})
+    if not isinstance(graph.get("counts"), Mapping):
+        issues.append({"path": "$.counts", "message": "Graph counts must be an object."})
+    if _clean_text(graph.get("graph_digest")) is None:
+        issues.append({"path": "$.graph_digest", "message": "Graph digest is required."})
     policy = _mapping_dict(graph.get("source_of_truth_policy"))
     for key in (
         "graph_is_derived",
@@ -1431,7 +1441,12 @@ def validate_evidence_graph_snapshot(graph: Mapping[str, Any]) -> list[dict[str,
         "does_not_edit_comparison_records",
     ):
         if policy.get(key) is not True:
-            issues.append({"path": f"$.source_of_truth_policy.{key}", "message": "Source-of-truth policy flag must be true."})
+            issues.append(
+                {
+                    "path": f"$.source_of_truth_policy.{key}",
+                    "message": "Source-of-truth policy flag must be true.",
+                }
+            )
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     if not isinstance(nodes, list):
@@ -1447,37 +1462,78 @@ def validate_evidence_graph_snapshot(graph: Mapping[str, Any]) -> list[dict[str,
             continue
         node_id = _clean_text(node.get("node_id"))
         node_kind = _clean_text(node.get("node_kind"))
+        source_id = _clean_text(node.get("source_id"))
         if node_id is None:
             issues.append({"path": f"$.nodes[{index}].node_id", "message": "Node id is required."})
         elif node_id in node_ids:
             issues.append({"path": f"$.nodes[{index}].node_id", "message": "Node id must be unique."})
         else:
             node_ids.add(node_id)
+        if source_id is None:
+            issues.append({"path": f"$.nodes[{index}].source_id", "message": "Node source id is required."})
         if node_kind not in NODE_KINDS:
             issues.append({"path": f"$.nodes[{index}].node_kind", "message": "Unsupported node kind."})
         if _clean_text(node.get("support_class")) not in SUPPORT_CLASSES:
             issues.append({"path": f"$.nodes[{index}].support_class", "message": "Unsupported support class."})
         if not isinstance(node.get("can_support_decision"), bool):
-            issues.append({"path": f"$.nodes[{index}].can_support_decision", "message": "Decision support flag must be a boolean."})
+            issues.append(
+                {
+                    "path": f"$.nodes[{index}].can_support_decision",
+                    "message": "Decision support flag must be a boolean.",
+                }
+            )
         if _clean_text(node.get("polarity")) not in POLARITIES:
             issues.append({"path": f"$.nodes[{index}].polarity", "message": "Unsupported polarity."})
         if _clean_text(node.get("quality_status")) not in QUALITY_STATUSES:
             issues.append({"path": f"$.nodes[{index}].quality_status", "message": "Unsupported quality status."})
+        if "created_at_utc" not in node:
+            issues.append(
+                {
+                    "path": f"$.nodes[{index}].created_at_utc",
+                    "message": "Node creation timestamp is required.",
+                }
+            )
+        elif node.get("created_at_utc") is not None and not isinstance(node.get("created_at_utc"), str):
+            issues.append(
+                {
+                    "path": f"$.nodes[{index}].created_at_utc",
+                    "message": "Node creation timestamp must be a string or null.",
+                }
+            )
+        if (
+            "target_fingerprint" in node
+            and node.get("target_fingerprint") is not None
+            and not isinstance(node.get("target_fingerprint"), str)
+        ):
+            issues.append(
+                {
+                    "path": f"$.nodes[{index}].target_fingerprint",
+                    "message": "Target fingerprint must be a string or null.",
+                }
+            )
+        if "metadata" in node and not isinstance(node.get("metadata"), Mapping):
+            issues.append({"path": f"$.nodes[{index}].metadata", "message": "Node metadata must be an object."})
     edge_ids: set[str] = set()
     for index, edge in enumerate(edges):
         if not isinstance(edge, Mapping):
             issues.append({"path": f"$.edges[{index}]", "message": "Edge must be an object."})
             continue
         edge_id = _clean_text(edge.get("edge_id"))
+        from_node_id = _clean_text(edge.get("from_node_id"))
+        to_node_id = _clean_text(edge.get("to_node_id"))
         if edge_id is None:
             issues.append({"path": f"$.edges[{index}].edge_id", "message": "Edge id is required."})
         elif edge_id in edge_ids:
             issues.append({"path": f"$.edges[{index}].edge_id", "message": "Edge id must be unique."})
         else:
             edge_ids.add(edge_id)
-        if _clean_text(edge.get("from_node_id")) not in node_ids:
+        if from_node_id is None:
+            issues.append({"path": f"$.edges[{index}].from_node_id", "message": "Edge source node id is required."})
+        elif from_node_id not in node_ids:
             issues.append({"path": f"$.edges[{index}].from_node_id", "message": "Edge source node is missing."})
-        if _clean_text(edge.get("to_node_id")) not in node_ids:
+        if to_node_id is None:
+            issues.append({"path": f"$.edges[{index}].to_node_id", "message": "Edge target node id is required."})
+        elif to_node_id not in node_ids:
             issues.append({"path": f"$.edges[{index}].to_node_id", "message": "Edge target node is missing."})
         if _clean_text(edge.get("relation_kind")) not in RELATION_KINDS:
             issues.append({"path": f"$.edges[{index}].relation_kind", "message": "Unsupported relation kind."})
@@ -1487,6 +1543,10 @@ def validate_evidence_graph_snapshot(graph: Mapping[str, Any]) -> list[dict[str,
             issues.append({"path": f"$.edges[{index}].causal_validity", "message": "Unsupported causal validity."})
         if _clean_text(edge.get("created_by")) not in EDGE_CREATORS:
             issues.append({"path": f"$.edges[{index}].created_by", "message": "Unsupported edge creator."})
+        if not isinstance(edge.get("explanation"), str):
+            issues.append({"path": f"$.edges[{index}].explanation", "message": "Edge explanation is required."})
+        if "metadata" in edge and not isinstance(edge.get("metadata"), Mapping):
+            issues.append({"path": f"$.edges[{index}].metadata", "message": "Edge metadata must be an object."})
     return issues
 
 
@@ -1631,9 +1691,18 @@ def format_evidence_trace_markdown(trace: Mapping[str, Any]) -> str:
     }
     if related_edges:
         lines.extend(("", "## Relations", ""))
+        event_node_id = _clean_text(_mapping_dict(trace.get("event_node")).get("node_id"))
         for edge in related_edges[:20]:
-            other_id = edge.get("to_node_id")
-            other = _mapping_dict(related_nodes.get(other_id)) or _mapping_dict(related_nodes.get(edge.get("from_node_id")))
+            from_node_id = edge.get("from_node_id")
+            to_node_id = edge.get("to_node_id")
+            if event_node_id is not None and from_node_id == event_node_id:
+                other_id = to_node_id
+            elif event_node_id is not None and to_node_id == event_node_id:
+                other_id = from_node_id
+            else:
+                other_id = to_node_id
+            fallback_id = from_node_id if other_id == to_node_id else to_node_id
+            other = _mapping_dict(related_nodes.get(other_id)) or _mapping_dict(related_nodes.get(fallback_id))
             support_class = _clean_text(edge.get("support_class"))
             support_suffix = f"; support={support_class}" if support_class else ""
             lines.append(
