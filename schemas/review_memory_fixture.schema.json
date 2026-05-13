@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Review Memory Fixture Suite",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "suite_id",
+    "suite_kind",
+    "fixtures"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-review-memory-fixture-suite"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "suite_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "suite_kind": {
+      "enum": ["synthetic", "dogfood"]
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "fixture_id",
+          "category",
+          "description",
+          "query",
+          "review_started_at_utc",
+          "current_event",
+          "expected"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "fixture_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "enum": [
+              "true_prior_failure",
+              "true_prior_repair",
+              "no_prior_evidence",
+              "self_recall_trap",
+              "future_evidence_trap",
+              "missing_source_trap",
+              "modified_source_trap",
+              "weak_text_match_trap",
+              "contradictory_verdict_trap",
+              "agent_claim_trap",
+              "secret_redaction",
+              "huge_diff",
+              "binary_artifact"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "requested_polarity": {
+            "enum": ["positive", "negative", "risk", "diagnostic", "none"]
+          },
+          "review_started_at_utc": {
+            "type": "string"
+          },
+          "current_event": {
+            "type": "object",
+            "required": ["event_id", "target_paths"],
+            "additionalProperties": true,
+            "properties": {
+              "event_id": { "type": "string" },
+              "target_paths": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          },
+          "candidate_events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["event_id"],
+              "additionalProperties": true,
+              "properties": {
+                "event_id": { "type": "string" },
+                "recorded_at_utc": { "type": "string" },
+                "status": { "type": "string" },
+                "quality_status": { "type": ["string", "null"] },
+                "execution_status": { "type": "string" },
+                "session_surface": { "type": "string" },
+                "event_kind": { "type": "string" },
+                "artifact_kind": {
+                  "enum": [
+                    "patch",
+                    "test_log",
+                    "transcript",
+                    "review_note",
+                    "candidate_output",
+                    "source_file",
+                    "ci_log",
+                    "unknown"
+                  ]
+                },
+                "artifact_behavior": {
+                  "enum": [
+                    "captured",
+                    "missing_source",
+                    "modified_source",
+                    "original_source_modified",
+                    "binary_refused",
+                    "no_ref"
+                  ]
+                },
+                "source_path": { "type": "string" },
+                "source_text": { "type": "string" },
+                "target_paths": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "evidence_types": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "notes": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "tags": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "expected": {
+                  "type": "object",
+                  "required": ["support", "useful"],
+                  "additionalProperties": true,
+                  "properties": {
+                    "support": { "type": "boolean" },
+                    "useful": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "requires_support": { "type": "boolean" },
+              "support_polarity": {
+                "enum": ["positive", "negative", "risk", "diagnostic", "none"]
+              },
+              "no_strong_evidence": { "type": "boolean" },
+              "requires_redaction": { "type": "boolean" },
+              "max_report_excerpt_chars": { "type": "integer" },
+              "requires_truncation_marker": { "type": "boolean" },
+              "miss_reason": {
+                "enum": [
+                  "lexical_miss",
+                  "structured_filter_miss",
+                  "target_identity_miss",
+                  "source_integrity_blocked",
+                  "weak_match_overfiltered",
+                  "contradiction_unresolved",
+                  "missing_human_signal",
+                  "fixture_design_error",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

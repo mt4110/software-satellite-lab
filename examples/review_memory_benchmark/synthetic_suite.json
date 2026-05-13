@@ -1,0 +1,444 @@
+{
+  "schema_name": "software-satellite-review-memory-fixture-suite",
+  "schema_version": 1,
+  "suite_id": "m12-synthetic-adversarial-review-memory",
+  "suite_kind": "synthetic",
+  "fixtures": [
+    {
+      "fixture_id": "true-prior-failure-auth-cache",
+      "category": "true_prior_failure",
+      "description": "A prior source-linked failure on the same target should be recalled as risk evidence.",
+      "query": "review auth cache regression scripts/auth_cache.py prior failure test fail",
+      "requested_polarity": "risk",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:true-prior-failure:current",
+        "target_paths": ["scripts/auth_cache.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:true-prior-failure:prior",
+          "recorded_at_utc": "2026-05-10T09:00:00+00:00",
+          "status": "failed",
+          "quality_status": "fail",
+          "artifact_kind": "test_log",
+          "artifact_behavior": "captured",
+          "source_path": "sources/auth-cache-failure.log",
+          "source_text": "FAILED tests/test_auth_cache.py::test_stale_token\nscripts/auth_cache.py reused a cached credential after key rotation.\n",
+          "target_paths": ["scripts/auth_cache.py"],
+          "evidence_types": ["test_fail", "failure"],
+          "notes": ["risk_signal", "source linked prior failure"],
+          "expected": {
+            "support": true,
+            "useful": true
+          }
+        }
+      ],
+      "expected": {
+        "requires_support": true,
+        "support_polarity": "risk"
+      }
+    },
+    {
+      "fixture_id": "true-prior-repair-pack-audit",
+      "category": "true_prior_repair",
+      "description": "A prior source-linked repair should be recalled as positive evidence.",
+      "query": "review pack audit repair schemas/satellite_pack_audit.schema.json verification pass",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:true-prior-repair:current",
+        "target_paths": ["schemas/satellite_pack_audit.schema.json"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:true-prior-repair:prior",
+          "recorded_at_utc": "2026-05-09T14:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "review_note",
+          "artifact_behavior": "captured",
+          "source_path": "sources/pack-audit-repair.md",
+          "source_text": "Repair accepted: schemas/satellite_pack_audit.schema.json now rejects undeclared pack permissions and passes local schema checks.\n",
+          "target_paths": ["schemas/satellite_pack_audit.schema.json"],
+          "evidence_types": ["verification_pass", "human_acceptance"],
+          "notes": ["accepted_signal", "repair evidence"],
+          "expected": {
+            "support": true,
+            "useful": true
+          }
+        }
+      ],
+      "expected": {
+        "requires_support": true,
+        "support_polarity": "positive"
+      }
+    },
+    {
+      "fixture_id": "no-prior-evidence-new-parser",
+      "category": "no_prior_evidence",
+      "description": "A new target with no prior records should report no strong evidence.",
+      "query": "review brand new parser scripts/new_parser.py no prior evidence",
+      "requested_polarity": "risk",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:no-prior:current",
+        "target_paths": ["scripts/new_parser.py"]
+      },
+      "candidate_events": [],
+      "expected": {
+        "no_strong_evidence": true
+      }
+    },
+    {
+      "fixture_id": "self-recall-current-patch",
+      "category": "self_recall_trap",
+      "description": "The current patch must not be usable as its own support.",
+      "query": "review current patch scripts/review_memory_eval.py support self recall",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:self-recall:current",
+        "target_paths": ["scripts/review_memory_eval.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:self-recall:current",
+          "recorded_at_utc": "2026-05-12T09:59:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "patch",
+          "artifact_behavior": "captured",
+          "source_path": "sources/current.patch",
+          "source_text": "diff --git a/scripts/review_memory_eval.py b/scripts/review_memory_eval.py\n+current patch says it is correct\n",
+          "target_paths": ["scripts/review_memory_eval.py"],
+          "evidence_types": ["verification_pass"],
+          "notes": ["current review subject"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "target_identity_miss"
+      }
+    },
+    {
+      "fixture_id": "future-evidence-after-review",
+      "category": "future_evidence_trap",
+      "description": "Evidence recorded after review start must not support the earlier review.",
+      "query": "review evidence lint future support scripts/evidence_lint.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:future:current",
+        "target_paths": ["scripts/evidence_lint.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:future:later-pass",
+          "recorded_at_utc": "2026-05-12T11:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "ci_log",
+          "artifact_behavior": "captured",
+          "source_path": "sources/future-ci.log",
+          "source_text": "PASS tests/test_evidence_lint.py after the review had already started.\n",
+          "target_paths": ["scripts/evidence_lint.py"],
+          "evidence_types": ["test_pass"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "target_identity_miss"
+      }
+    },
+    {
+      "fixture_id": "missing-source-positive-trap",
+      "category": "missing_source_trap",
+      "description": "A missing source ref must not become positive support.",
+      "query": "review recall context source missing scripts/recall_context.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:missing-source:current",
+        "target_paths": ["scripts/recall_context.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:missing-source:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "review_note",
+          "artifact_behavior": "missing_source",
+          "source_path": "sources/deleted-review-note.md",
+          "target_paths": ["scripts/recall_context.py"],
+          "evidence_types": ["human_acceptance"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "source_integrity_blocked"
+      }
+    },
+    {
+      "fixture_id": "modified-source-positive-trap",
+      "category": "modified_source_trap",
+      "description": "A checksum-mismatched artifact object must not become positive support.",
+      "query": "review artifact vault modified source scripts/artifact_vault.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:modified-source:current",
+        "target_paths": ["scripts/artifact_vault.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:modified-source:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "review_note",
+          "artifact_behavior": "modified_source",
+          "source_path": "sources/artifact-vault-acceptance.md",
+          "source_text": "Accepted artifact_vault.py behavior before the vault object was modified.\n",
+          "target_paths": ["scripts/artifact_vault.py"],
+          "evidence_types": ["human_acceptance"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "source_integrity_blocked"
+      }
+    },
+    {
+      "fixture_id": "weak-text-match-trap",
+      "category": "weak_text_match_trap",
+      "description": "Similar words without source-valid relevance must not support.",
+      "query": "review memory index token overlap scripts/memory_index.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:weak-match:current",
+        "target_paths": ["scripts/memory_index.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:weak-match:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "review_note",
+          "artifact_behavior": "captured",
+          "source_path": "sources/weak-word-match.md",
+          "source_text": "The words memory index review appear here, but this note is about dashboard copy and has no decision-relevant proof.\n",
+          "target_paths": ["scripts/memory_index.py"],
+          "evidence_types": ["human_acceptance"],
+          "notes": ["weak_match", "text_only_match"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "weak_match_overfiltered"
+      }
+    },
+    {
+      "fixture_id": "contradictory-verdict-trap",
+      "category": "contradictory_verdict_trap",
+      "description": "Unresolved contradictory evidence blocks support.",
+      "query": "review evidence graph contradictory verdict scripts/evidence_graph.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:contradictory:current",
+        "target_paths": ["scripts/evidence_graph.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:contradictory:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "mixed",
+          "quality_status": "pass",
+          "artifact_kind": "review_note",
+          "artifact_behavior": "captured",
+          "source_path": "sources/contradictory.md",
+          "source_text": "One run passed evidence_graph.py, another run failed the same target. No human resolution is recorded.\n",
+          "target_paths": ["scripts/evidence_graph.py"],
+          "evidence_types": ["test_pass", "test_fail"],
+          "notes": ["contradictory"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "contradiction_unresolved"
+      }
+    },
+    {
+      "fixture_id": "agent-claim-without-proof",
+      "category": "agent_claim_trap",
+      "description": "A transcript saying success without command or CI proof must not support.",
+      "query": "review doctor agent claim scripts/doctor.py success transcript",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:agent-claim:current",
+        "target_paths": ["scripts/doctor.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:agent-claim:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "ok",
+          "quality_status": null,
+          "session_surface": "agent_lane",
+          "event_kind": "agent_task_run",
+          "artifact_kind": "transcript",
+          "artifact_behavior": "captured",
+          "source_path": "sources/agent-transcript.txt",
+          "source_text": "The agent transcript claims scripts/doctor.py is fixed, but no command output or CI artifact is attached.\n",
+          "target_paths": ["scripts/doctor.py"],
+          "notes": ["agent_claim"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "missing_human_signal"
+      }
+    },
+    {
+      "fixture_id": "secret-redaction-risk-evidence",
+      "category": "secret_redaction",
+      "description": "Secret-like content must be redacted while preserving support classification.",
+      "query": "review git intake redaction scripts/git_work_intake.py token failure",
+      "requested_polarity": "risk",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:secret-redaction:current",
+        "target_paths": ["scripts/git_work_intake.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:secret-redaction:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "failed",
+          "quality_status": "fail",
+          "artifact_kind": "test_log",
+          "artifact_behavior": "captured",
+          "source_path": "sources/redaction-failure.log",
+          "source_text": "FAILED tests/test_git_work_intake.py::test_redacts_tokens\nTOKEN=sk-testsecret0000000000000000\nscripts/git_work_intake.py leaked a token in a captured diff.\n",
+          "target_paths": ["scripts/git_work_intake.py"],
+          "evidence_types": ["test_fail", "failure"],
+          "notes": ["risk_signal", "secret redaction"],
+          "expected": {
+            "support": true,
+            "useful": true
+          }
+        }
+      ],
+      "expected": {
+        "requires_support": true,
+        "support_polarity": "risk",
+        "requires_redaction": true
+      }
+    },
+    {
+      "fixture_id": "huge-diff-bounded-report",
+      "category": "huge_diff",
+      "description": "Huge diffs stay bounded and marked truncated.",
+      "query": "review huge diff scripts/run_long_context_demo.py",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:huge-diff:current",
+        "target_paths": ["scripts/run_long_context_demo.py"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:huge-diff:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "patch",
+          "artifact_behavior": "captured",
+          "source_path": "sources/huge.patch",
+          "max_capture_bytes": 200,
+          "report_excerpt_chars": 160,
+          "source_text": "diff --git a/scripts/run_long_context_demo.py b/scripts/run_long_context_demo.py\n+++ b/scripts/run_long_context_demo.py\n+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+          "target_paths": ["scripts/run_long_context_demo.py"],
+          "evidence_types": ["human_acceptance"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "max_report_excerpt_chars": 180,
+        "requires_truncation_marker": true,
+        "miss_reason": "source_integrity_blocked"
+      }
+    },
+    {
+      "fixture_id": "binary-artifact-refused",
+      "category": "binary_artifact",
+      "description": "Binary bodies are refused safely and cannot support.",
+      "query": "review binary artifact assets/image/sample_image.svg",
+      "requested_polarity": "positive",
+      "review_started_at_utc": "2026-05-12T10:00:00+00:00",
+      "current_event": {
+        "event_id": "fixture:binary:current",
+        "target_paths": ["assets/image/sample_image.svg"]
+      },
+      "candidate_events": [
+        {
+          "event_id": "fixture:binary:prior",
+          "recorded_at_utc": "2026-05-10T10:00:00+00:00",
+          "status": "accepted",
+          "quality_status": "pass",
+          "artifact_kind": "source_file",
+          "artifact_behavior": "binary_refused",
+          "source_path": "sources/screenshot.bin",
+          "binary_hex": "000102030405ff",
+          "target_paths": ["assets/image/sample_image.svg"],
+          "evidence_types": ["human_acceptance"],
+          "expected": {
+            "support": false,
+            "useful": false
+          }
+        }
+      ],
+      "expected": {
+        "no_strong_evidence": true,
+        "miss_reason": "source_integrity_blocked"
+      }
+    }
+  ]
+}

@@ -50,6 +50,12 @@ from demand_validation import (
 )
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
 from review_benchmark import format_review_benchmark_report, run_review_benchmark
+from review_memory_eval import (
+    format_review_memory_eval_report,
+    format_review_memory_miss_report,
+    load_or_build_review_memory_miss_report,
+    run_review_memory_eval,
+)
 from satellite_pack import (
     PackManifestError,
     audit_pack_path,
@@ -303,9 +309,33 @@ def build_parser() -> argparse.ArgumentParser:
     review_verdict_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     review_verdict_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
+    review_eval_parser = review_subparsers.add_parser(
+        "eval",
+        help="Run adversarial review-memory fixtures against the local evidence support gates.",
+    )
+    review_eval_parser.add_argument("--suite", type=Path, default=None, help="Fixture suite file or directory.")
+    review_eval_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    review_eval_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    review_miss_parser = review_subparsers.add_parser(
+        "miss-report",
+        help="Print the latest review-memory benchmark miss report.",
+    )
+    review_miss_source = review_miss_parser.add_mutually_exclusive_group()
+    review_miss_source.add_argument("--latest", action="store_true", help="Use the latest review-memory eval artifact.")
+    review_miss_source.add_argument("--eval", type=Path, default=None, help="Eval JSON artifact to summarize.")
+    review_miss_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    review_miss_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
     review_benchmark_parser = review_subparsers.add_parser(
         "benchmark",
         help="Run deterministic evidence-gate benchmark fixtures.",
+    )
+    review_benchmark_parser.add_argument("--suite", type=Path, default=None, help="M12 fixture suite for --spartan.")
+    review_benchmark_parser.add_argument(
+        "--spartan",
+        action="store_true",
+        help="Run the M12 adversarial review-memory benchmark.",
     )
     review_benchmark_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     review_benchmark_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
@@ -729,7 +759,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(format_verdict_result(result))
         return 0
 
+    if args.command == "review" and args.review_command == "eval":
+        try:
+            report = run_review_memory_eval(
+                suite=args.suite,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_review_memory_eval_report(report))
+        return 0 if report.get("passed") else 1
+
+    if args.command == "review" and args.review_command == "miss-report":
+        latest = args.latest or args.eval is None
+        try:
+            report = load_or_build_review_memory_miss_report(
+                latest=latest,
+                eval_path=args.eval,
+                workspace_id=args.workspace_id,
+                root=args.root,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_review_memory_miss_report(report))
+        return 0 if float(report.get("miss_report_coverage") or 0.0) >= 1.0 else 1
+
     if args.command == "review" and args.review_command == "benchmark":
+        if args.spartan:
+            try:
+                report = run_review_memory_eval(
+                    suite=args.suite,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                    spartan=True,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(format_review_memory_eval_report(report, spartan=True))
+            return 0 if report.get("passed") else 1
         report = run_review_benchmark(workspace_id=args.workspace_id)
         if args.format == "json":
             print(json.dumps(report, ensure_ascii=False, indent=2))
