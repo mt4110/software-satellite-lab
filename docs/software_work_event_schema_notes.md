@@ -36,6 +36,8 @@ Events may point at local source files or logs, so portable exports should carry
 
 ### Examples
 
+Additional public examples live in `examples/software_work_events/`.
+
 ```json
 {
   "schema_name": "software-satellite-event",
@@ -54,7 +56,7 @@ Events may point at local source files or logs, so portable exports should carry
 
 ### Known gaps
 
-There is not yet a standalone JSON Schema file for this event shape; the runtime contract and event-contract report are the current source of truth.
+There is not yet a standalone JSON Schema file for this event shape; the runtime contract, event-contract report, and public example gallery are the current source of truth.
 
 ## artifact_ref
 
@@ -361,4 +363,4 @@ Packs may read only selected local roots, refuse links, block missing sources, a
 
 ### Known gaps
 
-There is no arbitrary command runtime, marketplace, network tier, or trainable export path in v1. Those are deferred until audit and consent models are stronger.
+There is no arbitrary command runtime, marketplace, network tier, or trainable export path in v1. Those are deferred until audit and consent models are stronger. Public contributor guidance and the schema compatibility matrix live in `docs/evidence_pack_contributor_guide.md` and `docs/schema_changelog_and_compatibility.md`.

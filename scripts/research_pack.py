@@ -44,6 +44,19 @@ BENCHMARK_FIXTURE_SOURCES = (
     "templates/failure-memory-pack.satellite.yaml",
     "templates/agent-session-pack.satellite.yaml",
 )
+CONTRIBUTOR_MATERIAL_SOURCES = (
+    "docs/evidence_pack_contributor_guide.md",
+    "docs/schema_changelog_and_compatibility.md",
+    "examples/software_work_events/README.md",
+    "examples/software_work_events/patch_input_needs_review.json",
+    "examples/software_work_events/prior_failure_risk.json",
+    "examples/software_work_events/verification_pass.json",
+    "examples/software_work_events/human_verdict_reject.json",
+    "examples/software_work_events/sources/cache.patch",
+    "examples/software_work_events/sources/cache_failure.txt",
+    "examples/software_work_events/sources/cache_verification.txt",
+    "examples/software_work_events/sources/review_verdict.md",
+)
 STRICT_PACKS = (
     "templates/failure-memory-pack.satellite.yaml",
     "templates/agent-session-pack.satellite.yaml",
@@ -58,6 +71,17 @@ REQUIRED_RESEARCH_PACK_FILES = (
     "benchmark_fixtures/examples/review_memory_benchmark/synthetic_suite.json",
     "benchmark_fixtures/templates/agent-session-pack.satellite.yaml",
     "benchmark_fixtures/templates/failure-memory-pack.satellite.yaml",
+    "contributor_materials/docs/evidence_pack_contributor_guide.md",
+    "contributor_materials/docs/schema_changelog_and_compatibility.md",
+    "contributor_materials/examples/software_work_events/README.md",
+    "contributor_materials/examples/software_work_events/patch_input_needs_review.json",
+    "contributor_materials/examples/software_work_events/prior_failure_risk.json",
+    "contributor_materials/examples/software_work_events/verification_pass.json",
+    "contributor_materials/examples/software_work_events/human_verdict_reject.json",
+    "contributor_materials/examples/software_work_events/sources/cache.patch",
+    "contributor_materials/examples/software_work_events/sources/cache_failure.txt",
+    "contributor_materials/examples/software_work_events/sources/cache_verification.txt",
+    "contributor_materials/examples/software_work_events/sources/review_verdict.md",
     "benchmark_results.json",
     "evidence_graph_snapshot.json",
     "evidence_lint_report.md",
@@ -163,7 +187,15 @@ def _copy_public_sources(root: Path, pack_dir: Path) -> dict[str, list[str]]:
         _copy_source_file(root, source, pack_dir / "benchmark_fixtures")
         for source in BENCHMARK_FIXTURE_SOURCES
     ]
-    return {"demo_artifacts": demo_files, "benchmark_fixtures": benchmark_files}
+    contributor_files = [
+        _copy_source_file(root, source, pack_dir / "contributor_materials")
+        for source in CONTRIBUTOR_MATERIAL_SOURCES
+    ]
+    return {
+        "demo_artifacts": demo_files,
+        "benchmark_fixtures": benchmark_files,
+        "contributor_materials": contributor_files,
+    }
 
 
 def _stable_benchmark_results(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -267,10 +299,13 @@ def _research_pack_readme() -> str:
             PROJECT_SUMMARY_SENTENCE,
             "",
             "This pack contains public fixtures, deterministic benchmark summaries, "
-            "schema coverage, and gate reports for external inspection.",
+            "schema coverage, contributor materials, and gate reports for external inspection.",
             "",
             "Default reproduction uses local files only: no private design notes, "
             "no API key, no network calls, and no trainable export artifacts.",
+            "",
+            "Start with `contributor_materials/docs/evidence_pack_contributor_guide.md` "
+            "when reviewing or proposing Evidence Pack changes.",
             "",
         ]
     )

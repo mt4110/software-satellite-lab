@@ -78,6 +78,9 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench strategy hardening and two-week implementation design
 - `docs/release_v0_1_candidate.md`: v0.1 release candidate setup, gates, and limitations
 - `docs/public_demo_walkthrough.md`: no-provider public demo transcript
+- `docs/evidence_pack_contributor_guide.md`: public contributor guide for Evidence Packs
+- `docs/schema_changelog_and_compatibility.md`: core schema changelog and compatibility matrix
+- `examples/software_work_events/`: public `software_work_event` example gallery
 
 ## Evidence-Gated Git Review
 
@@ -177,8 +180,12 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py release check --strict
 .venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
 .venv/bin/python scripts/satlab.py demand gate --format md
+.venv/bin/python scripts/satlab.py pack list --builtin
+.venv/bin/python scripts/satlab.py pack scaffold --kind failure-memory --output scratch/failure-memory-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/satlab.py pack test templates/failure-memory-pack.satellite.yaml --strict
+.venv/bin/python scripts/satlab.py research pack --output artifacts/research_pack
 .venv/bin/python scripts/run_public_demo_checks.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke

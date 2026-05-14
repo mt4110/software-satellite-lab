@@ -1,0 +1,4 @@
+diff --git a/app/cache.py b/app/cache.py
+@@
++def normalize_cache_key(value):
++    return value.strip().lower()

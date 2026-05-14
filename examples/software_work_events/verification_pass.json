@@ -1,0 +1,39 @@
+{
+  "schema_name": "software-satellite-event",
+  "schema_version": 1,
+  "event_id": "gallery:verification-pass",
+  "event_kind": "verification",
+  "recorded_at_utc": "2026-05-14T00:05:00+00:00",
+  "workspace": {
+    "workspace_id": "public-gallery"
+  },
+  "session": {
+    "session_id": "gallery-session",
+    "surface": "cli"
+  },
+  "outcome": {
+    "status": "accepted",
+    "quality_status": "pass",
+    "execution_status": "completed"
+  },
+  "content": {
+    "summary": "Local cache tests passed after adding the stale-key case.",
+    "notes": [
+      "Positive support still depends on target identity and review timing."
+    ]
+  },
+  "source_refs": {
+    "artifact_ref": {
+      "artifact_path": "examples/software_work_events/sources/cache_verification.txt",
+      "artifact_kind": "test_log"
+    }
+  },
+  "target_paths": [
+    "app/cache.py"
+  ],
+  "tags": [
+    "gallery",
+    "verification",
+    "positive-evidence"
+  ]
+}

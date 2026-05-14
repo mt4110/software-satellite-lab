@@ -77,6 +77,9 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench の戦略ハードニングと2週間実装設計
 - `docs/release_v0_1_candidate.md`: v0.1 release candidate の再現手順、gate、制約
 - `docs/public_demo_walkthrough.md`: no-provider public demo のテキスト transcript
+- `docs/evidence_pack_contributor_guide.md`: Evidence Pack 外部コントリビューター向けの公開ガイド
+- `docs/schema_changelog_and_compatibility.md`: core schema の changelog と互換性 matrix
+- `examples/software_work_events/`: 公開 `software_work_event` example gallery
 
 ## Evidence-Gated Git Review
 
@@ -176,8 +179,12 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py release check --strict
 .venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
 .venv/bin/python scripts/satlab.py demand gate --format md
+.venv/bin/python scripts/satlab.py pack list --builtin
+.venv/bin/python scripts/satlab.py pack scaffold --kind failure-memory --output scratch/failure-memory-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
+.venv/bin/python scripts/satlab.py pack test templates/failure-memory-pack.satellite.yaml --strict
+.venv/bin/python scripts/satlab.py research pack --output artifacts/research_pack
 .venv/bin/python scripts/run_public_demo_checks.py
 .venv/bin/python scripts/run_local_ui.py
 .venv/bin/python scripts/run_capability_matrix.py --smoke

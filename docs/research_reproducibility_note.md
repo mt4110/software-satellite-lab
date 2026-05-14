@@ -17,6 +17,7 @@ The research pack writes a timestamped run directory and refreshes `artifacts/re
 - `README.md`: one-sentence project summary plus guardrails.
 - `demo_artifacts/`: public demo docs and demand-gate fixture.
 - `benchmark_fixtures/`: public review-memory fixture suite and built-in Evidence Pack manifests.
+- `contributor_materials/`: Evidence Pack contributor guide, schema compatibility matrix, and public `software_work_event` gallery.
 - `benchmark_results.json`: stable summary of deterministic benchmark outcomes.
 - `evidence_graph_snapshot.json`: derived graph snapshot for the public fixture scope.
 - `evidence_lint_report.md`: local evidence lint result.
