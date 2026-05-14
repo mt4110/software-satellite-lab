@@ -86,6 +86,12 @@ from release_candidate_checks import (
     format_release_candidate_report_markdown,
     record_release_candidate_report,
 )
+from research_pack import (
+    build_research_pack,
+    format_reproduction_report,
+    format_research_pack_result,
+    reproduce_research_pack,
+)
 from review_benchmark import format_review_benchmark_report, run_review_benchmark
 from review_memory_eval import (
     format_review_memory_eval_report,
@@ -100,6 +106,7 @@ from satellite_pack import (
     format_pack_inspection_report,
     inspect_pack_path,
 )
+from schema_coverage import build_schema_coverage_report, format_schema_coverage_report
 from workspace_state import DEFAULT_WORKSPACE_ID
 
 
@@ -648,6 +655,41 @@ def build_parser() -> argparse.ArgumentParser:
     release_demo_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
     release_demo_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     release_demo_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    research_parser = subparsers.add_parser(
+        "research",
+        help="Build and reproduce the public research-quality artifact pack.",
+    )
+    research_subparsers = research_parser.add_subparsers(dest="research_command", required=True)
+    research_pack_parser = research_subparsers.add_parser(
+        "pack",
+        help="Generate the M17 reproducible research pack from public fixtures.",
+    )
+    research_pack_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("artifacts/research_pack"),
+        help="Research pack output root.",
+    )
+    research_pack_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    research_reproduce_parser = research_subparsers.add_parser(
+        "reproduce",
+        help="Reproduce and validate an existing research pack.",
+    )
+    research_reproduce_parser.add_argument("--pack", type=Path, required=True, help="Research pack directory.")
+    research_reproduce_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    schema_parser = subparsers.add_parser(
+        "schema",
+        help="Inspect open schema standardization readiness.",
+    )
+    schema_subparsers = schema_parser.add_subparsers(dest="schema_command", required=True)
+    schema_coverage_parser = schema_subparsers.add_parser(
+        "coverage",
+        help="Report coverage for the M17 core schema candidates.",
+    )
+    schema_coverage_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
 
     demand_parser = subparsers.add_parser(
         "demand",
@@ -1357,6 +1399,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(str(report["markdown"]))
             return 0 if report.get("status") == "pass" else 1
+
+    if args.command == "research":
+        if args.research_command == "pack":
+            try:
+                result = build_research_pack(
+                    output=args.output,
+                    root=args.root,
+                )
+            except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(format_research_pack_result(result))
+            return 0 if result.get("status") == "pass" else 1
+
+        if args.research_command == "reproduce":
+            try:
+                report = reproduce_research_pack(
+                    args.pack,
+                    root=args.root,
+                )
+            except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(format_reproduction_report(report), end="")
+            return 0 if report.get("status") == "pass" else 1
+
+    if args.command == "schema":
+        if args.schema_command == "coverage":
+            report = build_schema_coverage_report(root=args.root)
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(format_schema_coverage_report(report), end="")
+            return 0 if report.get("passed") else 1
 
     if args.command == "demand":
         if args.demand_command == "gate":
