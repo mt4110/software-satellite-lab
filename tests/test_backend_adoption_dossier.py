@@ -165,6 +165,36 @@ def _direct_adoptable_fixture(root: Path) -> tuple[dict, dict[str, dict], str]:
     return comparison, {"event-candidate": candidate_event, "event-baseline": baseline_event}, "candidate-backend"
 
 
+def _recorded_proposal_pair(root: Path) -> tuple[dict, dict]:
+    candidate_path = root / "candidate.txt"
+    baseline_path = root / "baseline.txt"
+    candidate_path.write_text("candidate passed\n", encoding="utf-8")
+    baseline_path.write_text("baseline passed\n", encoding="utf-8")
+    candidate = record_file_input(
+        input_kind="proposal",
+        source_path=candidate_path,
+        status="accepted",
+        backend_id="candidate-backend",
+        backend_display_name="Candidate Backend",
+        backend_adapter_kind="local",
+        model_id="candidate/model",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        root=root,
+    )
+    baseline = record_file_input(
+        input_kind="proposal",
+        source_path=baseline_path,
+        status="accepted",
+        backend_id="baseline-backend",
+        backend_display_name="Baseline Backend",
+        backend_adapter_kind="local",
+        model_id="baseline/model",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        root=root,
+    )
+    return candidate, baseline
+
+
 class BackendAdoptionDossierTests(unittest.TestCase):
     def test_dossier_generated_from_comparison_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -539,6 +569,97 @@ class BackendAdoptionDossierTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["recommendation"]["value"], "adopt")
+
+    def test_satlab_backend_dossier_strict_allows_tie_with_passing_benchmark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate, baseline = _recorded_proposal_pair(root)
+            comparison = _comparison(
+                comparison_id="comparison-cli-tie",
+                candidates=[
+                    (candidate["event_id"], "candidate-backend", "candidate/model"),
+                    (baseline["event_id"], "baseline-backend", "baseline/model"),
+                ],
+                winner_event_id=None,
+                outcome="tie",
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(root=root, workspace_id=DEFAULT_WORKSPACE_ID),
+                comparison,
+                workspace_id=DEFAULT_WORKSPACE_ID,
+            )
+            benchmark_report = root / "benchmark.json"
+            benchmark_report.write_text(
+                json.dumps({"schema_name": "fixture-benchmark", "passed": True}),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "backend",
+                        "dossier",
+                        "--comparison",
+                        "comparison-cli-tie",
+                        "--candidate-backend",
+                        "candidate-backend",
+                        "--baseline-backend",
+                        "baseline-backend",
+                        "--benchmark-report",
+                        str(benchmark_report),
+                        "--strict",
+                        "--format",
+                        "json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["recommendation"]["value"], "experiment_only")
+        self.assertTrue(payload["benchmark_gate"]["passed"])
+
+    def test_satlab_backend_dossier_strict_fails_missing_benchmark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate, baseline = _recorded_proposal_pair(root)
+            comparison = _comparison(
+                comparison_id="comparison-cli-missing-benchmark",
+                candidates=[
+                    (candidate["event_id"], "candidate-backend", "candidate/model"),
+                    (baseline["event_id"], "baseline-backend", "baseline/model"),
+                ],
+                winner_event_id=candidate["event_id"],
+            )
+            append_evaluation_comparison(
+                evaluation_comparison_log_path(root=root, workspace_id=DEFAULT_WORKSPACE_ID),
+                comparison,
+                workspace_id=DEFAULT_WORKSPACE_ID,
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "backend",
+                        "dossier",
+                        "--comparison",
+                        "comparison-cli-missing-benchmark",
+                        "--candidate-backend",
+                        "candidate-backend",
+                        "--baseline-backend",
+                        "baseline-backend",
+                        "--strict",
+                        "--format",
+                        "json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("benchmark_gate_missing", payload["rule_evaluation"]["blockers"])
 
     def test_from_review_does_not_fallback_to_unrelated_latest_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

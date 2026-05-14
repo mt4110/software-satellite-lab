@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
 from agent_session_intake import (
@@ -90,6 +90,15 @@ from satellite_pack import (
     inspect_pack_path,
 )
 from workspace_state import DEFAULT_WORKSPACE_ID
+
+
+def _backend_dossier_strict_gate_failed(dossier: Mapping[str, Any]) -> bool:
+    benchmark_gate = dossier.get("benchmark_gate")
+    if not isinstance(benchmark_gate, Mapping):
+        return False
+    if not benchmark_gate.get("strict_required"):
+        return False
+    return benchmark_gate.get("available") is False or benchmark_gate.get("passed") is False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1022,7 +1031,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(dossier, ensure_ascii=False, indent=2))
         else:
             print(format_backend_adoption_dossier_markdown(dossier))
-        if args.strict and dossier.get("recommendation", {}).get("value") != "adopt":
+        if _backend_dossier_strict_gate_failed(dossier):
             return 1
         return 0
 
