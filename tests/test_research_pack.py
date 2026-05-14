@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -21,7 +22,11 @@ from research_pack import (  # noqa: E402
     reproduce_research_pack,
 )
 from satlab import main as satlab_main  # noqa: E402
-from schema_coverage import CORE_SCHEMA_CANDIDATES, build_schema_coverage_report  # noqa: E402
+from schema_coverage import (  # noqa: E402
+    CORE_SCHEMA_CANDIDATES,
+    build_schema_coverage_report,
+    format_schema_coverage_report,
+)
 
 
 def _benchmark_override() -> dict:
@@ -64,8 +69,18 @@ class ResearchPackTests(unittest.TestCase):
 
             for required in REQUIRED_RESEARCH_PACK_FILES:
                 self.assertTrue((latest / required).is_file(), required)
+            readme_lines = [
+                line
+                for line in (latest / "README.md").read_text(encoding="utf-8").splitlines()
+                if line and not line.startswith("#")
+            ]
 
         self.assertEqual(result["status"], "pass")
+        self.assertEqual(
+            readme_lines[0],
+            "software-satellite-lab is a local-first, file-first recorder for "
+            "software-work evidence and review reproducibility.",
+        )
         self.assertEqual(reproduction["status"], "pass")
         self.assertTrue(reproduction["research_pack_reproduces"])
         self.assertEqual(reproduction["private_doc_dependency_count"], 0)
@@ -92,6 +107,30 @@ class ResearchPackTests(unittest.TestCase):
 
         self.assertEqual(first["checksums"]["combined_sha256"], second["checksums"]["combined_sha256"])
         self.assertEqual(first["checksums"]["files"], second["checksums"]["files"])
+
+    def test_reproduction_resolves_relative_pack_against_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "artifacts" / "research_pack"
+            result = build_research_pack(
+                output=output,
+                root=REPO_ROOT,
+                benchmark_results_override=_benchmark_override(),
+            )
+            with tempfile.TemporaryDirectory() as cwd_tmp:
+                previous_cwd = Path.cwd()
+                try:
+                    os.chdir(cwd_tmp)
+                    reproduction = reproduce_research_pack(
+                        Path("artifacts/research_pack/latest"),
+                        root=root,
+                    )
+                finally:
+                    os.chdir(previous_cwd)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(reproduction["status"], "pass")
+        self.assertEqual(reproduction["pack_path"], str((output / "latest").resolve()))
 
     def test_reproduction_fails_when_pack_is_mutated(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -128,6 +167,16 @@ class ResearchPackTests(unittest.TestCase):
         self.assertEqual(reproduction["status"], "fail")
         self.assertFalse(reproduction["no_trainable_export"])
         self.assertIn("no_trainable_export", reproduction["failing_check_ids"])
+
+    def test_schema_coverage_formatter_preserves_zero_threshold(self) -> None:
+        report = build_schema_coverage_report(
+            root=REPO_ROOT,
+            generated_at_utc="1970-01-01T00:00:00+00:00",
+            threshold=0.0,
+        )
+        markdown = format_schema_coverage_report(report)
+
+        self.assertIn("- Threshold: `0.00`", markdown)
 
     def test_satlab_research_pack_cli_surface(self) -> None:
         fake_result = {

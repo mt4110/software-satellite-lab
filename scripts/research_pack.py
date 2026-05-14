@@ -27,6 +27,10 @@ REPRODUCIBLE_GENERATED_AT_UTC = "1970-01-01T00:00:00+00:00"
 DEFAULT_RESEARCH_WORKSPACE_ID = "research-pack-public-fixtures"
 DEFAULT_RESEARCH_PACK_OUTPUT = Path("artifacts/research_pack")
 SCHEMA_COVERAGE_EXIT_THRESHOLD = 0.90
+PROJECT_SUMMARY_SENTENCE = (
+    "software-satellite-lab is a local-first, file-first recorder for "
+    "software-work evidence and review reproducibility."
+)
 
 PUBLIC_DEMO_SOURCES = (
     "README.md",
@@ -260,8 +264,7 @@ def _research_pack_readme() -> str:
         [
             "# Research Pack",
             "",
-            "software-satellite-lab is a local-first, file-first recorder for "
-            "software-work evidence and review reproducibility.",
+            PROJECT_SUMMARY_SENTENCE,
             "",
             "This pack contains public fixtures, deterministic benchmark summaries, "
             "schema coverage, and gate reports for external inspection.",
@@ -380,7 +383,10 @@ def _check(check_id: str, label: str, passed: bool, detail: Mapping[str, Any] | 
 
 def reproduce_research_pack(pack: Path, *, root: Path | None = None) -> dict[str, Any]:
     resolved_root = _resolve_root(root)
-    pack_dir = Path(pack).expanduser().resolve()
+    pack_path = Path(pack).expanduser()
+    if not pack_path.is_absolute():
+        pack_path = resolved_root / pack_path
+    pack_dir = pack_path.resolve()
     required_missing = [path for path in REQUIRED_RESEARCH_PACK_FILES if not (pack_dir / path).is_file()]
     private_findings = _scan_private_doc_references(pack_dir)
     trainable_findings = _scan_trainable_export_artifacts(pack_dir)

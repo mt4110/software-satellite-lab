@@ -267,12 +267,15 @@ def build_schema_coverage_report(
 
 
 def format_schema_coverage_report(report: Mapping[str, Any]) -> str:
+    threshold = report.get("threshold")
+    if threshold is None:
+        threshold = CORE_COVERAGE_THRESHOLD
     lines = [
         "# Schema Coverage Report",
         "",
         f"- Status: `{'pass' if report.get('passed') else 'fail'}`",
         f"- Core coverage: `{float(report.get('core_coverage_ratio') or 0.0):.2f}`",
-        f"- Threshold: `{float(report.get('threshold') or CORE_COVERAGE_THRESHOLD):.2f}`",
+        f"- Threshold: `{float(threshold):.2f}`",
         f"- Schemas: `{int(report.get('schema_count') or 0)}`",
         "",
         "| Schema | Coverage | Source | Required | Optional | Compat | Privacy | Examples | Gaps |",
