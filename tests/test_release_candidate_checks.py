@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -19,6 +20,7 @@ from release_candidate_checks import (  # noqa: E402
     build_release_demo_report,
     format_release_candidate_report_markdown,
 )
+from gemma_runtime import timestamp_utc  # noqa: E402
 from satlab import main as satlab_main  # noqa: E402
 
 
@@ -202,6 +204,63 @@ class ReleaseCandidateChecksTests(unittest.TestCase):
         self.assertFalse(report["markdown_report_exists"])
         self.assertTrue(report["markdown_report_rendered"])
         self.assertFalse(report_path_exists)
+
+    def test_static_release_check_does_not_claim_unwritten_reports_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _make_static_release_root(root)
+
+            report = build_release_candidate_report(root=root, run_runtime_checks=False)
+
+        demo_detail = next(check["detail"] for check in report["checks"] if check["id"] == "release_demo_markdown_report")
+        demand_detail = next(check["detail"] for check in report["checks"] if check["id"] == "demand_gate_report_exists")
+        self.assertFalse(demo_detail["markdown_report_exists"])
+        self.assertTrue(demo_detail["markdown_report_rendered"])
+        self.assertTrue(demo_detail["not_run_static_only"])
+        self.assertFalse(demand_detail["report_exists"])
+        self.assertTrue(demand_detail["report_rendered"])
+        self.assertTrue(demand_detail["not_run_static_only"])
+
+    def test_release_check_no_write_keeps_spartan_benchmark_from_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _make_static_release_root(root)
+            generated_at = timestamp_utc()
+            with (
+                mock.patch(
+                    "release_candidate_checks.run_review_benchmark",
+                    return_value={
+                        "passed": True,
+                        "critical_false_evidence_count": 0,
+                        "training_export_ready": False,
+                        "generated_at_utc": generated_at,
+                    },
+                ),
+                mock.patch(
+                    "release_candidate_checks.run_review_memory_eval",
+                    return_value={
+                        "passed": True,
+                        "metrics": {"critical_false_support": 0},
+                        "generated_at_utc": generated_at,
+                    },
+                ) as eval_mock,
+                mock.patch(
+                    "release_candidate_checks.build_evidence_lint_report",
+                    return_value={"verdict": "pass", "issue_count": 0},
+                ),
+                mock.patch(
+                    "release_candidate_checks.audit_evidence_pack_v1_path",
+                    return_value=({"verdict": "pass"}, None, None),
+                ),
+            ):
+                report = build_release_candidate_report(
+                    root=root,
+                    run_runtime_checks=True,
+                    write_subreports=False,
+                )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertFalse(eval_mock.call_args.kwargs["write"])
 
     def test_demand_gate_fails_below_thresholds(self) -> None:
         report = build_demand_gate_report(

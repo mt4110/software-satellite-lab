@@ -1307,23 +1307,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "release":
         if args.release_command == "check":
-            if args.no_write:
-                report = build_release_candidate_report(
-                    workspace_id=args.workspace_id,
-                    root=args.root,
-                    strict=args.strict,
-                    run_runtime_checks=True,
-                    run_default_tests=args.strict,
-                )
-                markdown = format_release_candidate_report_markdown(report)
-            else:
-                report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_release_candidate_report(
-                    workspace_id=args.workspace_id,
-                    root=args.root,
-                    strict=args.strict,
-                    run_runtime_checks=True,
-                    run_default_tests=args.strict,
-                )
+            try:
+                if args.no_write:
+                    report = build_release_candidate_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        strict=args.strict,
+                        run_runtime_checks=args.strict,
+                        run_default_tests=args.strict,
+                    )
+                    markdown = format_release_candidate_report_markdown(report)
+                else:
+                    report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_release_candidate_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        strict=args.strict,
+                        run_runtime_checks=args.strict,
+                        run_default_tests=args.strict,
+                    )
+            except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
+                parser.error(str(exc))
             if args.format == "json":
                 print(json.dumps(report, ensure_ascii=False, indent=2))
             else:

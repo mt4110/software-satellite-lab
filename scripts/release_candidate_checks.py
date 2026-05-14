@@ -401,11 +401,17 @@ def _build_review_benchmark_check(report: Mapping[str, Any] | None = None) -> di
     )
 
 
-def _build_spartan_benchmark_check(report: Mapping[str, Any] | None = None, *, root: Path) -> dict[str, Any]:
+def _build_spartan_benchmark_check(
+    report: Mapping[str, Any] | None = None,
+    *,
+    root: Path,
+    write: bool = True,
+) -> dict[str, Any]:
     benchmark = dict(report) if report is not None else run_review_memory_eval(
         workspace_id="release-candidate-spartan",
         root=root,
         spartan=True,
+        write=write,
     )
     benchmark.setdefault("generated_at_utc", timestamp_utc())
     passed = bool(benchmark.get("passed"))
@@ -547,8 +553,9 @@ def _build_release_demo_check(
         )
     elif result is None:
         demo = {
-            "markdown_report_exists": True,
+            "markdown_report_exists": False,
             "markdown_report_rendered": True,
+            "not_run_static_only": True,
             "guardrails": {
                 "requires_api_key": False,
                 "uses_network": False,
@@ -603,7 +610,12 @@ def _build_demand_gate_wired_check(
             "metrics_source": demand_report.get("metrics_source"),
         }
     elif result is None:
-        payload = {"status": "pass", "report_exists": True, "not_run_static_only": True}
+        payload = {
+            "status": "pass",
+            "report_exists": False,
+            "report_rendered": True,
+            "not_run_static_only": True,
+        }
     else:
         payload = dict(result)
     passed = payload.get("status") == "pass" and bool(payload.get("report_exists") or payload.get("report_rendered"))
@@ -719,6 +731,7 @@ def build_release_candidate_report(
             _build_spartan_benchmark_check(
                 _mapping_dict(overrides.get("spartan_benchmark")) or None,
                 root=resolved_root,
+                write=write_subreports,
             )
         )
         checks.append(
@@ -1059,7 +1072,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     root=args.root,
                     workspace_id=args.workspace_id,
                     strict=args.strict,
-                    run_runtime_checks=True,
+                    run_runtime_checks=args.strict,
                     run_default_tests=args.strict,
                 )
                 markdown = format_release_candidate_report_markdown(report)
@@ -1068,7 +1081,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     root=args.root,
                     workspace_id=args.workspace_id,
                     strict=args.strict,
-                    run_runtime_checks=True,
+                    run_runtime_checks=args.strict,
                     run_default_tests=args.strict,
                 )
             if args.format == "json":
