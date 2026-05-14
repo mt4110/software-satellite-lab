@@ -1,0 +1,2 @@
+FAILED tests/test_cache.py::test_key_rotation
+app/cache.py reused a stale cache key after rotation.

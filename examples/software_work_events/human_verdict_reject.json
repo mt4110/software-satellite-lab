@@ -1,0 +1,39 @@
+{
+  "schema_name": "software-satellite-event",
+  "schema_version": 1,
+  "event_id": "gallery:human-verdict-reject",
+  "event_kind": "human_verdict_recorded",
+  "recorded_at_utc": "2026-05-14T00:10:00+00:00",
+  "workspace": {
+    "workspace_id": "public-gallery"
+  },
+  "session": {
+    "session_id": "gallery-session",
+    "surface": "cli"
+  },
+  "outcome": {
+    "status": "rejected",
+    "quality_status": "needs_fix",
+    "execution_status": "reviewed"
+  },
+  "content": {
+    "summary": "A human rejected the patch until the missing regression test is added.",
+    "notes": [
+      "Human verdicts should stay concise and avoid copying private source text."
+    ]
+  },
+  "source_refs": {
+    "artifact_ref": {
+      "artifact_path": "examples/software_work_events/sources/review_verdict.md",
+      "artifact_kind": "review_note"
+    }
+  },
+  "target_paths": [
+    "app/cache.py"
+  ],
+  "tags": [
+    "gallery",
+    "human-verdict",
+    "negative-evidence"
+  ]
+}

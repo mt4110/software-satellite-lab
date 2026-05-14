@@ -1,0 +1,39 @@
+{
+  "schema_name": "software-satellite-event",
+  "schema_version": 1,
+  "event_id": "gallery:prior-failure-risk",
+  "event_kind": "test_failure",
+  "recorded_at_utc": "2026-05-13T09:00:00+00:00",
+  "workspace": {
+    "workspace_id": "public-gallery"
+  },
+  "session": {
+    "session_id": "gallery-session",
+    "surface": "cli"
+  },
+  "outcome": {
+    "status": "failed",
+    "quality_status": "fail",
+    "execution_status": "completed"
+  },
+  "content": {
+    "summary": "A prior stale-key regression failed in local tests.",
+    "notes": [
+      "This is risk evidence only when the active review is not the same event."
+    ]
+  },
+  "source_refs": {
+    "artifact_ref": {
+      "artifact_path": "examples/software_work_events/sources/cache_failure.txt",
+      "artifact_kind": "test_log"
+    }
+  },
+  "target_paths": [
+    "app/cache.py"
+  ],
+  "tags": [
+    "gallery",
+    "negative-prior",
+    "source-linked"
+  ]
+}

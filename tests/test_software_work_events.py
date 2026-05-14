@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -27,6 +28,29 @@ from workspace_state import WorkspaceSessionStore  # noqa: E402
 
 
 class SoftwareWorkEventTests(unittest.TestCase):
+    def test_public_gallery_examples_satisfy_event_contract(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        gallery_root = repo_root / "examples" / "software_work_events"
+        example_paths = [
+            gallery_root / filename
+            for filename in (
+                "patch_input_needs_review.json",
+                "prior_failure_risk.json",
+                "verification_pass.json",
+                "human_verdict_reject.json",
+            )
+        ]
+
+        for path in example_paths:
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+                event = json.loads(path.read_text(encoding="utf-8"))
+                check = build_event_contract_check(event, root=repo_root)
+
+                self.assertEqual(event["schema_name"], EVENT_SCHEMA_NAME)
+                self.assertEqual(check["contract_status"], "ok")
+                self.assertEqual(check["source_artifact"]["source_status"], "readable")
+
     def test_workspace_entries_are_normalized_into_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

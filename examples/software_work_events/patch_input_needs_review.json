@@ -1,0 +1,39 @@
+{
+  "schema_name": "software-satellite-event",
+  "schema_version": 1,
+  "event_id": "gallery:patch-input-needs-review",
+  "event_kind": "patch_input",
+  "recorded_at_utc": "2026-05-14T00:00:00+00:00",
+  "workspace": {
+    "workspace_id": "public-gallery"
+  },
+  "session": {
+    "session_id": "gallery-session",
+    "surface": "cli"
+  },
+  "outcome": {
+    "status": "needs_review",
+    "quality_status": "not_run",
+    "execution_status": "captured"
+  },
+  "content": {
+    "summary": "A local cache-key patch is captured for review.",
+    "notes": [
+      "No decision support is claimed before verification."
+    ]
+  },
+  "source_refs": {
+    "artifact_ref": {
+      "artifact_path": "examples/software_work_events/sources/cache.patch",
+      "artifact_kind": "patch"
+    }
+  },
+  "target_paths": [
+    "app/cache.py"
+  ],
+  "tags": [
+    "gallery",
+    "patch",
+    "needs-review"
+  ]
+}

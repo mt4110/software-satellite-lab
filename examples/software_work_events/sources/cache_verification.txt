@@ -1,0 +1,2 @@
+PASS tests/test_cache.py::test_key_rotation
+PASS tests/test_cache.py::test_key_normalization
