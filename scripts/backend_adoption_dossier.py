@@ -920,6 +920,13 @@ def _find_review_metadata(
     return None, None
 
 
+def _comparison_includes_event(comparison: Mapping[str, Any], event_id: str) -> bool:
+    return event_id in {
+        _candidate_event_id(candidate)
+        for candidate in _comparison_candidates(comparison)
+    }
+
+
 def _latest_comparison_for_review(
     *,
     review_metadata: Mapping[str, Any] | None,
@@ -939,8 +946,17 @@ def _latest_comparison_for_review(
         key=lambda item: (_clean_text(item.get("recorded_at_utc")) or "", _clean_text(item.get("comparison_id")) or ""),
         reverse=True,
     )
+    scoped_comparisons = sorted_comparisons
+    if review_event_id is not None:
+        scoped_comparisons = [
+            comparison
+            for comparison in sorted_comparisons
+            if _comparison_includes_event(comparison, review_event_id)
+        ]
+        if not scoped_comparisons:
+            return None
     if candidate_backend or baseline_backend:
-        for comparison in sorted_comparisons:
+        for comparison in scoped_comparisons:
             candidates = _comparison_candidates(comparison)
             if candidate_backend and not any(_candidate_matches(candidate, candidate_backend) for candidate in candidates):
                 continue
@@ -949,13 +965,7 @@ def _latest_comparison_for_review(
             return comparison
         return None
     if review_event_id is not None:
-        for comparison in sorted_comparisons:
-            if review_event_id in {
-                _candidate_event_id(candidate)
-                for candidate in _comparison_candidates(comparison)
-            }:
-                return comparison
-        return None
+        return scoped_comparisons[0]
     return None
 
 

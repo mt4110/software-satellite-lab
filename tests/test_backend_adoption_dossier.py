@@ -436,6 +436,11 @@ class BackendAdoptionDossierTests(unittest.TestCase):
             {"path": "$.exit_gate.no_live_api_required", "message": "Expected true."},
             validate_backend_adoption_dossier(broken),
         )
+        schema = json.loads((REPO_ROOT / "schemas" / "backend_adoption_dossier.schema.json").read_text())
+        self.assertIs(
+            schema["properties"]["exit_gate"]["properties"]["negative_evidence_visible"]["const"],
+            True,
+        )
 
     def test_markdown_report_includes_source_artifact_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -557,6 +562,56 @@ class BackendAdoptionDossierTests(unittest.TestCase):
         self.assertFalse(dossier["review_source"]["metadata_found"])
         self.assertEqual(dossier["recommendation"]["value"], "insufficient_evidence")
         self.assertIn("candidate_not_found", dossier["rule_evaluation"]["blockers"])
+
+    def test_from_review_scopes_backend_match_to_review_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            review_metadata = root / "review.json"
+            review_metadata.write_text(
+                json.dumps(
+                    {
+                        "schema_name": "software-satellite-review-risk-report",
+                        "event_id": "review-event",
+                        "review_run_id": "review-run",
+                        "generated_at_utc": "2026-01-01T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            related = _comparison(
+                comparison_id="comparison-related",
+                candidates=[
+                    ("review-event", "candidate-backend", "candidate/model"),
+                    ("related-baseline", "baseline-backend", "baseline/model"),
+                ],
+                winner_event_id="review-event",
+            )
+            related["recorded_at_utc"] = "2026-01-02T00:00:00Z"
+            unrelated = _comparison(
+                comparison_id="comparison-unrelated-newer",
+                candidates=[
+                    ("other-candidate", "candidate-backend", "candidate/model"),
+                    ("other-baseline", "baseline-backend", "baseline/model"),
+                ],
+                winner_event_id="other-candidate",
+            )
+            unrelated["recorded_at_utc"] = "2026-01-03T00:00:00Z"
+            for comparison in (related, unrelated):
+                append_evaluation_comparison(
+                    evaluation_comparison_log_path(root=root, workspace_id=DEFAULT_WORKSPACE_ID),
+                    comparison,
+                    workspace_id=DEFAULT_WORKSPACE_ID,
+                )
+
+            dossier = build_backend_adoption_dossier_from_review(
+                str(review_metadata),
+                candidate_backend="candidate-backend",
+                baseline_backend="baseline-backend",
+                root=root,
+                workspace_id=DEFAULT_WORKSPACE_ID,
+            )
+
+        self.assertEqual(dossier["comparison_id"], "comparison-related")
 
     def test_from_review_malformed_explicit_path_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -275,7 +275,7 @@
           "const": true
         },
         "negative_evidence_visible": {
-          "type": "boolean"
+          "const": true
         },
         "no_live_api_required": {
           "const": true
