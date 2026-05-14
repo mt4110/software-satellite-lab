@@ -145,6 +145,14 @@ def _candidate_matches(candidate: Mapping[str, Any], selector: str | None) -> bo
     return cleaned in {value for value in values if value is not None}
 
 
+def _candidate_explicit_dossier_role(candidate: Mapping[str, Any]) -> str | None:
+    for key in ("dossier_role", "adoption_role", "role", "comparison_role"):
+        role = _clean_text(candidate.get(key))
+        if role in {"candidate", "baseline"}:
+            return role
+    return None
+
+
 def _comparison_role(candidate: Mapping[str, Any], comparison: Mapping[str, Any]) -> str:
     event_id = _candidate_event_id(candidate)
     winner_event_id = _clean_text(comparison.get("winner_event_id"))
@@ -179,9 +187,20 @@ def _select_baseline_candidate(
     if selector is not None:
         return next((candidate for candidate in candidates if _candidate_matches(candidate, selector)), None)
     selected_event_id = _candidate_event_id(selected_candidate or {})
-    for candidate in candidates:
-        if _candidate_event_id(candidate) != selected_event_id:
-            return candidate
+    eligible = [
+        candidate
+        for candidate in candidates
+        if _candidate_event_id(candidate) != selected_event_id
+    ]
+    explicit_baselines = [
+        candidate
+        for candidate in eligible
+        if _candidate_explicit_dossier_role(candidate) == "baseline"
+    ]
+    if len(explicit_baselines) == 1:
+        return explicit_baselines[0]
+    if len(eligible) == 1:
+        return eligible[0]
     return None
 
 

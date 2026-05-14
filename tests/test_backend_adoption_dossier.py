@@ -308,6 +308,91 @@ class BackendAdoptionDossierTests(unittest.TestCase):
         self.assertIn("benchmark_gate_missing", dossier["rule_evaluation"]["blockers"])
         self.assertNotIn("benchmark_gate_failed", dossier["rule_evaluation"]["blockers"])
 
+    def test_multi_candidate_requires_explicit_baseline_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate_event, _candidate_artifact = _direct_event(
+                root,
+                event_id="event-candidate",
+                backend_id="candidate-backend",
+            )
+            baseline_a_event, _baseline_a_artifact = _direct_event(
+                root,
+                event_id="event-baseline-a",
+                backend_id="baseline-a-backend",
+            )
+            baseline_b_event, _baseline_b_artifact = _direct_event(
+                root,
+                event_id="event-baseline-b",
+                backend_id="baseline-b-backend",
+            )
+            comparison = _comparison(
+                comparison_id="comparison-multi-candidate",
+                candidates=[
+                    ("event-candidate", "candidate-backend", "candidate/model"),
+                    ("event-baseline-a", "baseline-a-backend", "baseline-a/model"),
+                    ("event-baseline-b", "baseline-b-backend", "baseline-b/model"),
+                ],
+                winner_event_id="event-candidate",
+            )
+            dossier = build_backend_adoption_dossier(
+                comparison,
+                events_by_id={
+                    "event-candidate": candidate_event,
+                    "event-baseline-a": baseline_a_event,
+                    "event-baseline-b": baseline_b_event,
+                },
+                root=root,
+            )
+
+        self.assertEqual(dossier["baseline_metadata"], {})
+        self.assertIn("baseline_not_found", dossier["rule_evaluation"]["blockers"])
+        self.assertNotIn(
+            "baseline",
+            {item["role"] for item in dossier["source_linked_task_outcomes"]},
+        )
+
+    def test_multi_candidate_can_use_explicit_baseline_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            candidate_event, _candidate_artifact = _direct_event(
+                root,
+                event_id="event-candidate",
+                backend_id="candidate-backend",
+            )
+            other_event, _other_artifact = _direct_event(
+                root,
+                event_id="event-other",
+                backend_id="other-backend",
+            )
+            baseline_event, _baseline_artifact = _direct_event(
+                root,
+                event_id="event-baseline",
+                backend_id="baseline-backend",
+            )
+            comparison = _comparison(
+                comparison_id="comparison-explicit-baseline",
+                candidates=[
+                    ("event-candidate", "candidate-backend", "candidate/model"),
+                    ("event-other", "other-backend", "other/model"),
+                    ("event-baseline", "baseline-backend", "baseline/model"),
+                ],
+                winner_event_id="event-candidate",
+            )
+            comparison["candidates"][2]["role"] = "baseline"
+            dossier = build_backend_adoption_dossier(
+                comparison,
+                events_by_id={
+                    "event-candidate": candidate_event,
+                    "event-other": other_event,
+                    "event-baseline": baseline_event,
+                },
+                root=root,
+            )
+
+        self.assertEqual(dossier["baseline_metadata"]["backend_id"], "baseline-backend")
+        self.assertNotIn("baseline_not_found", dossier["rule_evaluation"]["blockers"])
+
     def test_no_rollback_path_blocks_adoption(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             comparison, events, _backend = _direct_adoptable_fixture(Path(tmpdir))
