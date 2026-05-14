@@ -423,6 +423,19 @@ class BackendAdoptionDossierTests(unittest.TestCase):
             {"path": "$.benchmark_gate", "message": "Missing required dossier field."},
             validate_backend_adoption_dossier(broken),
         )
+        broken = dict(dossier)
+        del broken["rule_evaluation"]
+        self.assertIn(
+            {"path": "$.rule_evaluation", "message": "Missing required dossier field."},
+            validate_backend_adoption_dossier(broken),
+        )
+        broken = dict(dossier)
+        broken["exit_gate"] = dict(dossier["exit_gate"])
+        broken["exit_gate"]["no_live_api_required"] = False
+        self.assertIn(
+            {"path": "$.exit_gate.no_live_api_required", "message": "Expected true."},
+            validate_backend_adoption_dossier(broken),
+        )
 
     def test_markdown_report_includes_source_artifact_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

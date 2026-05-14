@@ -1198,6 +1198,7 @@ def validate_backend_adoption_dossier(dossier: Mapping[str, Any]) -> list[dict[s
         "rollback_plan",
         "benchmark_gate",
         "evidence_lint_gate",
+        "rule_evaluation",
         "recommendation",
         "exit_gate",
         "notes",
@@ -1219,9 +1220,23 @@ def validate_backend_adoption_dossier(dossier: Mapping[str, Any]) -> list[dict[s
     recommendation = _mapping_dict(dossier.get("recommendation"))
     if _clean_text(recommendation.get("value")) not in RECOMMENDATIONS:
         issues.append({"path": "$.recommendation.value", "message": "Unsupported recommendation value."})
+    rule_evaluation = _mapping_dict(dossier.get("rule_evaluation"))
+    if not isinstance(rule_evaluation.get("blockers"), list):
+        issues.append({"path": "$.rule_evaluation.blockers", "message": "Expected an array."})
+    if not isinstance(rule_evaluation.get("warnings"), list):
+        issues.append({"path": "$.rule_evaluation.warnings", "message": "Expected an array."})
+    if not isinstance(rule_evaluation.get("rules"), Mapping):
+        issues.append({"path": "$.rule_evaluation.rules", "message": "Expected an object."})
     if not isinstance(dossier.get("source_linked_task_outcomes"), list):
         issues.append({"path": "$.source_linked_task_outcomes", "message": "Expected an array."})
     exit_gate = _mapping_dict(dossier.get("exit_gate"))
+    true_exit_gates = {
+        "adoption_without_source_blocked",
+        "adoption_without_human_rationale_blocked",
+        "adoption_without_rollback_blocked",
+        "negative_evidence_visible",
+        "no_live_api_required",
+    }
     for key in (
         "adoption_without_source_blocked",
         "adoption_without_human_rationale_blocked",
@@ -1231,4 +1246,6 @@ def validate_backend_adoption_dossier(dossier: Mapping[str, Any]) -> list[dict[s
     ):
         if not isinstance(exit_gate.get(key), bool):
             issues.append({"path": f"$.exit_gate.{key}", "message": "Expected a boolean."})
+        elif key in true_exit_gates and exit_gate.get(key) is not True:
+            issues.append({"path": f"$.exit_gate.{key}", "message": "Expected true."})
     return issues
