@@ -1,0 +1,16 @@
+{
+  "schema_name": "software-satellite-demand-gate-fixture-metrics",
+  "schema_version": 1,
+  "fixture_id": "release-candidate-demand-gate-pass",
+  "description": "Public, synthetic demand-gate metrics used only to verify the gate boundary in the no-network demo.",
+  "dogfood_review_sessions": 20,
+  "dogfood_agent_session_intakes": 5,
+  "external_technical_user_inspections": 3,
+  "external_fresh_clone_demo_attempts": 1,
+  "dogfood_useful_recall_at_5": 0.35,
+  "critical_false_support_count": 0,
+  "verdict_capture_seconds": [18, 21, 24, 27, 29],
+  "external_exact_pain_recognition": 2,
+  "external_wants_to_try": 1,
+  "fresh_clone_demo_minutes": 12
+}

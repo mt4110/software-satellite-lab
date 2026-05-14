@@ -75,6 +75,8 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `docs/recall_hit_quality_loop.md`: Recall ヒット品質の可視化と軽量評価ループ
 - `docs/learning_finetune_prep_design.md`: M7 Learning and Fine-Tune Prep の preview-only dataset 候補設計
 - `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench の戦略ハードニングと2週間実装設計
+- `docs/release_v0_1_candidate.md`: v0.1 release candidate の再現手順、gate、制約
+- `docs/public_demo_walkthrough.md`: no-provider public demo のテキスト transcript
 
 ## Evidence-Gated Git Review
 
@@ -121,8 +123,12 @@ python3 scripts/satlab.py review benchmark
   - Satellite Evidence Pack manifest の読み込み、v0 schema validation、permission audit artifact の土台
 - `scripts/demand_validation.py`
   - dogfood run / external interview / clone-to-demo timing を local file ledger と report にまとめる公開デモ validation キット
+- `scripts/release_candidate_checks.py`
+  - v0.1 release candidate の public docs、demo、benchmark、lint、pack audit、redaction、test gate を検査するコマンド
+- `scripts/demand_gate.py`
+  - dogfood / external inspection / fresh-clone timing の demand validation gate を Markdown / JSON で出力するコマンド
 - `scripts/satlab.py`
-  - `event ingest` / `recall failure` / `compare proposals` / `verdict` / `report latest` / `learning inspect --preview-only` / `pack inspect|audit|run review-risk-pack` / `validation` を提供する薄い CLI
+  - `event ingest` / `recall failure` / `compare proposals` / `verdict` / `report latest` / `learning inspect --preview-only` / `pack inspect|audit|run review-risk-pack` / `validation` / `release` / `demand gate` を提供する薄い CLI
 
 ## セットアップ
 
@@ -166,6 +172,10 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py validation record-interview --participant user-1 --recognized-pain yes --wants-to-try yes --notes-file artifacts/demand_validation_notes/external_user_interview.md
 .venv/bin/python scripts/satlab.py validation record-setup --clone-to-demo-minutes 12 --notes-file artifacts/demand_validation_notes/setup_timing.md
 .venv/bin/python scripts/satlab.py validation report --write --format md
+.venv/bin/python scripts/satlab.py release demo --no-api
+.venv/bin/python scripts/satlab.py release check --strict
+.venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
+.venv/bin/python scripts/satlab.py demand gate --format md
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_public_demo_checks.py
