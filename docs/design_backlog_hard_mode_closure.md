@@ -1,7 +1,7 @@
 # Design Backlog Hard-Mode Closure
 
-This is the public closure checklist for the remaining M10-M17 hard-mode and issue-backlog work.
-It is intentionally file-first and does not depend on private design notes.
+This public checklist tracks M10-M17 hard-mode and issue-backlog closure status.
+It expands only the remaining implementation slices identified in this pass, and it is intentionally file-first without depending on private design notes.
 
 ## Invariants
 
@@ -26,6 +26,8 @@ It is intentionally file-first and does not depend on private design notes.
 | M17 Research Reproducibility + Standardization Prep | `research pack`, `research reproduce`, `schema coverage`, contributor guide, research reproducibility docs | no additional hard-mode closure item identified in this pass |
 
 ## PR Split
+
+Only milestones with remaining implementation slices are expanded below. Milestones marked as having no additional closure item in the status summary are intentionally not repeated as PRs.
 
 ### PR 1: M10 Artifact GC Dry Run
 
@@ -163,13 +165,27 @@ Acceptance:
 - Explain works for valid built-in packs and draft blocked packs.
 - Output does not include raw secret-like values from denied evidence.
 
-### PR 9: M14 Pack Fixture Generator And Schema Docs
+### PR 9: M14 Pack Fixture Generator
 
-Goal: close the remaining contributor-quality gaps for Evidence Pack v1.
+Goal: make safe Evidence Pack v1 benchmark fixtures easier to create without adding executable pack behavior.
 
 Scope:
 
 - Add a generator for safe benchmark fixture entries inside a pack manifest.
+- Add tests in `tests/test_evidence_pack_v1.py`.
+
+Acceptance:
+
+- Fixture generator emits public, local-only fixture text.
+- Generated fixture entries pass the existing pack audit and test runner.
+- No executable/plugin semantics are introduced.
+
+### PR 10: M14 Pack Schema Docs
+
+Goal: make the Evidence Pack v1 JSON schema readable as public contributor documentation.
+
+Scope:
+
 - Add schema-doc generation from `schemas/satellite_evidence_pack_v1.schema.json`.
 - Write generated docs under `docs/` and keep them deterministic.
 - Add tests that fail when generated docs drift from the schema.
@@ -177,10 +193,10 @@ Scope:
 Acceptance:
 
 - Generated docs are reproducible.
-- Fixture generator emits public, local-only fixture text.
-- No executable/plugin semantics are introduced.
+- Generated docs do not add policy rules beyond the JSON schema and audit kernel.
+- The docs path is public and does not depend on generated artifact directories.
 
-### PR 10: M15 Dossier Compare
+### PR 11: M15 Dossier Compare
 
 Goal: compare adoption dossiers across two runs without re-running backend checks.
 
@@ -196,7 +212,7 @@ Acceptance:
 - Recommendation changes are called out first.
 - Compare reads local JSON only and performs no provider calls.
 
-### PR 11: M15 Adoption Dossier Public Demo Fixture
+### PR 12: M15 Adoption Dossier Public Demo Fixture
 
 Goal: make backend adoption dossier behavior visible in the no-provider public demo path.
 
@@ -219,8 +235,8 @@ Acceptance:
 2. PR 3 closes the only M11 hard-mode gap.
 3. PR 4 can land independently before or after PR 5 because the generator output is validated by the existing benchmark runner.
 4. PR 5 should land before PR 6 and PR 7 because compare/trend output gives the dogfood and ablation work a review surface.
-5. PR 8 should land before PR 9 so generated pack docs can point to the same explanation model.
-6. PR 10 should land before PR 11 so the public demo can include a comparison story if needed.
+5. PR 8 should land before PR 9 and PR 10 so fixture and schema docs can point to the same explanation model.
+6. PR 11 should land before PR 12 so the public demo can include a comparison story if needed.
 
 ## Out Of Scope For This Closure
 
