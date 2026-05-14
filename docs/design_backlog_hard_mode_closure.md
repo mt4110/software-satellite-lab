@@ -14,6 +14,8 @@ It expands only the remaining implementation slices identified in this pass, and
 
 ## Status Summary
 
+`Implemented baseline` means the public repo currently exposes the listed CLI, module, fixture, or doc surface. This docs-only checklist does not revalidate those surfaces; each follow-up implementation PR should still run its own focused checks.
+
 | Area | Implemented baseline | Remaining backlog |
 | --- | --- | --- |
 | M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `evidence support`, symlink/path traversal refusal, content-addressed vault objects | `artifact gc --dry-run`; support policy JSON registry and summary report |
@@ -24,6 +26,19 @@ It expands only the remaining implementation slices identified in this pass, and
 | M15 Backend Adoption Dossier | `backend dossier`, strict benchmark-report consumption, insufficient-evidence behavior, schema validation, markdown/JSON output | dossier comparison across two runs; adoption dossier fixture in public demo |
 | M16 Release Candidate + Demand Gate | `release check`, `release demo --no-api`, `demand gate`, public demo walkthrough and fixture-backed gates | no additional hard-mode closure item identified in this pass |
 | M17 Research Reproducibility + Standardization Prep | `research pack`, `research reproduce`, `schema coverage`, contributor guide, research reproducibility docs | no additional hard-mode closure item identified in this pass |
+
+## Baseline Evidence Pointers
+
+| Area | Public evidence pointers |
+| --- | --- |
+| M10 | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `tests/test_artifact_vault.py`, `tests/test_evidence_support.py` |
+| M11 | `scripts/evidence_graph.py`, `scripts/evidence_lint.py`, `schemas/evidence_graph.schema.json`, `tests/test_evidence_graph.py`, `tests/test_evidence_lint.py` |
+| M12 | `scripts/review_memory_eval.py`, `scripts/review_memory_fixtures.py`, `examples/review_memory_benchmark/`, `tests/test_review_memory_eval.py` |
+| M13 | `scripts/agent_session_intake.py`, `schemas/agent_session_bundle.schema.json`, `examples/agent_session_bundles/`, `tests/test_agent_session_intake.py` |
+| M14 | `scripts/evidence_pack_v1.py`, `schemas/satellite_evidence_pack_v1.schema.json`, `templates/*.satellite.yaml`, `tests/test_evidence_pack_v1.py` |
+| M15 | `scripts/backend_adoption_dossier.py`, `schemas/backend_adoption_dossier.schema.json`, `templates/backend_adoption_dossier_template.md`, `tests/test_backend_adoption_dossier.py` |
+| M16 | `scripts/release_candidate_checks.py`, `scripts/demand_gate.py`, `docs/public_demo_walkthrough.md`, `docs/release_v0_1_candidate.md`, `tests/test_release_candidate_checks.py` |
+| M17 | `scripts/research_pack.py`, `scripts/schema_coverage.py`, `docs/research_reproducibility_note.md`, `docs/evidence_pack_contributor_guide.md`, `tests/test_research_pack.py` |
 
 ## PR Split
 
