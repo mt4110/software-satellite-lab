@@ -31,15 +31,12 @@ class SoftwareWorkEventTests(unittest.TestCase):
     def test_public_gallery_examples_satisfy_event_contract(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         gallery_root = repo_root / "examples" / "software_work_events"
-        example_paths = [
-            gallery_root / filename
-            for filename in (
-                "patch_input_needs_review.json",
-                "prior_failure_risk.json",
-                "verification_pass.json",
-                "human_verdict_reject.json",
-            )
-        ]
+        example_paths = sorted(gallery_root.glob("*.json"))
+
+        self.assertTrue(
+            example_paths,
+            f"No gallery JSON examples found in {gallery_root}",
+        )
 
         for path in example_paths:
             with self.subTest(path=path.name):
