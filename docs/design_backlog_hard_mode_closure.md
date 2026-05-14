@@ -19,8 +19,11 @@ It is intentionally file-first and does not depend on private design notes.
 | M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `evidence support`, symlink/path traversal refusal, content-addressed vault objects | `artifact gc --dry-run`; support policy JSON registry and summary report |
 | M11 Derived Evidence Graph + Lint | `evidence graph`, `evidence lint`, `evidence trace --why-blocked`, `evidence impact`, graph schema validation, target fingerprints | graph diff between two snapshots |
 | M12 Adversarial Review Memory Benchmark | `review eval`, `review miss-report`, `review benchmark --spartan`, synthetic/adversarial fixtures, miss taxonomy, dogfood metrics slot | review fixture generator; dogfood importer; benchmark trend report; eval compare; target-fingerprint ablation |
+| M13 Cross-Agent Intake | `intake agent-session`, `intake pr-bundle`, agent-session bundle fixtures, redaction and no-network tests | no additional hard-mode closure item identified in this pass |
 | M14 Evidence Pack v1 Policy Kernel | `pack audit`, `pack test`, `pack lock`, `pack scaffold`, `pack list --builtin`, strict denied-field checks, built-in packs | pack fixture generator; minimal `pack explain`; schema docs generated from JSON schema |
 | M15 Backend Adoption Dossier | `backend dossier`, strict benchmark-report consumption, insufficient-evidence behavior, schema validation, markdown/JSON output | dossier comparison across two runs; adoption dossier fixture in public demo |
+| M16 Release Candidate + Demand Gate | `release check`, `release demo --no-api`, `demand gate`, public demo walkthrough and fixture-backed gates | no additional hard-mode closure item identified in this pass |
+| M17 Research Reproducibility + Standardization Prep | `research pack`, `research reproduce`, `schema coverage`, contributor guide, research reproducibility docs | no additional hard-mode closure item identified in this pass |
 
 ## PR Split
 
@@ -214,9 +217,10 @@ Acceptance:
 
 1. PR 1 and PR 2 close M10 safety/reporting gaps.
 2. PR 3 closes the only M11 hard-mode gap.
-3. PR 5 should land before PR 6 and PR 7 because compare/trend output gives the dogfood and ablation work a review surface.
-4. PR 8 should land before PR 9 so generated pack docs can point to the same explanation model.
-5. PR 10 should land before PR 11 so the public demo can include a comparison story if needed.
+3. PR 4 can land independently before or after PR 5 because the generator output is validated by the existing benchmark runner.
+4. PR 5 should land before PR 6 and PR 7 because compare/trend output gives the dogfood and ablation work a review surface.
+5. PR 8 should land before PR 9 so generated pack docs can point to the same explanation model.
+6. PR 10 should land before PR 11 so the public demo can include a comparison story if needed.
 
 ## Out Of Scope For This Closure
 
