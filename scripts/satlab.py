@@ -74,7 +74,18 @@ from demand_validation import (
     record_external_user_interview,
     write_demand_validation_templates,
 )
+from demand_gate import (
+    build_demand_gate_report,
+    format_demand_gate_report,
+    record_demand_gate_report,
+)
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
+from release_candidate_checks import (
+    build_release_demo_report,
+    build_release_candidate_report,
+    format_release_candidate_report_markdown,
+    record_release_candidate_report,
+)
 from review_benchmark import format_review_benchmark_report, run_review_benchmark
 from review_memory_eval import (
     format_review_memory_eval_report,
@@ -614,6 +625,43 @@ def build_parser() -> argparse.ArgumentParser:
     validation_report_parser.add_argument("--write", action="store_true", help="Persist latest and run report artifacts.")
     validation_report_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     validation_report_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    release_parser = subparsers.add_parser(
+        "release",
+        help="Run OSS release-candidate checks and the no-provider public demo.",
+    )
+    release_subparsers = release_parser.add_subparsers(dest="release_command", required=True)
+    release_check_parser = release_subparsers.add_parser(
+        "check",
+        help="Run release-candidate checks.",
+    )
+    release_check_parser.add_argument("--strict", action="store_true", help="Run runtime gates and the public demo default test gate.")
+    release_check_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
+    release_check_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    release_check_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    release_demo_parser = release_subparsers.add_parser(
+        "demo",
+        help="Run the public no-provider demo path.",
+    )
+    release_demo_parser.add_argument("--no-api", action="store_true", help="Required explicit no-provider demo flag.")
+    release_demo_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
+    release_demo_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    release_demo_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    demand_parser = subparsers.add_parser(
+        "demand",
+        help="Evaluate demand validation gates.",
+    )
+    demand_subparsers = demand_parser.add_subparsers(dest="demand_command", required=True)
+    demand_gate_parser = demand_subparsers.add_parser(
+        "gate",
+        help="Evaluate the M16 dogfood and external-user demand gate.",
+    )
+    demand_gate_parser.add_argument("--fixture-metrics", type=Path, default=None, help="Optional public fixture metrics JSON.")
+    demand_gate_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
+    demand_gate_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    demand_gate_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
     return parser
 
 
@@ -1256,6 +1304,80 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(markdown)
             return 0
+
+    if args.command == "release":
+        if args.release_command == "check":
+            if args.no_write:
+                report = build_release_candidate_report(
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                    strict=args.strict,
+                    run_runtime_checks=True,
+                    run_default_tests=args.strict,
+                )
+                markdown = format_release_candidate_report_markdown(report)
+            else:
+                report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_release_candidate_report(
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                    strict=args.strict,
+                    run_runtime_checks=True,
+                    run_default_tests=args.strict,
+                )
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(markdown)
+            return 0 if report.get("status") == "pass" else 1
+
+        if args.release_command == "demo":
+            if not args.no_api:
+                parser.error("release demo requires --no-api.")
+            try:
+                report = build_release_demo_report(
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                    no_api=args.no_api,
+                    write=not args.no_write,
+                    run_runtime_checks=True,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(
+                    json.dumps(
+                        {key: value for key, value in report.items() if key != "markdown"},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(str(report["markdown"]))
+            return 0 if report.get("status") == "pass" else 1
+
+    if args.command == "demand":
+        if args.demand_command == "gate":
+            try:
+                if args.no_write:
+                    report = build_demand_gate_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        fixture_metrics=args.fixture_metrics,
+                    )
+                    markdown = format_demand_gate_report(report)
+                else:
+                    report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_demand_gate_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        fixture_metrics=args.fixture_metrics,
+                    )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(markdown)
+            return 0 if report.get("status") == "pass" else 1
 
     if args.command == "verdict":
         if args.verdict_command == "template":

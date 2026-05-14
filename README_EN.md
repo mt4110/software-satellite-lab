@@ -76,6 +76,8 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `docs/recall_hit_quality_loop.md`: hit-quality visualization and lightweight evaluation loop for Recall
 - `docs/learning_finetune_prep_design.md`: M7 preview-only dataset candidate design for Learning and Fine-Tune Prep
 - `docs/evidence_gated_git_review_workbench_design.md`: M9 Evidence-Gated Git Review Workbench strategy hardening and two-week implementation design
+- `docs/release_v0_1_candidate.md`: v0.1 release candidate setup, gates, and limitations
+- `docs/public_demo_walkthrough.md`: no-provider public demo transcript
 
 ## Evidence-Gated Git Review
 
@@ -122,8 +124,12 @@ python3 scripts/satlab.py review benchmark
   - foundation for Satellite Evidence Pack manifest loading, v0 schema validation, and permission audit artifacts
 - `scripts/demand_validation.py`
   - public-demo validation kit that records dogfood runs, external interviews, and clone-to-demo timing into local file ledgers and reports
+- `scripts/release_candidate_checks.py`
+  - checks the v0.1 release candidate public docs, demo path, benchmarks, lint, pack audits, redaction, and test gate
+- `scripts/demand_gate.py`
+  - reports the dogfood, external inspection, and fresh-clone demand validation gate as Markdown or JSON
 - `scripts/satlab.py`
-  - thin CLI for `event ingest`, `recall failure`, `compare proposals`, `verdict`, `report latest`, `learning inspect --preview-only`, `pack inspect|audit|run review-risk-pack`, and `validation`
+  - thin CLI for `event ingest`, `recall failure`, `compare proposals`, `verdict`, `report latest`, `learning inspect --preview-only`, `pack inspect|audit|run review-risk-pack`, `validation`, `release`, and `demand gate`
 
 ## Setup
 
@@ -167,6 +173,10 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py validation record-interview --participant user-1 --recognized-pain yes --wants-to-try yes --notes-file artifacts/demand_validation_notes/external_user_interview.md
 .venv/bin/python scripts/satlab.py validation record-setup --clone-to-demo-minutes 12 --notes-file artifacts/demand_validation_notes/setup_timing.md
 .venv/bin/python scripts/satlab.py validation report --write --format md
+.venv/bin/python scripts/satlab.py release demo --no-api
+.venv/bin/python scripts/satlab.py release check --strict
+.venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
+.venv/bin/python scripts/satlab.py demand gate --format md
 .venv/bin/python scripts/satlab.py pack inspect templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/satlab.py pack audit templates/review-risk-pack.satellite.yaml
 .venv/bin/python scripts/run_public_demo_checks.py

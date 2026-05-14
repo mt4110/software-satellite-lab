@@ -25,6 +25,7 @@ PUBLIC_DEMO_GATES = (
     TestGate("tests/test_evaluation_loop.py", timeout_seconds=90, budget_seconds=35.0),
     TestGate("tests/test_backend_swap.py", timeout_seconds=120, budget_seconds=60.0),
     TestGate("tests/test_demand_validation.py", timeout_seconds=90, budget_seconds=30.0),
+    TestGate("tests/test_release_candidate_checks.py", timeout_seconds=60, budget_seconds=20.0),
 )
 
 
