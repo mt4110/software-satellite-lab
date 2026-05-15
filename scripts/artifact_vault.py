@@ -500,11 +500,25 @@ def _resolved_path_is_inside(path: Path, *, root: Path) -> bool:
     return True
 
 
+def _first_symlink_in_vault_path(path: Path, *, root: Path) -> Path | None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def _walk_vault_object_files(objects_root: Path, *, root: Path) -> tuple[list[Path], list[dict[str, str]]]:
     object_paths: list[Path] = []
     skipped_objects: list[dict[str, str]] = []
-    if objects_root.is_symlink():
-        skipped_objects.append(_skipped_object_entry(objects_root, root=root, reason="symlink_refused"))
+    symlink_path = _first_symlink_in_vault_path(objects_root, root=root)
+    if symlink_path is not None:
+        skipped_objects.append(_skipped_object_entry(symlink_path, root=root, reason="symlink_refused"))
         return object_paths, skipped_objects
     if not objects_root.exists():
         return object_paths, skipped_objects
@@ -577,10 +591,11 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
     captured_ref_count = 0
     verification_cache: dict[tuple[str | None, str | None], tuple[bool, str | None]] = {}
 
-    if refs_root.is_symlink():
+    refs_root_symlink = _first_symlink_in_vault_path(refs_root, root=resolved_root)
+    if refs_root_symlink is not None:
         malformed_refs.append(
             _malformed_ref_entry_lexical(
-                refs_root,
+                refs_root_symlink,
                 root=resolved_root,
                 reason="refs_root_symlink_refused",
             )
