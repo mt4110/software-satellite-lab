@@ -478,6 +478,13 @@ def _malformed_ref_entry(path: Path, *, root: Path, reason: str) -> dict[str, st
     }
 
 
+def _malformed_ref_entry_lexical(path: Path, *, root: Path, reason: str) -> dict[str, str]:
+    return {
+        "ref_path": _workspace_path_text_lexical(path, root=root),
+        "reason": reason,
+    }
+
+
 def _skipped_object_entry(path: Path, *, root: Path, reason: str) -> dict[str, str]:
     return {
         "vault_path": _workspace_path_text_lexical(path, root=root),
@@ -570,7 +577,20 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
     captured_ref_count = 0
     verification_cache: dict[tuple[str | None, str | None], tuple[bool, str | None]] = {}
 
-    ref_paths = sorted(refs_root.glob("*.json")) if refs_root.exists() else []
+    if refs_root.is_symlink():
+        malformed_refs.append(
+            _malformed_ref_entry_lexical(
+                refs_root,
+                root=resolved_root,
+                reason="refs_root_symlink_refused",
+            )
+        )
+        ref_paths = []
+    elif refs_root.exists() and not refs_root.is_dir():
+        malformed_refs.append(_malformed_ref_entry(refs_root, root=resolved_root, reason="refs_root_not_directory"))
+        ref_paths = []
+    else:
+        ref_paths = sorted(refs_root.glob("*.json")) if refs_root.exists() else []
     for ref_path in ref_paths:
         ref, malformed_reason = _load_gc_ref(ref_path)
         if ref is None:

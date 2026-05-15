@@ -455,6 +455,41 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_badstate.json")
             self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_capture_state")
 
+    def test_artifact_gc_dry_run_reports_refs_root_file_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.parent.mkdir(parents=True, exist_ok=True)
+            refs_root.write_text("not a directory\n", encoding="utf-8")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "refs_root_not_directory")
+
+    def test_artifact_gc_dry_run_reports_symlink_refs_root_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            root = base / "workspace"
+            root.mkdir()
+            outside_refs = base / "outside-refs"
+            outside_refs.mkdir()
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                refs_root.symlink_to(outside_refs, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "refs_root_symlink_refused")
+
     def test_artifact_gc_dry_run_reuses_verification_for_duplicate_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
