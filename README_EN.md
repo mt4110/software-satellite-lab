@@ -88,6 +88,7 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 python3 scripts/satlab.py review git --base origin/main --head HEAD
 python3 scripts/satlab.py review verdict --from-latest --decision needs_fix --rationale "Needs one more verification step" --recall-usefulness useful
 python3 scripts/satlab.py review benchmark
+python3 scripts/satlab.py evidence policy
 ```
 
 - the active patch is excluded from prior evidence

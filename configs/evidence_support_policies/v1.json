@@ -1,0 +1,235 @@
+{
+  "schema_name": "software-satellite-evidence-support-policy-registry",
+  "schema_version": 1,
+  "policy_id": "evidence_support_v1",
+  "support_kernel_schema": "software-satellite-evidence-support-result",
+  "support_polarities": [
+    "diagnostic",
+    "negative",
+    "none",
+    "positive",
+    "risk"
+  ],
+  "decision_requirements": [
+    {
+      "requirement_id": "valid_source_ref",
+      "summary": "At least one artifact-vault ref or git blob ref must verify locally."
+    },
+    {
+      "requirement_id": "prior_to_review",
+      "summary": "Evidence must be recorded before the review start time when one is provided."
+    },
+    {
+      "requirement_id": "not_current_subject",
+      "summary": "The active review subject cannot support itself."
+    },
+    {
+      "requirement_id": "not_weak_match",
+      "summary": "Weak or text-only matches are diagnostic only."
+    },
+    {
+      "requirement_id": "not_contradictory",
+      "summary": "Contradictory evidence cannot support a decision."
+    },
+    {
+      "requirement_id": "not_unverified_agent_claim",
+      "summary": "Agent transcript claims need a quality check, human verdict, or evidence type before support."
+    },
+    {
+      "requirement_id": "positive_signal_required",
+      "summary": "Positive support requires a positive status, pass quality, pass execution, positive evidence type, or accepted/positive signal."
+    },
+    {
+      "requirement_id": "negative_or_risk_signal_required",
+      "summary": "Negative or risk support requires a failure, rejection, blocker, unresolved, or risk signal."
+    }
+  ],
+  "support_classes": [
+    {
+      "support_class": "source_linked_prior",
+      "can_support_decision": true,
+      "allowed_decision_polarities": [
+        "positive"
+      ],
+      "default_blockers": [],
+      "summary": "Verified prior evidence with a positive signal can support a positive decision."
+    },
+    {
+      "support_class": "negative_prior",
+      "can_support_decision": true,
+      "allowed_decision_polarities": [
+        "negative",
+        "risk"
+      ],
+      "default_blockers": [],
+      "summary": "Verified prior failure, rejection, blocker, or unresolved evidence can support negative or risk decisions."
+    },
+    {
+      "support_class": "current_review_subject",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "current_review_subject"
+      ],
+      "summary": "The current review subject is excluded from prior-support decisions."
+    },
+    {
+      "support_class": "future_evidence",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "future_evidence"
+      ],
+      "summary": "Evidence at or after the review start cannot be used as prior support."
+    },
+    {
+      "support_class": "missing_source",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "binary_source_refused",
+        "missing_source",
+        "missing_vault_object",
+        "noncanonical_vault_object_path",
+        "not_artifact_ref",
+        "not_captured",
+        "outside_workspace",
+        "oversize_source",
+        "symlink_refused",
+        "vault_object_outside_vault"
+      ],
+      "summary": "Missing, invalid, refused, outside-workspace, symlinked, or oversize sources cannot support a decision."
+    },
+    {
+      "support_class": "modified_source",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "modified_source",
+        "vault_checksum_mismatch"
+      ],
+      "summary": "Checksum-mismatched source evidence cannot support a decision."
+    },
+    {
+      "support_class": "weak_match",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "weak_match"
+      ],
+      "summary": "Weak matches are visible as context only."
+    },
+    {
+      "support_class": "contradictory",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "contradictory"
+      ],
+      "summary": "Mixed or contradictory signals block support."
+    },
+    {
+      "support_class": "manual_pin_diagnostic",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "manual_pin_diagnostic"
+      ],
+      "summary": "Manual pins can preserve diagnostic context but cannot override source checks."
+    },
+    {
+      "support_class": "unverified_agent_claim",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "unverified_agent_claim"
+      ],
+      "summary": "Agent claims without verification signals cannot support decisions."
+    },
+    {
+      "support_class": "unknown",
+      "can_support_decision": false,
+      "allowed_decision_polarities": [],
+      "default_blockers": [
+        "event_not_found",
+        "missing_negative_or_risk_signal",
+        "missing_positive_signal",
+        "missing_verification_signal"
+      ],
+      "summary": "Unknown or insufficiently signaled evidence cannot support a decision."
+    }
+  ],
+  "blocker_reasons": [
+    "binary_source_refused",
+    "contradictory",
+    "current_review_subject",
+    "event_not_found",
+    "future_evidence",
+    "manual_pin_diagnostic",
+    "missing_negative_or_risk_signal",
+    "missing_positive_signal",
+    "missing_source",
+    "missing_verification_signal",
+    "missing_vault_object",
+    "modified_source",
+    "noncanonical_vault_object_path",
+    "not_artifact_ref",
+    "not_captured",
+    "outside_workspace",
+    "oversize_source",
+    "symlink_refused",
+    "unverified_agent_claim",
+    "vault_checksum_mismatch",
+    "vault_object_outside_vault",
+    "weak_match"
+  ],
+  "warning_reasons": [
+    "manual_pin_diagnostic",
+    "original_source_modified_after_capture",
+    "verified_git_ref_without_vault_object"
+  ],
+  "signals": {
+    "positive_statuses": [
+      "accept",
+      "accepted",
+      "pass",
+      "passed",
+      "resolved",
+      "winner_selected"
+    ],
+    "negative_statuses": [
+      "blocked",
+      "error",
+      "failed",
+      "needs_fix",
+      "quality_fail",
+      "reject",
+      "rejected"
+    ],
+    "unresolved_statuses": [
+      "needs_more_evidence",
+      "needs_review",
+      "pending",
+      "unresolved"
+    ],
+    "positive_evidence_types": [
+      "accepted",
+      "human_acceptance",
+      "test_pass",
+      "verification_pass"
+    ],
+    "failure_evidence_types": [
+      "blocker",
+      "failure",
+      "rejected",
+      "test_fail",
+      "unresolved"
+    ]
+  },
+  "default_paths": {
+    "network_calls": false,
+    "private_docs_required": false,
+    "api_key_required": false,
+    "trainable_export_artifacts": false
+  }
+}

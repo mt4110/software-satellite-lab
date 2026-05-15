@@ -87,6 +87,7 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 python3 scripts/satlab.py review git --base origin/main --head HEAD
 python3 scripts/satlab.py review verdict --from-latest --decision needs_fix --rationale "追加検証が必要" --recall-usefulness useful
 python3 scripts/satlab.py review benchmark
+python3 scripts/satlab.py evidence policy
 ```
 
 - 現在レビュー中の patch は prior evidence から除外されます

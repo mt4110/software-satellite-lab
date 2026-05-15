@@ -22,6 +22,11 @@ from workspace_state import DEFAULT_WORKSPACE_ID
 
 EVIDENCE_SUPPORT_SCHEMA_NAME = "software-satellite-evidence-support-result"
 EVIDENCE_SUPPORT_SCHEMA_VERSION = 1
+SUPPORT_POLICY_SCHEMA_NAME = "software-satellite-evidence-support-policy-registry"
+SUPPORT_POLICY_REPORT_SCHEMA_NAME = "software-satellite-evidence-support-policy-report"
+SUPPORT_POLICY_SCHEMA_VERSION = 1
+SUPPORT_POLICY_ID = "evidence_support_v1"
+DEFAULT_SUPPORT_POLICY_REGISTRY_PATH = Path("configs/evidence_support_policies/v1.json")
 
 SUPPORT_CLASSES = {
     "source_linked_prior",
@@ -43,10 +48,129 @@ NEGATIVE_STATUSES = {"failed", "quality_fail", "blocked", "error", "rejected", "
 UNRESOLVED_STATUSES = {"needs_review", "needs_more_evidence", "unresolved", "pending"}
 FAILURE_EVIDENCE_TYPES = {"test_fail", "rejected", "failure", "blocker", "unresolved"}
 POSITIVE_EVIDENCE_TYPES = {"test_pass", "accepted", "human_acceptance", "verification_pass"}
+SUPPORT_BLOCKER_REASONS = {
+    "binary_source_refused",
+    "contradictory",
+    "current_review_subject",
+    "event_not_found",
+    "future_evidence",
+    "manual_pin_diagnostic",
+    "missing_negative_or_risk_signal",
+    "missing_positive_signal",
+    "missing_source",
+    "missing_verification_signal",
+    "missing_vault_object",
+    "modified_source",
+    "noncanonical_vault_object_path",
+    "not_artifact_ref",
+    "not_captured",
+    "outside_workspace",
+    "oversize_source",
+    "symlink_refused",
+    "unverified_agent_claim",
+    "vault_checksum_mismatch",
+    "vault_object_outside_vault",
+    "weak_match",
+}
+SUPPORT_WARNING_REASONS = {
+    "manual_pin_diagnostic",
+    "original_source_modified_after_capture",
+    "verified_git_ref_without_vault_object",
+}
+SUPPORT_DECISION_REQUIREMENTS = {
+    "valid_source_ref",
+    "prior_to_review",
+    "not_current_subject",
+    "not_weak_match",
+    "not_contradictory",
+    "not_unverified_agent_claim",
+    "positive_signal_required",
+    "negative_or_risk_signal_required",
+}
+SUPPORT_CLASS_POLICY = {
+    "source_linked_prior": {
+        "can_support_decision": True,
+        "allowed_decision_polarities": ["positive"],
+        "default_blockers": [],
+    },
+    "negative_prior": {
+        "can_support_decision": True,
+        "allowed_decision_polarities": ["negative", "risk"],
+        "default_blockers": [],
+    },
+    "current_review_subject": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["current_review_subject"],
+    },
+    "future_evidence": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["future_evidence"],
+    },
+    "missing_source": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": [
+            "binary_source_refused",
+            "missing_source",
+            "missing_vault_object",
+            "noncanonical_vault_object_path",
+            "not_artifact_ref",
+            "not_captured",
+            "outside_workspace",
+            "oversize_source",
+            "symlink_refused",
+            "vault_object_outside_vault",
+        ],
+    },
+    "modified_source": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["modified_source", "vault_checksum_mismatch"],
+    },
+    "weak_match": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["weak_match"],
+    },
+    "contradictory": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["contradictory"],
+    },
+    "manual_pin_diagnostic": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["manual_pin_diagnostic"],
+    },
+    "unverified_agent_claim": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": ["unverified_agent_claim"],
+    },
+    "unknown": {
+        "can_support_decision": False,
+        "allowed_decision_polarities": [],
+        "default_blockers": [
+            "event_not_found",
+            "missing_negative_or_risk_signal",
+            "missing_positive_signal",
+            "missing_verification_signal",
+        ],
+    },
+}
 
 
 def _resolve_root(root: Path | None = None) -> Path:
     return Path(root or repo_root()).resolve()
+
+
+def _workspace_path_text(path: Path, *, root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root))
+    except (OSError, RuntimeError, ValueError):
+        return str(path)
 
 
 def _clean_text(value: Any) -> str | None:
@@ -88,6 +212,429 @@ def _dedupe(values: Iterable[str]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _policy_string_values(
+    issues: list[dict[str, Any]],
+    value: Any,
+    *,
+    path: str,
+) -> list[str]:
+    if not isinstance(value, list):
+        issues.append(_policy_issue(path, "Expected a list of strings.", actual=type(value).__name__))
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for index, item in enumerate(value):
+        text = _clean_text(item)
+        if text is None:
+            issues.append(_policy_issue(f"{path}[{index}]", "Expected a non-empty string."))
+            continue
+        if text in seen:
+            duplicates.add(text)
+        seen.add(text)
+        values.append(text)
+    if duplicates:
+        issues.append(_policy_issue(path, "Values must be unique.", actual=sorted(duplicates)))
+    return values
+
+
+def _policy_issue(path: str, message: str, *, actual: Any = None) -> dict[str, Any]:
+    issue: dict[str, Any] = {"path": path, "message": message}
+    if actual is not None:
+        issue["actual"] = actual
+    return issue
+
+
+def _append_unknown_key_issues(
+    issues: list[dict[str, Any]],
+    value: Mapping[str, Any],
+    *,
+    allowed: set[str],
+    path: str,
+) -> None:
+    for key in sorted(str(item) for item in value.keys() if str(item) not in allowed):
+        issues.append(_policy_issue(f"{path}.{key}", "Unknown support policy registry field."))
+
+
+def support_policy_registry_path(root: Path | None = None) -> Path:
+    return _resolve_root(root) / DEFAULT_SUPPORT_POLICY_REGISTRY_PATH
+
+
+def _resolve_policy_path(policy_path: str | Path | None, *, root: Path) -> Path:
+    candidate = Path(policy_path).expanduser() if policy_path is not None else DEFAULT_SUPPORT_POLICY_REGISTRY_PATH
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return candidate.resolve()
+
+
+def validate_support_policy_registry(policy: Any) -> list[dict[str, Any]]:
+    if not isinstance(policy, Mapping):
+        return [_policy_issue("$", "Support policy registry must be a JSON object.", actual=type(policy).__name__)]
+
+    issues: list[dict[str, Any]] = []
+    _append_unknown_key_issues(
+        issues,
+        policy,
+        allowed={
+            "schema_name",
+            "schema_version",
+            "policy_id",
+            "support_kernel_schema",
+            "support_polarities",
+            "decision_requirements",
+            "support_classes",
+            "blocker_reasons",
+            "warning_reasons",
+            "signals",
+            "default_paths",
+        },
+        path="$",
+    )
+    if policy.get("schema_name") != SUPPORT_POLICY_SCHEMA_NAME:
+        issues.append(
+            _policy_issue(
+                "$.schema_name",
+                f"Expected schema_name {SUPPORT_POLICY_SCHEMA_NAME}.",
+                actual=policy.get("schema_name"),
+            )
+        )
+    if policy.get("schema_version") != SUPPORT_POLICY_SCHEMA_VERSION:
+        issues.append(
+            _policy_issue(
+                "$.schema_version",
+                "Unsupported support policy registry schema version.",
+                actual=policy.get("schema_version"),
+            )
+        )
+    if policy.get("policy_id") != SUPPORT_POLICY_ID:
+        issues.append(
+            _policy_issue(
+                "$.policy_id",
+                f"Expected policy_id {SUPPORT_POLICY_ID}.",
+                actual=policy.get("policy_id"),
+            )
+        )
+    if policy.get("support_kernel_schema") != EVIDENCE_SUPPORT_SCHEMA_NAME:
+        issues.append(
+            _policy_issue(
+                "$.support_kernel_schema",
+                f"Expected support kernel schema {EVIDENCE_SUPPORT_SCHEMA_NAME}.",
+                actual=policy.get("support_kernel_schema"),
+            )
+        )
+
+    polarity_set = set(_policy_string_values(issues, policy.get("support_polarities"), path="$.support_polarities"))
+    if polarity_set != SUPPORT_POLARITIES:
+        issues.append(
+            _policy_issue(
+                "$.support_polarities",
+                "Support polarities must mirror the runtime support kernel.",
+                actual=sorted(polarity_set),
+            )
+        )
+
+    requirement_ids: set[str] = set()
+    seen_requirement_ids: set[str] = set()
+    requirements = policy.get("decision_requirements")
+    if not isinstance(requirements, list):
+        issues.append(_policy_issue("$.decision_requirements", "Decision requirements must be a list."))
+    else:
+        for index, item in enumerate(requirements):
+            if not isinstance(item, Mapping):
+                issues.append(
+                    _policy_issue(
+                        f"$.decision_requirements[{index}]",
+                        "Decision requirement must be an object.",
+                    )
+                )
+                continue
+            _append_unknown_key_issues(
+                issues,
+                item,
+                allowed={"requirement_id", "summary"},
+                path=f"$.decision_requirements[{index}]",
+            )
+            requirement_id = _clean_text(item.get("requirement_id"))
+            if requirement_id is None:
+                issues.append(
+                    _policy_issue(
+                        f"$.decision_requirements[{index}].requirement_id",
+                        "Decision requirement id is required.",
+                    )
+                )
+                continue
+            if requirement_id in seen_requirement_ids:
+                issues.append(
+                    _policy_issue(
+                        f"$.decision_requirements[{index}].requirement_id",
+                        "Duplicate decision requirement id.",
+                        actual=requirement_id,
+                    )
+                )
+            seen_requirement_ids.add(requirement_id)
+            requirement_ids.add(requirement_id)
+            if not _clean_text(item.get("summary")):
+                issues.append(
+                    _policy_issue(
+                        f"$.decision_requirements[{index}].summary",
+                        "Decision requirement summary is required.",
+                    )
+                )
+    if requirement_ids != SUPPORT_DECISION_REQUIREMENTS:
+        issues.append(
+            _policy_issue(
+                "$.decision_requirements",
+                "Decision requirement ids must mirror the runtime support kernel.",
+                actual=sorted(requirement_ids),
+            )
+        )
+
+    class_entries: dict[str, Mapping[str, Any]] = {}
+    classes = policy.get("support_classes")
+    if not isinstance(classes, list):
+        issues.append(_policy_issue("$.support_classes", "Support classes must be a list."))
+    else:
+        for index, item in enumerate(classes):
+            if not isinstance(item, Mapping):
+                issues.append(_policy_issue(f"$.support_classes[{index}]", "Support class policy must be an object."))
+                continue
+            _append_unknown_key_issues(
+                issues,
+                item,
+                allowed={
+                    "support_class",
+                    "can_support_decision",
+                    "allowed_decision_polarities",
+                    "default_blockers",
+                    "summary",
+                },
+                path=f"$.support_classes[{index}]",
+            )
+            support_class = _clean_text(item.get("support_class"))
+            if support_class is None:
+                issues.append(_policy_issue(f"$.support_classes[{index}].support_class", "Support class is required."))
+                continue
+            if support_class in class_entries:
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].support_class",
+                        "Duplicate support class.",
+                        actual=support_class,
+                    )
+                )
+                continue
+            class_entries[support_class] = item
+            if support_class not in SUPPORT_CLASSES:
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].support_class",
+                        "Unknown support class.",
+                        actual=support_class,
+                    )
+                )
+                continue
+            expected = SUPPORT_CLASS_POLICY[support_class]
+            if item.get("can_support_decision") is not expected["can_support_decision"]:
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].can_support_decision",
+                        "Support class decision capability must mirror the runtime support kernel.",
+                        actual=item.get("can_support_decision"),
+                    )
+                )
+            allowed = _policy_string_values(
+                issues,
+                item.get("allowed_decision_polarities"),
+                path=f"$.support_classes[{index}].allowed_decision_polarities",
+            )
+            if set(allowed) != set(expected["allowed_decision_polarities"]):
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].allowed_decision_polarities",
+                        "Allowed polarities must mirror the runtime support kernel.",
+                        actual=allowed,
+                    )
+                )
+            unknown_allowed = set(allowed) - SUPPORT_POLARITIES
+            if unknown_allowed:
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].allowed_decision_polarities",
+                        "Allowed polarities include values outside the support polarity set.",
+                        actual=sorted(unknown_allowed),
+                    )
+                )
+            blockers = _policy_string_values(
+                issues,
+                item.get("default_blockers"),
+                path=f"$.support_classes[{index}].default_blockers",
+            )
+            if set(blockers) != set(expected["default_blockers"]):
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].default_blockers",
+                        "Default blockers must mirror the runtime support kernel.",
+                        actual=blockers,
+                    )
+                )
+            unknown_blockers = set(blockers) - SUPPORT_BLOCKER_REASONS
+            if unknown_blockers:
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].default_blockers",
+                        "Default blockers include unknown reasons.",
+                        actual=sorted(unknown_blockers),
+                    )
+                )
+            if not _clean_text(item.get("summary")):
+                issues.append(
+                    _policy_issue(
+                        f"$.support_classes[{index}].summary",
+                        "Support class summary is required.",
+                    )
+                )
+    if set(class_entries) != SUPPORT_CLASSES:
+        issues.append(
+            _policy_issue(
+                "$.support_classes",
+                "Support classes must mirror the runtime support kernel.",
+                actual=sorted(class_entries),
+            )
+        )
+
+    blocker_set = set(_policy_string_values(issues, policy.get("blocker_reasons"), path="$.blocker_reasons"))
+    if blocker_set != SUPPORT_BLOCKER_REASONS:
+        issues.append(
+            _policy_issue(
+                "$.blocker_reasons",
+                "Blocker reasons must mirror the runtime support kernel.",
+                actual=sorted(blocker_set),
+            )
+        )
+    warning_set = set(_policy_string_values(issues, policy.get("warning_reasons"), path="$.warning_reasons"))
+    if warning_set != SUPPORT_WARNING_REASONS:
+        issues.append(
+            _policy_issue(
+                "$.warning_reasons",
+                "Warning reasons must mirror the runtime support kernel.",
+                actual=sorted(warning_set),
+            )
+        )
+
+    signals = _mapping_dict(policy.get("signals"))
+    _append_unknown_key_issues(
+        issues,
+        signals,
+        allowed={
+            "positive_statuses",
+            "negative_statuses",
+            "unresolved_statuses",
+            "positive_evidence_types",
+            "failure_evidence_types",
+        },
+        path="$.signals",
+    )
+    expected_signal_sets = {
+        "positive_statuses": POSITIVE_STATUSES,
+        "negative_statuses": NEGATIVE_STATUSES,
+        "unresolved_statuses": UNRESOLVED_STATUSES,
+        "positive_evidence_types": POSITIVE_EVIDENCE_TYPES,
+        "failure_evidence_types": FAILURE_EVIDENCE_TYPES,
+    }
+    for key, expected_values in expected_signal_sets.items():
+        actual_values = set(_policy_string_values(issues, signals.get(key), path=f"$.signals.{key}"))
+        if actual_values != expected_values:
+            issues.append(
+                _policy_issue(
+                    f"$.signals.{key}",
+                    "Signal values must mirror the runtime support kernel.",
+                    actual=sorted(actual_values),
+                )
+            )
+
+    default_paths = _mapping_dict(policy.get("default_paths"))
+    _append_unknown_key_issues(
+        issues,
+        default_paths,
+        allowed={"network_calls", "private_docs_required", "api_key_required", "trainable_export_artifacts"},
+        path="$.default_paths",
+    )
+    for key in ("network_calls", "private_docs_required", "api_key_required", "trainable_export_artifacts"):
+        if default_paths.get(key) is not False:
+            issues.append(
+                _policy_issue(
+                    f"$.default_paths.{key}",
+                    "Default policy path must remain disabled.",
+                    actual=default_paths.get(key),
+                )
+            )
+
+    return issues
+
+
+def load_support_policy_registry(
+    policy_path: str | Path | None = None,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    resolved_path = _resolve_policy_path(policy_path, root=resolved_root)
+    try:
+        payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid support policy registry JSON in `{resolved_path}`: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"Unable to read support policy registry `{resolved_path}`: {exc}") from exc
+    issues = validate_support_policy_registry(payload)
+    if issues:
+        issue_text = "; ".join(f"{issue['path']}: {issue['message']}" for issue in issues[:5])
+        if len(issues) > 5:
+            issue_text += f"; ... {len(issues) - 5} more"
+        raise ValueError(f"Invalid support policy registry `{resolved_path}`: {issue_text}")
+    return copy.deepcopy(dict(payload))
+
+
+def build_support_policy_report(
+    policy_path: str | Path | None = None,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    resolved_path = _resolve_policy_path(policy_path, root=resolved_root)
+    registry = load_support_policy_registry(resolved_path, root=resolved_root)
+    support_classes = []
+    for item in registry.get("support_classes") or []:
+        if not isinstance(item, Mapping):
+            continue
+        allowed = _string_list(item.get("allowed_decision_polarities"))
+        support_classes.append(
+            {
+                "support_class": _clean_text(item.get("support_class")) or "unknown",
+                "can_support_decision": bool(item.get("can_support_decision")),
+                "allowed_decision_polarities": allowed,
+                "decision_use": ", ".join(allowed) if allowed else "diagnostic_only",
+                "default_blockers": _string_list(item.get("default_blockers")),
+                "summary": _clean_text(item.get("summary")) or "",
+            }
+        )
+    return {
+        "schema_name": SUPPORT_POLICY_REPORT_SCHEMA_NAME,
+        "schema_version": SUPPORT_POLICY_SCHEMA_VERSION,
+        "policy_id": registry.get("policy_id"),
+        "registry_path": _workspace_path_text(resolved_path, root=resolved_root),
+        "registry_valid": True,
+        "validation_issues": [],
+        "support_kernel_schema": registry.get("support_kernel_schema"),
+        "support_polarities": _string_list(registry.get("support_polarities")),
+        "decision_requirements": copy.deepcopy(list(registry.get("decision_requirements") or [])),
+        "support_classes": support_classes,
+        "blocker_reasons": _string_list(registry.get("blocker_reasons")),
+        "warning_reasons": _string_list(registry.get("warning_reasons")),
+        "default_paths": copy.deepcopy(_mapping_dict(registry.get("default_paths"))),
+    }
 
 
 def _coerce_utc_datetime(value: Any) -> datetime | None:
@@ -705,3 +1252,38 @@ def format_evidence_support_result(result: Mapping[str, Any]) -> str:
             f"Artifact refs: {refs}",
         ]
     )
+
+
+def format_support_policy_report(report: Mapping[str, Any]) -> str:
+    lines = [
+        "Evidence support policy",
+        f"Policy: {_clean_text(report.get('policy_id')) or SUPPORT_POLICY_ID}",
+        f"Registry: {_clean_text(report.get('registry_path')) or str(DEFAULT_SUPPORT_POLICY_REGISTRY_PATH)}",
+        f"Registry valid: {'yes' if report.get('registry_valid') else 'no'}",
+        "",
+        "Support classes:",
+    ]
+    for item in report.get("support_classes") or []:
+        if not isinstance(item, Mapping):
+            continue
+        support_class = _clean_text(item.get("support_class")) or "unknown"
+        can_support = "yes" if item.get("can_support_decision") else "no"
+        allowed = ", ".join(_string_list(item.get("allowed_decision_polarities"))) or "none"
+        blockers = ", ".join(_string_list(item.get("default_blockers"))) or "none"
+        lines.append(
+            f"- {support_class}: can_support={can_support}; "
+            f"allowed={allowed}; blockers={blockers}"
+        )
+    requirements = [
+        item
+        for item in report.get("decision_requirements") or []
+        if isinstance(item, Mapping) and _clean_text(item.get("requirement_id"))
+    ]
+    if requirements:
+        lines.extend(["", "Decision requirements:"])
+        for item in requirements:
+            lines.append(
+                f"- {_clean_text(item.get('requirement_id'))}: "
+                f"{_clean_text(item.get('summary')) or ''}"
+            )
+    return "\n".join(lines)
