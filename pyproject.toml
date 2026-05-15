@@ -9,7 +9,14 @@ description = "Local-first evidence protocol utilities for AI-assisted software 
 readme = "README_EN.md"
 requires-python = ">=3.10"
 authors = [{ name = "software-satellite-lab contributors" }]
-dependencies = [
+
+[project.optional-dependencies]
+runtime = [
+  "transformers>=5.5.0,<6",
+  "torch>=2.6.0",
+  "accelerate>=1.2.0",
+]
+multimodal = [
   "transformers>=5.5.0,<6",
   "torch>=2.6.0",
   "torchvision>=0.21.0",

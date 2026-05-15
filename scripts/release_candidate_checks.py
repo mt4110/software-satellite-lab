@@ -906,12 +906,7 @@ def build_release_candidate_report(
         )
         checks.append(_with_gate(demand_check, "docs", elapsed_seconds=demand_elapsed))
 
-    review_check: dict[str, Any] = _check(
-        "review_benchmark_passes",
-        "Review benchmark passes",
-        True,
-        detail={"not_selected": "benchmarks" not in selected},
-    )
+    critical_false_support_count: Any = None
     if "benchmarks" in selected:
         if run_runtime_checks or benchmark_report_override is not None:
             review_check, elapsed = _timed_gate(
@@ -933,6 +928,7 @@ def build_release_candidate_report(
             elapsed = _elapsed_seconds(started)
             timings.append({"gate": "benchmarks", "label": "Review benchmark", "elapsed_seconds": elapsed})
         checks.append(_with_gate(review_check, "benchmarks", elapsed_seconds=elapsed))
+        critical_false_support_count = _mapping_dict(review_check.get("detail")).get("critical_false_evidence_count")
 
         if run_runtime_checks:
             spartan_check, elapsed = _timed_gate(
@@ -1050,7 +1046,7 @@ def build_release_candidate_report(
         "release_check_strict_exit_code": 0 if strict and not failing else 1 if strict else None,
         "private_doc_dependency_count": private_doc_dependency_count,
         "api_key_required": any(check.get("id") == "no_api_key_required_for_demo" and check.get("status") != "pass" for check in checks),
-        "critical_false_support_count": _mapping_dict(review_check.get("detail")).get("critical_false_evidence_count"),
+        "critical_false_support_count": critical_false_support_count,
         "demand_gate_report_exists": bool(demand_gate_check_detail.get("report_exists")) if write_subreports else None,
         "demand_gate_report_rendered": bool(
             demand_gate_check_detail.get("report_exists") or demand_gate_check_detail.get("report_rendered")
