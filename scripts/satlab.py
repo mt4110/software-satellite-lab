@@ -86,10 +86,13 @@ from demand_gate import (
 )
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
 from release_candidate_checks import (
+    DEFAULT_TEST_TIMEOUT_SECONDS,
+    RELEASE_CHECK_GATES,
     build_release_demo_report,
     build_release_candidate_report,
     format_release_candidate_report_markdown,
     record_release_candidate_report,
+    selected_release_gates_from_args,
 )
 from research_pack import (
     build_research_pack,
@@ -660,6 +663,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run release-candidate checks.",
     )
     release_check_parser.add_argument("--strict", action="store_true", help="Run runtime gates and the public demo default test gate.")
+    release_check_parser.add_argument("--docs", action="store_true", help="Run only the public docs and guardrail gate.")
+    release_check_parser.add_argument("--benchmarks", action="store_true", help="Run only benchmark and redaction gates.")
+    release_check_parser.add_argument("--packs", action="store_true", help="Run only evidence lint and strict pack audit gates.")
+    release_check_parser.add_argument("--tests", action="store_true", help="Run only the public demo default test gate.")
+    release_check_parser.add_argument("--only", choices=RELEASE_CHECK_GATES, action="append", help="Run one named gate; repeat to combine.")
+    release_check_parser.add_argument("--timeout", type=int, default=DEFAULT_TEST_TIMEOUT_SECONDS, help="Timeout in seconds for the tests gate.")
+    release_check_parser.add_argument("--profile", action="store_true", help="Include slow test and pack audit profile details.")
     release_check_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
     release_check_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     release_check_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
@@ -1378,13 +1388,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "release":
         if args.release_command == "check":
             try:
+                selected_gates = selected_release_gates_from_args(args)
+                run_runtime_checks = bool(args.strict or selected_gates)
+                run_default_tests = bool(args.strict or (selected_gates is not None and "tests" in selected_gates))
                 if args.no_write:
                     report = build_release_candidate_report(
                         workspace_id=args.workspace_id,
                         root=args.root,
                         strict=args.strict,
-                        run_runtime_checks=args.strict,
-                        run_default_tests=args.strict,
+                        run_runtime_checks=run_runtime_checks,
+                        run_default_tests=run_default_tests,
+                        selected_gates=selected_gates,
+                        test_timeout_seconds=args.timeout,
+                        profile=args.profile,
                     )
                     markdown = format_release_candidate_report_markdown(report)
                 else:
@@ -1392,8 +1408,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         workspace_id=args.workspace_id,
                         root=args.root,
                         strict=args.strict,
-                        run_runtime_checks=args.strict,
-                        run_default_tests=args.strict,
+                        run_runtime_checks=run_runtime_checks,
+                        run_default_tests=run_default_tests,
+                        selected_gates=selected_gates,
+                        test_timeout_seconds=args.timeout,
+                        profile=args.profile,
                     )
             except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
                 parser.error(str(exc))

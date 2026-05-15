@@ -15,5 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run public demo gates
-        run: python scripts/run_public_demo_checks.py
+      - name: Run release docs gate
+        run: python3 scripts/satlab.py release check --docs --no-write
+      - name: Run public demo test gate
+        run: python3 scripts/satlab.py release check --tests --timeout 420 --no-write

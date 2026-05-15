@@ -91,9 +91,18 @@ def _fixture_metrics() -> dict:
 def _make_static_release_root(root: Path) -> None:
     _write(root / "README.md", "# software-satellite-lab\n\nローカルファーストな AI Coding Flight Recorder です。\n")
     _write(root / "README_EN.md", "# software-satellite-lab\n\nA local-first AI Coding Flight Recorder.\n")
+    _write(root / "SECURITY.md", "# Security\n\nNo API key required for the public demo.\n")
+    _write(root / "CONTRIBUTING.md", "# Contributing\n\nUse local fixtures and avoid private design notes.\n")
+    _write(root / "docs" / "commercial_oss_strategy_v4.md", "# Commercial OSS Strategy v4\n\nPublic roadmap pointer.\n")
     _write(root / "docs" / "release_v0_1_candidate.md", _good_release_doc())
     _write(root / "docs" / "public_demo_walkthrough.md", _good_walkthrough_doc())
     for path in (
+        "pyproject.toml",
+        ".github/ISSUE_TEMPLATE/bug_report.md",
+        ".github/ISSUE_TEMPLATE/evidence_false_support.md",
+        ".github/ISSUE_TEMPLATE/privacy_leak.md",
+        ".github/ISSUE_TEMPLATE/feature_request.md",
+        ".github/ISSUE_TEMPLATE/paid_pilot_inquiry.md",
         "scripts/satlab.py",
         "scripts/release_candidate_checks.py",
         "scripts/demand_gate.py",
@@ -125,6 +134,21 @@ class ReleaseCandidateChecksTests(unittest.TestCase):
             _write(
                 root / "docs" / "public_demo_walkthrough.md",
                 _good_walkthrough_doc() + "\nDo not depend on .private_docs/secret.md.\n",
+            )
+
+            report = build_release_candidate_report(root=root, run_runtime_checks=False)
+
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(_check_status(report, "no_private_docs_required"), "fail")
+        self.assertEqual(report["metrics"]["private_doc_dependency_count"], 1)
+
+    def test_release_check_fails_when_private_packet_slug_appears(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _make_static_release_root(root)
+            _write(
+                root / "docs" / "commercial_oss_strategy_v4.md",
+                "# Strategy\n\nSee software_satellite_lab_m18_m30_commercial_oss_strategy_v4 for details.\n",
             )
 
             report = build_release_candidate_report(root=root, run_runtime_checks=False)
@@ -261,6 +285,66 @@ class ReleaseCandidateChecksTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "pass")
         self.assertFalse(eval_mock.call_args.kwargs["write"])
+
+    def test_release_check_can_run_benchmark_gate_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _make_static_release_root(root)
+            generated_at = timestamp_utc()
+
+            report = build_release_candidate_report(
+                root=root,
+                run_runtime_checks=True,
+                selected_gates=("benchmarks",),
+                runtime_overrides={
+                    "review_benchmark": {
+                        "passed": True,
+                        "critical_false_evidence_count": 0,
+                        "training_export_ready": False,
+                        "generated_at_utc": generated_at,
+                    },
+                    "spartan_benchmark": {
+                        "passed": True,
+                        "metrics": {"critical_false_support": 0},
+                        "generated_at_utc": generated_at,
+                    },
+                },
+            )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["selected_gates"], ["benchmarks"])
+        self.assertEqual({check["gate"] for check in report["checks"]}, {"benchmarks"})
+        self.assertNotIn("no_private_docs_required", {check["id"] for check in report["checks"]})
+
+    def test_release_check_tests_gate_uses_timeout_and_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _make_static_release_root(root)
+            with mock.patch(
+                "release_candidate_checks._run_default_tests",
+                return_value={
+                    "passed": True,
+                    "timed_out": False,
+                    "timeout_seconds": 7,
+                    "elapsed_seconds": 1.5,
+                    "test_gate_profile": [
+                        {"path": "tests/test_release_candidate_checks.py", "status": "pass", "elapsed_seconds": 1.5}
+                    ],
+                },
+            ) as default_tests:
+                report = build_release_candidate_report(
+                    root=root,
+                    run_runtime_checks=True,
+                    run_default_tests=True,
+                    selected_gates=("tests",),
+                    test_timeout_seconds=7,
+                    profile=True,
+                )
+
+        default_tests.assert_called_once()
+        self.assertEqual(default_tests.call_args.kwargs["timeout_seconds"], 7)
+        self.assertEqual(report["metrics"]["test_timeout_seconds"], 7)
+        self.assertEqual(report["profile"]["slow_tests"][0]["path"], "tests/test_release_candidate_checks.py")
 
     def test_demand_gate_fails_below_thresholds(self) -> None:
         report = build_demand_gate_report(
