@@ -498,6 +498,9 @@ def _walk_vault_object_files(objects_root: Path, *, root: Path) -> tuple[list[Pa
     skipped_objects: list[dict[str, str]] = []
     if not objects_root.exists():
         return object_paths, skipped_objects
+    if objects_root.is_symlink():
+        skipped_objects.append(_skipped_object_entry(objects_root, root=root, reason="symlink_refused"))
+        return object_paths, skipped_objects
 
     objects_root_resolved = objects_root.resolve()
     for current_root_text, dirnames, filenames in os.walk(objects_root, followlinks=False):

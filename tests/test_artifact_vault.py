@@ -344,6 +344,30 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects/aa")
             self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
 
+    def test_artifact_gc_dry_run_reports_symlink_objects_root_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            root = base / "workspace"
+            root.mkdir()
+            outside_objects = base / "outside-objects"
+            outside_objects.mkdir()
+            (outside_objects / "escaped-object").write_text("outside vault\n", encoding="utf-8")
+            objects_root = root / "artifacts" / "vault" / "objects"
+            objects_root.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                objects_root.symlink_to(outside_objects, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["object_count"], 0)
+            self.assertEqual(report["counts"]["unreferenced_object_count"], 0)
+            self.assertEqual(report["counts"]["skipped_object_count"], 1)
+            self.assertEqual(report["reclaimable_bytes"], 0)
+            self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects")
+            self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
+
     def test_artifact_gc_dry_run_reports_invalid_sha256_refs_as_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
