@@ -18,7 +18,7 @@ It expands only the remaining implementation slices identified in this pass, and
 
 | Area | Implemented baseline | Remaining backlog |
 | --- | --- | --- |
-| M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `evidence support`, symlink/path traversal refusal, content-addressed vault objects | `artifact gc --dry-run`; support policy JSON registry and summary report |
+| M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `evidence support`, `evidence policy`, support policy JSON registry and summary report, symlink/path traversal refusal, content-addressed vault objects | `artifact gc --dry-run` |
 | M11 Derived Evidence Graph + Lint | `evidence graph`, `evidence lint`, `evidence trace --why-blocked`, `evidence impact`, graph schema validation, target fingerprints | graph diff between two snapshots |
 | M12 Adversarial Review Memory Benchmark | `review eval`, `review miss-report`, `review benchmark --spartan`, synthetic/adversarial fixtures, miss taxonomy, dogfood metrics slot | review fixture generator; dogfood importer; benchmark trend report; eval compare; target-fingerprint ablation |
 | M13 Cross-Agent Intake | `intake agent-session`, `intake pr-bundle`, agent-session bundle fixtures, redaction and no-network tests | no additional hard-mode closure item identified in this pass |
@@ -63,6 +63,8 @@ Acceptance:
 - Output is deterministic for fixture roots.
 
 ### PR 2: M10 Support Policy Registry
+
+Status: implemented as an inspectable public registry and summary command.
 
 Goal: make support-kernel rules inspectable without changing the default decision behavior.
 

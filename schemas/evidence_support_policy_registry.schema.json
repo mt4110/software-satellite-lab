@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Software Satellite Evidence Support Policy Registry",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "policy_id",
+    "support_kernel_schema",
+    "support_polarities",
+    "decision_requirements",
+    "support_classes",
+    "blocker_reasons",
+    "warning_reasons",
+    "signals",
+    "default_paths"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_name": {
+      "const": "software-satellite-evidence-support-policy-registry"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "policy_id": {
+      "const": "evidence_support_v1"
+    },
+    "support_kernel_schema": {
+      "const": "software-satellite-evidence-support-result"
+    },
+    "support_polarities": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "enum": ["diagnostic", "negative", "none", "positive", "risk"]
+      },
+      "uniqueItems": true
+    },
+    "decision_requirements": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["requirement_id", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "requirement_id": {
+            "enum": [
+              "valid_source_ref",
+              "prior_to_review",
+              "not_current_subject",
+              "not_weak_match",
+              "not_contradictory",
+              "not_unverified_agent_claim",
+              "positive_signal_required",
+              "negative_or_risk_signal_required"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "support_classes": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "required": [
+          "support_class",
+          "can_support_decision",
+          "allowed_decision_polarities",
+          "default_blockers",
+          "summary"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "support_class": {
+            "enum": [
+              "source_linked_prior",
+              "negative_prior",
+              "current_review_subject",
+              "future_evidence",
+              "missing_source",
+              "modified_source",
+              "weak_match",
+              "contradictory",
+              "manual_pin_diagnostic",
+              "unverified_agent_claim",
+              "unknown"
+            ]
+          },
+          "can_support_decision": {
+            "type": "boolean"
+          },
+          "allowed_decision_polarities": {
+            "type": "array",
+            "items": {
+              "enum": ["diagnostic", "negative", "none", "positive", "risk"]
+            },
+            "uniqueItems": true
+          },
+          "default_blockers": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "binary_source_refused",
+                "contradictory",
+                "current_review_subject",
+                "event_not_found",
+                "future_evidence",
+                "manual_pin_diagnostic",
+                "missing_negative_or_risk_signal",
+                "missing_positive_signal",
+                "missing_source",
+                "missing_verification_signal",
+                "missing_vault_object",
+                "modified_source",
+                "noncanonical_vault_object_path",
+                "not_artifact_ref",
+                "not_captured",
+                "outside_workspace",
+                "oversize_source",
+                "symlink_refused",
+                "unverified_agent_claim",
+                "vault_checksum_mismatch",
+                "vault_object_outside_vault",
+                "weak_match"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "blocker_reasons": {
+      "type": "array",
+      "minItems": 22,
+      "maxItems": 22,
+      "items": {
+        "enum": [
+          "binary_source_refused",
+          "contradictory",
+          "current_review_subject",
+          "event_not_found",
+          "future_evidence",
+          "manual_pin_diagnostic",
+          "missing_negative_or_risk_signal",
+          "missing_positive_signal",
+          "missing_source",
+          "missing_verification_signal",
+          "missing_vault_object",
+          "modified_source",
+          "noncanonical_vault_object_path",
+          "not_artifact_ref",
+          "not_captured",
+          "outside_workspace",
+          "oversize_source",
+          "symlink_refused",
+          "unverified_agent_claim",
+          "vault_checksum_mismatch",
+          "vault_object_outside_vault",
+          "weak_match"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "warning_reasons": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "enum": [
+          "manual_pin_diagnostic",
+          "original_source_modified_after_capture",
+          "verified_git_ref_without_vault_object"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "signals": {
+      "type": "object",
+      "required": [
+        "positive_statuses",
+        "negative_statuses",
+        "unresolved_statuses",
+        "positive_evidence_types",
+        "failure_evidence_types"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "positive_statuses": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "enum": [
+              "accept",
+              "accepted",
+              "pass",
+              "passed",
+              "resolved",
+              "winner_selected"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "negative_statuses": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "enum": [
+              "blocked",
+              "error",
+              "failed",
+              "needs_fix",
+              "quality_fail",
+              "reject",
+              "rejected"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "unresolved_statuses": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "enum": [
+              "needs_more_evidence",
+              "needs_review",
+              "pending",
+              "unresolved"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "positive_evidence_types": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "enum": [
+              "accepted",
+              "human_acceptance",
+              "test_pass",
+              "verification_pass"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "failure_evidence_types": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "enum": [
+              "blocker",
+              "failure",
+              "rejected",
+              "test_fail",
+              "unresolved"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "default_paths": {
+      "type": "object",
+      "required": [
+        "network_calls",
+        "private_docs_required",
+        "api_key_required",
+        "trainable_export_artifacts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "network_calls": {
+          "const": false
+        },
+        "private_docs_required": {
+          "const": false
+        },
+        "api_key_required": {
+          "const": false
+        },
+        "trainable_export_artifacts": {
+          "const": false
+        }
+      }
+    }
+  }
+}

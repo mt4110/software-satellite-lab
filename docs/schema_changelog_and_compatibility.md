@@ -19,11 +19,16 @@ This document records the public compatibility posture for the open schema surfa
 | `artifact_ref` | `schemas/artifact_ref.schema.json` | 1 | Top-level shape is strict; new artifact kinds need enum review. | Content identity, capture state, and redaction metadata must remain stable. |
 | `human_verdict` | `scripts/failure_memory_review.py` | 1 | Verdict vocabulary changes are fail-closed unless mapped to an evaluation signal. | Unknown verdicts must not become positive support. |
 | `evidence_support_result` | `schemas/evidence_support.schema.json` | 1 | Support classes and polarity are policy-bearing. | Unknown support classes are non-supporting until upgraded. |
+| `evidence_support_policy_registry` | `schemas/evidence_support_policy_registry.schema.json` | 1 | Registry changes must mirror the local support kernel or fail validation. | Unknown classes, blockers, signals, or default-path flags are invalid. |
 | `review_memory_fixture` | `schemas/review_memory_fixture.schema.json` | 1 | Fixture categories are additive when old expectations still mean the same thing. | Breaking expectation semantics need a suite version bump. |
 | `agent_session_bundle` | `schemas/agent_session_bundle.schema.json` | 1 | New local artifact kinds are additive only after intake policy review. | Provider metadata remains descriptive; no live integration is implied. |
 | `satellite_evidence_pack_v1` | `schemas/satellite_evidence_pack_v1.schema.json` | 1 | Manifest fields are strict and allowlisted. | Unknown fields, executable runtime, network, secrets, repo writes, and training export requests are blocked. |
 
 ## Changelog
+
+### 2026-05-15
+
+- Added `schemas/evidence_support_policy_registry.schema.json` and the public `configs/evidence_support_policies/v1.json` registry for inspecting Evidence Support Kernel policy without changing default decision behavior.
 
 ### 2026-05-14
 

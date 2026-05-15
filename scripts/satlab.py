@@ -42,7 +42,12 @@ from evidence_pack_v1 import (
     scaffold_evidence_pack_v1,
     test_evidence_pack_v1_path,
 )
-from evidence_support import build_evidence_support_result, format_evidence_support_result
+from evidence_support import (
+    build_evidence_support_result,
+    build_support_policy_report,
+    format_evidence_support_result,
+    format_support_policy_report,
+)
 from failure_memory_review import (
     build_failure_recall,
     build_review_risk_report,
@@ -231,6 +236,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evidence_support_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     evidence_support_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    evidence_policy_parser = evidence_subparsers.add_parser(
+        "policy",
+        help="Inspect the local Evidence Support Kernel policy registry.",
+    )
+    evidence_policy_parser.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        help="Optional support policy registry JSON path. Defaults to configs/evidence_support_policies/v1.json.",
+    )
+    evidence_policy_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     evidence_graph_parser = evidence_subparsers.add_parser(
         "graph",
@@ -814,6 +831,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_evidence_support_result(result))
         return 0 if result.get("can_support_decision") else 1
+
+    if args.command == "evidence" and args.evidence_command == "policy":
+        try:
+            report = build_support_policy_report(args.policy, root=args.root)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_support_policy_report(report))
+        return 0
 
     if args.command == "evidence" and args.evidence_command == "graph":
         graph = build_evidence_graph(
