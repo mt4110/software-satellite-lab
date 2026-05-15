@@ -16,6 +16,7 @@ from demand_gate import build_demand_gate_report, format_demand_gate_report, rec
 from evidence_lint import build_evidence_lint_report
 from evidence_pack_v1 import audit_evidence_pack_v1_path
 from gemma_runtime import repo_root, timestamp_slug, timestamp_utc, write_json
+from pilot_evidence import build_pilot_report, format_pilot_report_markdown, record_pilot_report
 from review_benchmark import run_review_benchmark
 from review_memory_eval import run_review_memory_eval
 from workspace_state import DEFAULT_WORKSPACE_ID
@@ -49,17 +50,25 @@ REQUIRED_RELEASE_FILES = (
     ".github/ISSUE_TEMPLATE/privacy_leak.md",
     ".github/ISSUE_TEMPLATE/feature_request.md",
     ".github/ISSUE_TEMPLATE/paid_pilot_inquiry.md",
+    "scripts/satlab.py",
     "scripts/release_candidate_checks.py",
     "scripts/demand_gate.py",
+    "scripts/pilot_evidence.py",
     "docs/commercial_oss_strategy_v4.md",
     "docs/release_v0_1_candidate.md",
     "docs/public_demo_walkthrough.md",
+    "schemas/pilot_evidence_record.schema.json",
+    "templates/pilot_interview_script.md",
+    "templates/pilot_demo_checklist.md",
+    "templates/paid_pilot_statement_of_value.md",
+    "tests/test_pilot_evidence.py",
     "tests/test_release_candidate_checks.py",
 )
 PUBLIC_DEMO_FIXTURES = (
     "examples/review_memory_benchmark/synthetic_suite.json",
     "examples/agent_session_bundles/generic.json",
     "examples/demand_gate/release_candidate_fixture.json",
+    "examples/pilot_evidence/passing_gate_records.jsonl",
     "templates/failure-memory-pack.satellite.yaml",
     "templates/agent-session-pack.satellite.yaml",
 )
@@ -80,7 +89,14 @@ PUBLIC_SCAN_ROOTS = (
 )
 DEFAULT_DEMO_COMMANDS = (
     "python3 scripts/satlab.py release demo --no-api",
-    "python3 scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md",
+    (
+        "python3 scripts/satlab.py demand gate "
+        "--fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md"
+    ),
+    (
+        "python3 scripts/satlab.py pilot report "
+        "--fixture-records examples/pilot_evidence/passing_gate_records.jsonl --format md"
+    ),
 )
 
 PRIVATE_DOC_PATTERNS = (
@@ -725,6 +741,59 @@ def _build_demand_gate_wired_check(
     return _check("demand_gate_report_exists", "Demand gate report renders or writes", passed, detail=payload)
 
 
+def _build_pilot_gate_wired_check(
+    result: Mapping[str, Any] | None,
+    *,
+    root: Path,
+    workspace_id: str,
+    run: bool,
+    write: bool,
+) -> dict[str, Any]:
+    if result is None and run:
+        fixture = root / "examples" / "pilot_evidence" / "passing_gate_records.jsonl"
+        if write:
+            pilot_report, pilot_markdown, latest_json, latest_md, _run_json, _run_md = record_pilot_report(
+                workspace_id=workspace_id,
+                root=root,
+                records_path=fixture,
+            )
+            report_exists = latest_json.is_file() and latest_md.is_file()
+        else:
+            pilot_report = build_pilot_report(
+                workspace_id=workspace_id,
+                root=root,
+                records_path=fixture,
+            )
+            pilot_markdown = format_pilot_report_markdown(pilot_report)
+            report_exists = False
+        paths = _mapping_dict(pilot_report.get("paths"))
+        payload = {
+            "status": pilot_report.get("status"),
+            "paid_pilot_gate_status": _mapping_dict(pilot_report.get("paid_pilot_gate")).get("status"),
+            "report_latest_json_path": paths.get("report_latest_json_path"),
+            "report_latest_md_path": paths.get("report_latest_md_path"),
+            "report_exists": report_exists,
+            "report_rendered": bool(pilot_markdown),
+            "records_source": pilot_report.get("records_source"),
+        }
+    elif result is None:
+        payload = {
+            "status": "pass",
+            "paid_pilot_gate_status": "pass",
+            "report_exists": False,
+            "report_rendered": True,
+            "not_run_static_only": True,
+        }
+    else:
+        payload = dict(result)
+    passed = (
+        payload.get("status") == "pass"
+        and payload.get("paid_pilot_gate_status") == "pass"
+        and bool(payload.get("report_exists") or payload.get("report_rendered"))
+    )
+    return _check("pilot_gate_report_exists", "Paid-pilot gate report renders or writes", passed, detail=payload)
+
+
 def _build_static_checks(root: Path) -> list[dict[str, Any]]:
     required = _required_files_check(root)
     fresh_clone = _fresh_clone_documented(root)
@@ -906,6 +975,20 @@ def build_release_candidate_report(
         )
         checks.append(_with_gate(demand_check, "docs", elapsed_seconds=demand_elapsed))
 
+        pilot_check, pilot_elapsed = _timed_gate(
+            "Paid-pilot gate report render",
+            "docs",
+            timings,
+            lambda: _build_pilot_gate_wired_check(
+                _mapping_dict(overrides.get("pilot_gate")) or None,
+                root=resolved_root,
+                workspace_id=workspace_id,
+                run=bool(run_runtime_checks and strict),
+                write=write_subreports,
+            ),
+        )
+        checks.append(_with_gate(pilot_check, "docs", elapsed_seconds=pilot_elapsed))
+
     critical_false_support_count: Any = None
     if "benchmarks" in selected:
         if run_runtime_checks or benchmark_report_override is not None:
@@ -1037,6 +1120,14 @@ def build_release_candidate_report(
         ),
         {},
     )
+    pilot_gate_check_detail = next(
+        (
+            _mapping_dict(check.get("detail"))
+            for check in checks
+            if check.get("id") == "pilot_gate_report_exists"
+        ),
+        {},
+    )
     timeout_count = sum(
         1
         for check in checks
@@ -1050,6 +1141,10 @@ def build_release_candidate_report(
         "demand_gate_report_exists": bool(demand_gate_check_detail.get("report_exists")) if write_subreports else None,
         "demand_gate_report_rendered": bool(
             demand_gate_check_detail.get("report_exists") or demand_gate_check_detail.get("report_rendered")
+        ),
+        "pilot_gate_report_exists": bool(pilot_gate_check_detail.get("report_exists")) if write_subreports else None,
+        "pilot_gate_report_rendered": bool(
+            pilot_gate_check_detail.get("report_exists") or pilot_gate_check_detail.get("report_rendered")
         ),
         "selected_gates": list(selected),
         "strict_gate_timeout_count": timeout_count,
@@ -1201,6 +1296,7 @@ def build_release_demo_report(
     if not no_api:
         raise ValueError("release demo requires --no-api for the current public demo path.")
     fixture = resolved_root / "examples" / "demand_gate" / "release_candidate_fixture.json"
+    pilot_fixture = resolved_root / "examples" / "pilot_evidence" / "passing_gate_records.jsonl"
     release_report = build_release_candidate_report(
         root=resolved_root,
         workspace_id=workspace_id,
@@ -1221,6 +1317,26 @@ def build_release_demo_report(
             fixture_metrics=fixture,
         )
         demand_markdown = format_demand_gate_report(demand_report)
+    if write:
+        (
+            pilot_report,
+            pilot_markdown,
+            _pilot_latest_json,
+            _pilot_latest_md,
+            _pilot_run_json,
+            _pilot_run_md,
+        ) = record_pilot_report(
+            workspace_id=workspace_id,
+            root=resolved_root,
+            records_path=pilot_fixture,
+        )
+    else:
+        pilot_report = build_pilot_report(
+            workspace_id=workspace_id,
+            root=resolved_root,
+            records_path=pilot_fixture,
+        )
+        pilot_markdown = format_pilot_report_markdown(pilot_report)
     run_slug = timestamp_slug()
     latest_json = release_demo_latest_json_path(workspace_id=workspace_id, root=resolved_root)
     latest_md = release_demo_latest_md_path(workspace_id=workspace_id, root=resolved_root)
@@ -1230,15 +1346,22 @@ def build_release_demo_report(
         release_report=release_report,
         demand_report=demand_report,
         demand_markdown=demand_markdown,
+        pilot_report=pilot_report,
+        pilot_markdown=pilot_markdown,
     )
     report = {
         "schema_name": RELEASE_DEMO_SCHEMA_NAME,
         "schema_version": RELEASE_DEMO_SCHEMA_VERSION,
         "workspace_id": workspace_id,
         "generated_at_utc": timestamp_utc(),
-        "status": "pass" if release_report.get("status") == "pass" and demand_report.get("status") == "pass" else "fail",
+        "status": "pass"
+        if release_report.get("status") == "pass"
+        and demand_report.get("status") == "pass"
+        and pilot_report.get("status") == "pass"
+        else "fail",
         "release_check_status": release_report.get("status"),
         "demand_gate_status": demand_report.get("status"),
+        "pilot_gate_status": pilot_report.get("status"),
         "markdown_report_exists": bool(write),
         "markdown_report_rendered": True,
         "guardrails": {
@@ -1273,6 +1396,8 @@ def format_release_demo_markdown(
     release_report: Mapping[str, Any],
     demand_report: Mapping[str, Any],
     demand_markdown: str,
+    pilot_report: Mapping[str, Any],
+    pilot_markdown: str,
 ) -> str:
     lines = [
         "# Public Demo Walkthrough",
@@ -1297,7 +1422,11 @@ def format_release_demo_markdown(
             "",
             f"1. Release checks finish with `{release_report.get('status')}`.",
             f"2. Demand gate fixture finishes with `{demand_report.get('status')}`.",
-            "3. The operator reads the generated Markdown and only treats real demand evidence as release evidence.",
+            f"3. Paid-pilot gate fixture finishes with `{pilot_report.get('status')}`.",
+            (
+                "4. The operator reads the generated Markdown and only treats real demand "
+                "and pilot records as decision evidence."
+            ),
             "",
             "## Release Check Summary",
             "",
@@ -1309,6 +1438,7 @@ def format_release_demo_markdown(
         if isinstance(check, Mapping):
             lines.append(f"| {check.get('label')} | `{check.get('status')}` |")
     lines.extend(["", "## Demand Gate Fixture", "", demand_markdown.strip(), ""])
+    lines.extend(["", "## Paid-Pilot Gate Fixture", "", pilot_markdown.strip(), ""])
     return redact_release_text("\n".join(lines) + "\n")
 
 

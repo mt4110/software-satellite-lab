@@ -57,3 +57,16 @@ python3 scripts/satlab.py release check --strict --only tests --timeout 180
 ```
 
 Signed evidence and failure-memory features should wait until this baseline is stable.
+
+## M19 Pilot Evidence Gate
+
+M19 keeps the next commercial step file-first:
+
+```bash
+python3 scripts/satlab.py pilot record-interview --help
+python3 scripts/satlab.py pilot record-demo --help
+python3 scripts/satlab.py pilot record-loi --help
+python3 scripts/satlab.py pilot report --format md
+```
+
+The gate must prove the wedge before team-registry work continues: 20 discovery calls, 5 hands-on demos, 5 security-sensitive users, 12 exact-pain recognitions, 5 wants-to-try users, and 2 paid-pilot commitments or LOIs.

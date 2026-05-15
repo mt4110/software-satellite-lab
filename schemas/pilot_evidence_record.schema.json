@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Paid Pilot Evidence Record v1",
+  "type": "object",
+  "required": [
+    "schema_name",
+    "schema_version",
+    "pilot_record_id",
+    "workspace_id",
+    "recorded_at_utc",
+    "record_type",
+    "participant_label",
+    "participant_segment",
+    "evidence",
+    "score",
+    "source_refs",
+    "guardrails"
+  ],
+  "properties": {
+    "schema_name": {
+      "const": "paid_pilot_evidence_record"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "pilot_record_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recorded_at_utc": {
+      "type": "string",
+      "minLength": 1
+    },
+    "record_type": {
+      "enum": [
+        "discovery_call",
+        "hands_on_demo",
+        "loi",
+        "paid_pilot",
+        "security_review"
+      ]
+    },
+    "participant_label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "participant_segment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence": {
+      "type": "object"
+    },
+    "score": {
+      "type": "object",
+      "required": [
+        "exact_pain_recognized",
+        "wants_to_try",
+        "willing_to_install_locally",
+        "willingness_to_pay",
+        "security_sensitive_user",
+        "no_code_upload_matters",
+        "budget_path",
+        "audit_trail_more_important_than_review_comments",
+        "paid_pilot_commitment",
+        "demo_completed",
+        "demo_checklist_passed"
+      ],
+      "properties": {
+        "exact_pain_recognized": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "wants_to_try": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "willing_to_install_locally": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "willingness_to_pay": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "security_sensitive_user": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "no_code_upload_matters": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "budget_path": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "audit_trail_more_important_than_review_comments": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "paid_pilot_commitment": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "demo_completed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "demo_checklist_passed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "source_refs": {
+      "type": "object",
+      "required": [
+        "notes_file_ref"
+      ],
+      "properties": {
+        "notes_file_ref": {
+          "type": "object",
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "role": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "workspace_relative_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "guardrails": {
+      "type": "object",
+      "required": [
+        "no_default_telemetry",
+        "no_raw_code_upload",
+        "no_remote_positive_support_without_local_validation",
+        "no_training_export",
+        "no_hidden_agent_execution"
+      ],
+      "properties": {
+        "no_default_telemetry": {
+          "const": true
+        },
+        "no_raw_code_upload": {
+          "const": true
+        },
+        "no_remote_positive_support_without_local_validation": {
+          "const": true
+        },
+        "no_training_export": {
+          "const": true
+        },
+        "no_hidden_agent_execution": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "paths": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}
