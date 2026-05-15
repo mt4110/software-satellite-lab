@@ -250,6 +250,13 @@ def _workspace_path_text(path: Path, *, root: Path) -> str:
     return relative or str(path)
 
 
+def _workspace_path_text_lexical(path: Path, *, root: Path) -> str:
+    try:
+        return str(path.absolute().relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def _write_ref(ref: dict[str, Any], *, root: Path) -> Path:
     ref_path = artifact_ref_path(str(ref["artifact_id"]), root=root)
     write_json(ref_path, ref)
@@ -445,6 +452,236 @@ def inspect_artifact(artifact_id: str, *, root: Path | None = None) -> dict[str,
         "verification_reason": reason,
         "redaction_notice": "Redaction is best-effort; never upload captured logs or vault objects without a separate human review.",
     }
+
+
+def _safe_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _object_inventory_entry(path: Path, *, root: Path) -> dict[str, Any]:
+    return {
+        "vault_path": _workspace_path_text(path, root=root),
+        "sha256": path.name,
+        "size_bytes": _safe_size(path),
+    }
+
+
+def _malformed_ref_entry(path: Path, *, root: Path, reason: str) -> dict[str, str]:
+    return {
+        "ref_path": _workspace_path_text(path, root=root),
+        "reason": reason,
+    }
+
+
+def _skipped_object_entry(path: Path, *, root: Path, reason: str) -> dict[str, str]:
+    return {
+        "vault_path": _workspace_path_text_lexical(path, root=root),
+        "reason": reason,
+    }
+
+
+def _load_gc_ref(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, "invalid_json"
+    except OSError:
+        return None, "unreadable_ref"
+    if not isinstance(payload, dict):
+        return None, "ref_is_not_object"
+    if payload.get("schema_name") != ARTIFACT_REF_SCHEMA_NAME:
+        return None, "unexpected_schema_name"
+    if payload.get("schema_version") != ARTIFACT_REF_SCHEMA_VERSION:
+        return None, "unsupported_schema_version"
+    artifact_id = _clean_text(payload.get("artifact_id"))
+    if artifact_id is None or not ARTIFACT_ID_RE.match(artifact_id):
+        return None, "invalid_artifact_id"
+    return payload, None
+
+
+def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
+    resolved_root = _resolve_root(root)
+    objects_root = artifact_objects_root(resolved_root)
+    refs_root = artifact_refs_root(resolved_root)
+
+    object_paths: list[Path] = []
+    skipped_objects: list[dict[str, str]] = []
+    if objects_root.exists():
+        for path in sorted(objects_root.rglob("*")):
+            if path.is_symlink():
+                skipped_objects.append(
+                    _skipped_object_entry(
+                        path,
+                        root=resolved_root,
+                        reason="symlink_refused",
+                    )
+                )
+                continue
+            if path.is_file():
+                object_paths.append(path.resolve())
+    object_by_key = {str(path): _object_inventory_entry(path, root=resolved_root) for path in object_paths}
+    referenced: dict[str, dict[str, Any]] = {}
+    missing_objects: list[dict[str, Any]] = []
+    malformed_refs: list[dict[str, str]] = []
+    valid_ref_count = 0
+    captured_ref_count = 0
+
+    ref_paths = sorted(refs_root.glob("*.json")) if refs_root.exists() else []
+    for ref_path in ref_paths:
+        ref, malformed_reason = _load_gc_ref(ref_path)
+        if ref is None:
+            malformed_refs.append(
+                _malformed_ref_entry(
+                    ref_path,
+                    root=resolved_root,
+                    reason=malformed_reason or "malformed_ref",
+                )
+            )
+            continue
+        valid_ref_count += 1
+        if _clean_text(ref.get("capture_state")) != "captured":
+            continue
+        captured_ref_count += 1
+
+        artifact_id = _clean_text(ref.get("artifact_id")) or "unknown"
+        sha256 = _clean_text(ref.get("sha256"))
+        object_path = resolve_vault_object_path(ref, root=resolved_root)
+        expected_path = _vault_path_for_sha(sha256, root=resolved_root).resolve() if sha256 else object_path
+        verified, reason = artifact_ref_object_verified(ref, root=resolved_root)
+        if not verified or object_path is None:
+            missing_objects.append(
+                {
+                    "artifact_id": artifact_id,
+                    "ref_path": _workspace_path_text(ref_path, root=resolved_root),
+                    "expected_vault_path": (
+                        _workspace_path_text(expected_path, root=resolved_root)
+                        if expected_path
+                        else None
+                    ),
+                    "sha256": sha256,
+                    "reason": reason or "missing_vault_object",
+                }
+            )
+            continue
+
+        key = str(object_path.resolve())
+        entry = referenced.setdefault(
+            key,
+            {
+                **_object_inventory_entry(object_path, root=resolved_root),
+                "artifact_ids": [],
+                "ref_paths": [],
+            },
+        )
+        entry["artifact_ids"].append(artifact_id)
+        entry["ref_paths"].append(_workspace_path_text(ref_path, root=resolved_root))
+
+    referenced_objects: list[dict[str, Any]] = []
+    for entry in referenced.values():
+        entry["artifact_ids"] = sorted(set(entry["artifact_ids"]))
+        entry["ref_paths"] = sorted(set(entry["ref_paths"]))
+        entry["ref_count"] = len(entry["ref_paths"])
+        referenced_objects.append(entry)
+    referenced_objects.sort(key=lambda item: str(item.get("vault_path") or ""))
+
+    unreferenced_objects = [
+        object_by_key[key]
+        for key in sorted(object_by_key)
+        if key not in referenced
+    ]
+    reclaimable_bytes = sum(int(item.get("size_bytes") or 0) for item in unreferenced_objects)
+    missing_objects.sort(
+        key=lambda item: (
+            str(item.get("expected_vault_path") or ""),
+            str(item.get("artifact_id") or ""),
+        )
+    )
+    malformed_refs.sort(key=lambda item: str(item.get("ref_path") or ""))
+
+    counts = {
+        "ref_count": valid_ref_count,
+        "captured_ref_count": captured_ref_count,
+        "malformed_ref_count": len(malformed_refs),
+        "object_count": len(object_paths),
+        "referenced_object_count": len(referenced_objects),
+        "unreferenced_object_count": len(unreferenced_objects),
+        "missing_object_count": len(missing_objects),
+        "skipped_object_count": len(skipped_objects),
+        "reclaimable_bytes": reclaimable_bytes,
+    }
+    return {
+        "schema_name": "software-satellite-artifact-gc-dry-run",
+        "schema_version": 1,
+        "dry_run": True,
+        "delete_performed": False,
+        "vault_root": _workspace_path_text(artifact_vault_root(resolved_root), root=resolved_root),
+        "counts": counts,
+        "referenced_objects": referenced_objects,
+        "unreferenced_objects": unreferenced_objects,
+        "missing_objects": missing_objects,
+        "malformed_refs": malformed_refs,
+        "skipped_objects": skipped_objects,
+        "reclaimable_bytes": reclaimable_bytes,
+        "safety_notice": "Dry run only; no vault refs or objects were removed.",
+    }
+
+
+def format_artifact_gc_dry_run_report(report: Mapping[str, Any]) -> str:
+    counts = dict(report.get("counts") or {})
+    lines = [
+        "Artifact GC dry run",
+        f"Vault: {_clean_text(report.get('vault_root')) or 'artifacts/vault'}",
+        "Mode: dry-run; no files removed.",
+        f"Referenced objects: {int(counts.get('referenced_object_count') or 0)}",
+        f"Unreferenced objects: {int(counts.get('unreferenced_object_count') or 0)}",
+        f"Missing objects: {int(counts.get('missing_object_count') or 0)}",
+        f"Malformed refs: {int(counts.get('malformed_ref_count') or 0)}",
+        f"Skipped objects: {int(counts.get('skipped_object_count') or 0)}",
+        f"Reclaimable bytes: {int(report.get('reclaimable_bytes') or counts.get('reclaimable_bytes') or 0)}",
+    ]
+
+    unreferenced = list(report.get("unreferenced_objects") or [])
+    if unreferenced:
+        lines.extend(["", "Unreferenced objects:"])
+        for item in unreferenced:
+            lines.append(
+                f"- {_clean_text(item.get('vault_path')) or 'unknown'} "
+                f"({int(item.get('size_bytes') or 0)} bytes)"
+            )
+
+    missing = list(report.get("missing_objects") or [])
+    if missing:
+        lines.extend(["", "Missing objects:"])
+        for item in missing:
+            lines.append(
+                "- "
+                f"{_clean_text(item.get('artifact_id')) or 'unknown'} -> "
+                f"{_clean_text(item.get('expected_vault_path')) or 'unknown'} "
+                f"({_clean_text(item.get('reason')) or 'missing_vault_object'})"
+            )
+
+    malformed = list(report.get("malformed_refs") or [])
+    if malformed:
+        lines.extend(["", "Malformed refs:"])
+        for item in malformed:
+            lines.append(
+                f"- {_clean_text(item.get('ref_path')) or 'unknown'} "
+                f"({_clean_text(item.get('reason')) or 'malformed_ref'})"
+            )
+
+    skipped = list(report.get("skipped_objects") or [])
+    if skipped:
+        lines.extend(["", "Skipped objects:"])
+        for item in skipped:
+            lines.append(
+                f"- {_clean_text(item.get('vault_path')) or 'unknown'} "
+                f"({_clean_text(item.get('reason')) or 'skipped_object'})"
+            )
+
+    return "\n".join(lines)
 
 
 def format_artifact_inspection(inspection: Mapping[str, Any]) -> str:

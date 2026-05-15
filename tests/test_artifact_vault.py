@@ -6,7 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -14,7 +14,14 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from artifact_vault import artifact_ref_object_verified, capture_artifact, inspect_artifact, load_artifact_ref  # noqa: E402
+from artifact_vault import (  # noqa: E402
+    artifact_gc_dry_run,
+    artifact_ref_object_verified,
+    capture_artifact,
+    format_artifact_gc_dry_run_report,
+    inspect_artifact,
+    load_artifact_ref,
+)
 from artifact_vault import ARTIFACT_KINDS  # noqa: E402
 from satlab import build_parser, main as satlab_main  # noqa: E402
 
@@ -200,6 +207,119 @@ class ArtifactVaultTests(unittest.TestCase):
         self.assertTrue(inspection["object_verified"])
         self.assertEqual(inspection["ref"]["artifact_id"], captured["artifact_id"])
         self.assertIn("best-effort", inspection["redaction_notice"])
+
+    def test_artifact_gc_dry_run_reports_inventory_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            kept_source = root / "kept.txt"
+            kept_source.write_text("kept vault object\n", encoding="utf-8")
+            kept_ref = capture_artifact(
+                kept_source,
+                kind="review_note",
+                root=root,
+                captured_at_utc="2026-05-12T00:00:00+00:00",
+            )
+            missing_source = root / "missing.txt"
+            missing_source.write_text("missing vault object\n", encoding="utf-8")
+            missing_ref = capture_artifact(
+                missing_source,
+                kind="review_note",
+                root=root,
+                captured_at_utc="2026-05-12T00:00:01+00:00",
+            )
+            missing_object = root / missing_ref["vault_path"]
+            missing_object.unlink()
+            stale_object = root / "artifacts" / "vault" / "objects" / "zz" / "stale-object"
+            stale_object.parent.mkdir(parents=True, exist_ok=True)
+            stale_object.write_text("stale object\n", encoding="utf-8")
+            stale_size = stale_object.stat().st_size
+            malformed_ref = root / "artifacts" / "vault" / "refs" / "artifact_bad.json"
+            malformed_ref.write_text("{not-json", encoding="utf-8")
+
+            report = artifact_gc_dry_run(root=root)
+            formatted = format_artifact_gc_dry_run_report(report)
+
+            self.assertTrue(stale_object.exists())
+            self.assertEqual(report["schema_name"], "software-satellite-artifact-gc-dry-run")
+            self.assertTrue(report["dry_run"])
+            self.assertFalse(report["delete_performed"])
+            self.assertEqual(report["counts"]["referenced_object_count"], 1)
+            self.assertEqual(report["counts"]["unreferenced_object_count"], 1)
+            self.assertEqual(report["counts"]["missing_object_count"], 1)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["reclaimable_bytes"], stale_size)
+            self.assertEqual(report["referenced_objects"][0]["artifact_ids"], [kept_ref["artifact_id"]])
+            self.assertEqual(report["unreferenced_objects"][0]["vault_path"], "artifacts/vault/objects/zz/stale-object")
+            self.assertEqual(report["missing_objects"][0]["artifact_id"], missing_ref["artifact_id"])
+            self.assertEqual(report["missing_objects"][0]["reason"], "missing_vault_object")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_json")
+            self.assertIn("Mode: dry-run; no files removed.", formatted)
+            self.assertIn("artifact_bad.json", formatted)
+
+    def test_satlab_artifact_gc_dry_run_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stale_object = root / "artifacts" / "vault" / "objects" / "aa" / "stale-object"
+            stale_object.parent.mkdir(parents=True, exist_ok=True)
+            stale_object.write_text("stale object\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = satlab_main(
+                    [
+                        "--root",
+                        str(root),
+                        "artifact",
+                        "gc",
+                        "--dry-run",
+                        "--format",
+                        "json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            stale_object_exists = stale_object.exists()
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(stale_object_exists)
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["delete_performed"])
+        self.assertEqual(payload["counts"]["unreferenced_object_count"], 1)
+        self.assertEqual(payload["reclaimable_bytes"], len("stale object\n".encode()))
+
+    def test_satlab_artifact_gc_requires_dry_run_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    satlab_main(["--root", tmpdir, "artifact", "gc"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--dry-run", stderr.getvalue())
+
+    def test_artifact_gc_dry_run_reports_symlink_objects_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            root = base / "workspace"
+            root.mkdir()
+            outside = base / "outside-vault-object.txt"
+            outside.write_text("outside vault\n", encoding="utf-8")
+            symlink_object = root / "artifacts" / "vault" / "objects" / "aa" / "linked-object"
+            symlink_object.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                symlink_object.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+            formatted = format_artifact_gc_dry_run_report(report)
+
+            self.assertTrue(symlink_object.exists() or symlink_object.is_symlink())
+            self.assertEqual(report["counts"]["object_count"], 0)
+            self.assertEqual(report["counts"]["unreferenced_object_count"], 0)
+            self.assertEqual(report["counts"]["skipped_object_count"], 1)
+            self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects/aa/linked-object")
+            self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
+            self.assertIn("Skipped objects: 1", formatted)
 
 
 if __name__ == "__main__":
