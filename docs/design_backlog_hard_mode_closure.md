@@ -18,7 +18,7 @@ It expands only the remaining implementation slices identified in this pass, and
 
 | Area | Implemented baseline | Remaining backlog |
 | --- | --- | --- |
-| M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `evidence support`, symlink/path traversal refusal, content-addressed vault objects | `artifact gc --dry-run`; support policy JSON registry and summary report |
+| M10 Artifact Vault + Support Kernel | `scripts/artifact_vault.py`, `scripts/evidence_support.py`, `artifact capture`, `artifact inspect`, `artifact gc --dry-run`, `evidence support`, symlink/path traversal refusal, content-addressed vault objects | support policy JSON registry and summary report |
 | M11 Derived Evidence Graph + Lint | `evidence graph`, `evidence lint`, `evidence trace --why-blocked`, `evidence impact`, graph schema validation, target fingerprints | graph diff between two snapshots |
 | M12 Adversarial Review Memory Benchmark | `review eval`, `review miss-report`, `review benchmark --spartan`, synthetic/adversarial fixtures, miss taxonomy, dogfood metrics slot | review fixture generator; dogfood importer; benchmark trend report; eval compare; target-fingerprint ablation |
 | M13 Cross-Agent Intake | `intake agent-session`, `intake pr-bundle`, agent-session bundle fixtures, redaction and no-network tests | no additional hard-mode closure item identified in this pass |
@@ -45,6 +45,8 @@ It expands only the remaining implementation slices identified in this pass, and
 Only milestones with remaining implementation slices are expanded below. Milestones marked as having no additional closure item in the status summary are intentionally not repeated as PRs.
 
 ### PR 1: M10 Artifact GC Dry Run
+
+Status: implemented as a non-destructive inventory command.
 
 Goal: add a non-destructive inventory command for stale vault objects.
 

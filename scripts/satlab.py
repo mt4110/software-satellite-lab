@@ -6,7 +6,14 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from artifact_vault import ARTIFACT_KINDS, capture_artifact, format_artifact_inspection, inspect_artifact
+from artifact_vault import (
+    ARTIFACT_KINDS,
+    artifact_gc_dry_run,
+    capture_artifact,
+    format_artifact_gc_dry_run_report,
+    format_artifact_inspection,
+    inspect_artifact,
+)
 from agent_session_intake import (
     SUPPORTED_AGENT_LABELS,
     build_agent_session_bundle,
@@ -173,6 +180,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     artifact_inspect_parser.add_argument("--artifact", required=True, help="Artifact id.")
     artifact_inspect_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    artifact_gc_parser = artifact_subparsers.add_parser(
+        "gc",
+        help="Inventory artifact vault objects without deleting anything.",
+    )
+    artifact_gc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        required=True,
+        help="Required safety flag. Reports stale objects without removing files.",
+    )
+    artifact_gc_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
 
     intake_parser = subparsers.add_parser("intake", help="Ingest local file-first artifacts from external work sessions.")
     intake_subparsers = intake_parser.add_subparsers(dest="intake_command", required=True)
@@ -740,6 +759,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_artifact_inspection(inspection))
         return 0 if inspection.get("object_verified") or inspection.get("ref", {}).get("capture_state") != "captured" else 1
+
+    if args.command == "artifact" and args.artifact_command == "gc":
+        report = artifact_gc_dry_run(root=args.root)
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(format_artifact_gc_dry_run_report(report))
+        return 0
 
     if args.command == "intake" and args.intake_command == "agent-session":
         has_loose_files = any(
