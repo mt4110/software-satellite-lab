@@ -490,6 +490,38 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs")
             self.assertEqual(report["malformed_refs"][0]["reason"], "refs_root_symlink_refused")
 
+    def test_artifact_gc_dry_run_reports_symlink_ref_files_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            root = base / "workspace"
+            root.mkdir()
+            outside_ref = base / "outside-ref.json"
+            outside_ref.write_text(
+                json.dumps(
+                    {
+                        "schema_name": "software-satellite-artifact-ref",
+                        "schema_version": 1,
+                        "artifact_id": "artifact_outside",
+                        "capture_state": "captured",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.mkdir(parents=True, exist_ok=True)
+            linked_ref = refs_root / "artifact_linked.json"
+            try:
+                linked_ref.symlink_to(outside_ref)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_linked.json")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "ref_symlink_refused")
+
     def test_artifact_gc_dry_run_reuses_verification_for_duplicate_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

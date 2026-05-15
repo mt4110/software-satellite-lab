@@ -592,6 +592,15 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
     else:
         ref_paths = sorted(refs_root.glob("*.json")) if refs_root.exists() else []
     for ref_path in ref_paths:
+        if ref_path.is_symlink():
+            malformed_refs.append(
+                _malformed_ref_entry_lexical(
+                    ref_path,
+                    root=resolved_root,
+                    reason="ref_symlink_refused",
+                )
+            )
+            continue
         ref, malformed_reason = _load_gc_ref(ref_path)
         if ref is None:
             malformed_refs.append(
