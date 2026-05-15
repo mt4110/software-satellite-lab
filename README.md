@@ -79,7 +79,9 @@ AI-assisted software work のレビュー、失敗、修復、比較、人間の
 - `docs/public_demo_walkthrough.md`: no-provider public demo のテキスト transcript
 - `docs/evidence_pack_contributor_guide.md`: Evidence Pack 外部コントリビューター向けの公開ガイド
 - `docs/schema_changelog_and_compatibility.md`: core schema の changelog と互換性 matrix
+- `docs/commercial_oss_strategy_v4.md`: M18-M30 の公開 roadmap pointer
 - `examples/software_work_events/`: 公開 `software_work_event` example gallery
+- `SECURITY.md` / `CONTRIBUTING.md`: security reporting と contribution policy
 
 ## Evidence-Gated Git Review
 
@@ -178,6 +180,9 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py validation report --write --format md
 .venv/bin/python scripts/satlab.py release demo --no-api
 .venv/bin/python scripts/satlab.py release check --strict
+.venv/bin/python scripts/satlab.py release check --strict --profile
+.venv/bin/python scripts/satlab.py release check --strict --only benchmarks
+.venv/bin/python scripts/satlab.py release check --strict --only tests --timeout 180
 .venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
 .venv/bin/python scripts/satlab.py demand gate --format md
 .venv/bin/python scripts/satlab.py pack list --builtin

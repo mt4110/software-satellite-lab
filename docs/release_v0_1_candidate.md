@@ -12,6 +12,9 @@ It turns AI-assisted software work into source-linked evidence: local artifacts,
 
 ```bash
 python3 scripts/satlab.py release check --strict
+python3 scripts/satlab.py release check --strict --profile
+python3 scripts/satlab.py release check --strict --only benchmarks
+python3 scripts/satlab.py release check --strict --only tests --timeout 180
 python3 scripts/satlab.py release demo --no-api
 python3 scripts/satlab.py validation report --write --format md
 python3 scripts/satlab.py demand gate --format md
@@ -84,6 +87,19 @@ Release checks run:
 
 The benchmark report is generated during the check, so stale benchmark evidence is not accepted as a release pass.
 
+## Strict Gate Slices
+
+The strict release check can be split when a contributor needs a faster or more focused signal:
+
+```bash
+python3 scripts/satlab.py release check --docs
+python3 scripts/satlab.py release check --benchmarks
+python3 scripts/satlab.py release check --packs
+python3 scripts/satlab.py release check --tests --timeout 180
+```
+
+Use `--profile` to include timing, slow test, and slow pack-audit details in the release report.
+
 ## Demand Validation Summary
 
 The `demand gate` command enforces the v0.1 release-message boundary:
@@ -117,4 +133,4 @@ The public demo includes a synthetic fixture so the gate can be demonstrated wit
 
 ## Next Milestone
 
-M17 should turn the release candidate into a launch-ready public package: final README tightening, CI publishing checks, issue templates, and a clean PR/release narrative grounded in real demand-gate evidence.
+M18 hardens this release candidate into a stable public baseline: named strict gates, timing/profile output, issue templates, package metadata, and a contribution/security surface that does not depend on private design notes.

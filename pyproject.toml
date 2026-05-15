@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "software-satellite-lab"
+version = "0.1.0.dev0"
+description = "Local-first evidence protocol utilities for AI-assisted software work."
+readme = "README_EN.md"
+requires-python = ">=3.10"
+authors = [{ name = "software-satellite-lab contributors" }]
+
+[project.optional-dependencies]
+runtime = [
+  "transformers>=5.5.0,<6",
+  "torch>=2.6.0",
+  "accelerate>=1.2.0",
+]
+multimodal = [
+  "transformers>=5.5.0,<6",
+  "torch>=2.6.0",
+  "torchvision>=0.21.0",
+  "accelerate>=1.2.0",
+  "numpy>=1.26.0",
+  "Pillow>=10.0.0",
+  "pypdfium2>=4.30.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mt4110/software-satellite-lab"
+Repository = "https://github.com/mt4110/software-satellite-lab"
+Issues = "https://github.com/mt4110/software-satellite-lab/issues"
+
+[tool.setuptools]
+py-modules = []

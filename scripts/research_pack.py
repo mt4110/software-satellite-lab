@@ -291,6 +291,28 @@ def _format_pack_audit_summary(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _normalize_release_check_timing(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"elapsed_seconds", "strict_release_check_total_seconds"}:
+                normalized[str(key)] = 0.0
+            else:
+                normalized[str(key)] = _normalize_release_check_timing(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_release_check_timing(item) for item in value]
+    return value
+
+
+def _stable_release_candidate_report(report: Mapping[str, Any]) -> dict[str, Any]:
+    stable = _normalize_release_check_timing(report)
+    if not isinstance(stable, dict):
+        stable = dict(report)
+    stable["generated_at_utc"] = REPRODUCIBLE_GENERATED_AT_UTC
+    return stable
+
+
 def _research_pack_readme() -> str:
     return "\n".join(
         [
@@ -614,7 +636,7 @@ def build_research_pack(
         run_runtime_checks=False,
         run_default_tests=False,
     )
-    release_report["generated_at_utc"] = REPRODUCIBLE_GENERATED_AT_UTC
+    release_report = _stable_release_candidate_report(release_report)
     schema_coverage = build_schema_coverage_report(
         root=resolved_root,
         generated_at_utc=REPRODUCIBLE_GENERATED_AT_UTC,

@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from demand_gate import build_demand_gate_report, format_demand_gate_report, record_demand_gate_report
 from evidence_lint import build_evidence_lint_report
@@ -28,16 +28,30 @@ RELEASE_DEMO_SCHEMA_VERSION = 1
 
 DEFAULT_TEST_TIMEOUT_SECONDS = 180
 BENCHMARK_FRESH_SECONDS = 30 * 60
+RELEASE_CHECK_GATES = ("docs", "benchmarks", "packs", "tests")
+PROFILE_SLOW_ITEM_LIMIT = 8
 
 PUBLIC_DOC_PATHS = (
     "README.md",
     "README_EN.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
     "docs/release_v0_1_candidate.md",
     "docs/public_demo_walkthrough.md",
+    "docs/commercial_oss_strategy_v4.md",
 )
 REQUIRED_RELEASE_FILES = (
+    "pyproject.toml",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/evidence_false_support.md",
+    ".github/ISSUE_TEMPLATE/privacy_leak.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md",
+    ".github/ISSUE_TEMPLATE/paid_pilot_inquiry.md",
     "scripts/release_candidate_checks.py",
     "scripts/demand_gate.py",
+    "docs/commercial_oss_strategy_v4.md",
     "docs/release_v0_1_candidate.md",
     "docs/public_demo_walkthrough.md",
     "tests/test_release_candidate_checks.py",
@@ -56,6 +70,9 @@ STRICT_PACKS = (
 PUBLIC_SCAN_ROOTS = (
     "README.md",
     "README_EN.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    ".github/ISSUE_TEMPLATE",
     "docs",
     "examples",
     "templates",
@@ -70,6 +87,7 @@ PRIVATE_DOC_PATTERNS = (
     re.compile(r"\.private_docs\b"),
     re.compile(r"\bprivate_docs/"),
     re.compile(r"software_satellite_lab_m10_m17_spartan_design", re.IGNORECASE),
+    re.compile(r"software_satellite_lab_m18_m30_commercial_oss_strategy", re.IGNORECASE),
 )
 API_REQUIRED_PATTERNS = (
     re.compile(r"\b[A-Z0-9_]*API_KEY\b"),
@@ -91,6 +109,10 @@ SECRET_PATTERNS = (
     re.compile(r"ghp_[A-Za-z0-9_]{12,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9_\-]{12,}"),
     re.compile(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s`'\"|]{8,}"),
+)
+PUBLIC_TEST_GATE_LINE_RE = re.compile(
+    r"^(?P<path>tests/[^:]+): (?P<message>.*?)(?P<elapsed>[0-9]+(?:\.[0-9]+)?)s",
+    re.MULTILINE,
 )
 
 
@@ -138,6 +160,56 @@ def _check(
         "status": status or ("pass" if passed else "fail"),
         "detail": dict(detail or {}),
     }
+
+
+def _elapsed_seconds(started: float) -> float:
+    return round(time.perf_counter() - started, 3)
+
+
+def _with_gate(check: Mapping[str, Any], gate: str, *, elapsed_seconds: float | None = None) -> dict[str, Any]:
+    payload = dict(check)
+    detail = _mapping_dict(payload.get("detail"))
+    detail["gate"] = gate
+    if elapsed_seconds is not None:
+        detail["elapsed_seconds"] = elapsed_seconds
+    payload["gate"] = gate
+    payload["detail"] = detail
+    return payload
+
+
+def _timed_gate(label: str, gate: str, timings: list[dict[str, Any]], build: Callable[[], Any]) -> tuple[Any, float]:
+    started = time.perf_counter()
+    result = build()
+    elapsed = _elapsed_seconds(started)
+    timings.append({"gate": gate, "label": label, "elapsed_seconds": elapsed})
+    return result, elapsed
+
+
+def _normalize_selected_gates(selected_gates: Iterable[str] | None) -> tuple[str, ...]:
+    if selected_gates is None:
+        return RELEASE_CHECK_GATES
+    normalized: list[str] = []
+    for gate in selected_gates:
+        value = str(gate).strip().lower()
+        if not value:
+            continue
+        if value not in RELEASE_CHECK_GATES:
+            raise ValueError(f"Unknown release check gate: {gate}")
+        if value not in normalized:
+            normalized.append(value)
+    return tuple(normalized or RELEASE_CHECK_GATES)
+
+
+def selected_release_gates_from_args(args: argparse.Namespace) -> tuple[str, ...] | None:
+    selected: list[str] = []
+    for gate in RELEASE_CHECK_GATES:
+        if bool(getattr(args, gate, False)):
+            selected.append(gate)
+    for gate in getattr(args, "only", None) or []:
+        selected.append(str(gate))
+    if not selected:
+        return None
+    return _normalize_selected_gates(selected)
 
 
 def redact_release_text(text: str) -> str:
@@ -448,13 +520,14 @@ def _build_pack_audit_check(
     if audits is None:
         audit_payloads = []
         for pack in STRICT_PACKS:
+            started = time.perf_counter()
             audit, _latest, _run = audit_evidence_pack_v1_path(
                 root / pack,
                 root=root,
                 strict=True,
                 write_artifact=False,
             )
-            audit_payloads.append({"pack": pack, "verdict": audit.get("verdict")})
+            audit_payloads.append({"pack": pack, "verdict": audit.get("verdict"), "elapsed_seconds": _elapsed_seconds(started)})
     else:
         audit_payloads = [dict(item) for item in audits]
     failing = [item for item in audit_payloads if item.get("verdict") != "pass"]
@@ -486,6 +559,27 @@ def _build_redaction_fixture_check(
     return _check("redaction_fixtures_pass", "Redaction fixtures pass", passed, detail=detail)
 
 
+def _parse_default_test_gate_profile(output: str) -> list[dict[str, Any]]:
+    profile: list[dict[str, Any]] = []
+    for match in PUBLIC_TEST_GATE_LINE_RE.finditer(output):
+        path = match.group("path")
+        message = match.group("message").strip()
+        try:
+            elapsed = float(match.group("elapsed"))
+        except ValueError:
+            elapsed = 0.0
+        status = "pass" if message.startswith("ok") else "fail"
+        profile.append(
+            {
+                "path": path,
+                "status": status,
+                "elapsed_seconds": round(elapsed, 3),
+                "summary": f"{path}: {message} {match.group('elapsed')}s",
+            }
+        )
+    return sorted(profile, key=lambda item: float(item.get("elapsed_seconds") or 0), reverse=True)
+
+
 def _run_default_tests(root: Path, *, timeout_seconds: int = DEFAULT_TEST_TIMEOUT_SECONDS) -> dict[str, Any]:
     started = time.perf_counter()
     env = os.environ.copy()
@@ -503,12 +597,14 @@ def _run_default_tests(root: Path, *, timeout_seconds: int = DEFAULT_TEST_TIMEOU
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        output = (exc.stdout or "") + (exc.stderr or "")
         return {
             "passed": False,
             "timed_out": True,
             "timeout_seconds": timeout_seconds,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
-            "output_excerpt": ((exc.stdout or "") + (exc.stderr or ""))[-2000:],
+            "output_excerpt": output[-2000:],
+            "test_gate_profile": _parse_default_test_gate_profile(output),
         }
     elapsed = time.perf_counter() - started
     return {
@@ -518,12 +614,19 @@ def _run_default_tests(root: Path, *, timeout_seconds: int = DEFAULT_TEST_TIMEOU
         "timeout_seconds": timeout_seconds,
         "elapsed_seconds": round(elapsed, 3),
         "output_excerpt": ((completed.stdout or "") + (completed.stderr or ""))[-2000:],
+        "test_gate_profile": _parse_default_test_gate_profile((completed.stdout or "") + (completed.stderr or "")),
     }
 
 
-def _build_default_tests_check(result: Mapping[str, Any] | None, *, root: Path, run: bool) -> dict[str, Any]:
+def _build_default_tests_check(
+    result: Mapping[str, Any] | None,
+    *,
+    root: Path,
+    run: bool,
+    timeout_seconds: int = DEFAULT_TEST_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     if result is None and run:
-        result = _run_default_tests(root)
+        result = _run_default_tests(root, timeout_seconds=timeout_seconds)
     elif result is None:
         result = {"passed": True, "not_run_static_only": True}
     passed = bool(result.get("passed")) and not bool(result.get("timed_out"))
@@ -697,6 +800,49 @@ def _build_static_checks(root: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _build_release_profile(checks: Sequence[Mapping[str, Any]], timings: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    slow_checks: list[dict[str, Any]] = []
+    slow_pack_audits: list[dict[str, Any]] = []
+    slow_tests: list[dict[str, Any]] = []
+
+    for check in checks:
+        detail = _mapping_dict(check.get("detail"))
+        elapsed = detail.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            slow_checks.append(
+                {
+                    "id": check.get("id"),
+                    "label": check.get("label"),
+                    "gate": check.get("gate") or detail.get("gate"),
+                    "elapsed_seconds": round(float(elapsed), 3),
+                }
+            )
+        if check.get("id") == "pack_strict_audit_passes":
+            for audit in detail.get("audits") or []:
+                if isinstance(audit, Mapping):
+                    slow_pack_audits.append(
+                        {
+                            "pack": audit.get("pack"),
+                            "verdict": audit.get("verdict"),
+                            "elapsed_seconds": round(float(audit.get("elapsed_seconds") or 0), 3),
+                        }
+                    )
+        if check.get("id") == "default_tests_pass_under_timeout":
+            for test in detail.get("test_gate_profile") or []:
+                if isinstance(test, Mapping):
+                    slow_tests.append(dict(test))
+
+    slow_checks.sort(key=lambda item: float(item.get("elapsed_seconds") or 0), reverse=True)
+    slow_pack_audits.sort(key=lambda item: float(item.get("elapsed_seconds") or 0), reverse=True)
+    slow_tests.sort(key=lambda item: float(item.get("elapsed_seconds") or 0), reverse=True)
+    return {
+        "slow_checks": slow_checks[:PROFILE_SLOW_ITEM_LIMIT],
+        "slow_pack_audits": slow_pack_audits[:PROFILE_SLOW_ITEM_LIMIT],
+        "slow_tests": slow_tests[:PROFILE_SLOW_ITEM_LIMIT],
+        "timings": [dict(item) for item in timings],
+    }
+
+
 def build_release_candidate_report(
     *,
     root: Path | None = None,
@@ -707,93 +853,175 @@ def build_release_candidate_report(
     write_subreports: bool = False,
     runtime_overrides: Mapping[str, Any] | None = None,
     benchmark_report_override: Mapping[str, Any] | None = None,
+    selected_gates: Iterable[str] | None = None,
+    test_timeout_seconds: int = DEFAULT_TEST_TIMEOUT_SECONDS,
+    profile: bool = False,
 ) -> dict[str, Any]:
+    if test_timeout_seconds < 1:
+        raise ValueError("--timeout must be at least 1 second.")
     resolved_root = _resolve_root(root)
     overrides = _mapping_dict(runtime_overrides)
-    checks = _build_static_checks(resolved_root)
+    selected = _normalize_selected_gates(selected_gates)
+    explicit_gate_selection = selected_gates is not None
+    total_started = time.perf_counter()
+    timings: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
     default_tests_should_run = strict if run_default_tests is None else run_default_tests
 
-    if run_runtime_checks or benchmark_report_override is not None:
-        review_check = _build_review_benchmark_check(
-            report=benchmark_report_override or _mapping_dict(overrides.get("review_benchmark")) or None
+    if "docs" in selected:
+        static_checks, elapsed = _timed_gate(
+            "Static public docs and guardrails",
+            "docs",
+            timings,
+            lambda: _build_static_checks(resolved_root),
         )
-    else:
-        review_check = _check(
-            "review_benchmark_passes",
-            "Review benchmark passes",
-            True,
-            detail={"not_run_static_only": True},
-        )
-    checks.append(review_check)
+        checks.extend(_with_gate(check, "docs") for check in static_checks)
+        timings[-1]["check_count"] = len(static_checks)
 
-    if run_runtime_checks:
-        checks.append(
-            _build_spartan_benchmark_check(
-                _mapping_dict(overrides.get("spartan_benchmark")) or None,
-                root=resolved_root,
-                write=write_subreports,
-            )
-        )
-        checks.append(
-            _build_evidence_lint_check(
-                _mapping_dict(overrides.get("evidence_lint")) or None,
-                root=resolved_root,
-            )
-        )
-        pack_override = overrides.get("pack_audits")
-        checks.append(
-            _build_pack_audit_check(
-                pack_override if isinstance(pack_override, Sequence) and not isinstance(pack_override, (str, bytes)) else None,
-                root=resolved_root,
-            )
-        )
-        checks.append(
-            _build_release_demo_check(
+        demo_check, demo_elapsed = _timed_gate(
+            "Release demo report render",
+            "docs",
+            timings,
+            lambda: _build_release_demo_check(
                 _mapping_dict(overrides.get("release_demo")) or None,
                 root=resolved_root,
                 workspace_id=workspace_id,
-                run=True,
+                run=bool(run_runtime_checks and strict),
                 write=write_subreports,
-            )
+            ),
         )
-        checks.append(
-            _build_demand_gate_wired_check(
+        checks.append(_with_gate(demo_check, "docs", elapsed_seconds=demo_elapsed))
+
+        demand_check, demand_elapsed = _timed_gate(
+            "Demand gate report render",
+            "docs",
+            timings,
+            lambda: _build_demand_gate_wired_check(
                 _mapping_dict(overrides.get("demand_gate")) or None,
                 root=resolved_root,
                 workspace_id=workspace_id,
-                run=True,
+                run=bool(run_runtime_checks and strict),
                 write=write_subreports,
-            )
+            ),
         )
-    else:
-        checks.extend(
-            [
-                _check(
-                    "adversarial_review_memory_benchmark_passes",
-                    "Adversarial review-memory benchmark passes",
-                    True,
-                    detail={"not_run_static_only": True},
-                ),
-                _check("evidence_lint_passes", "Evidence lint passes", True, detail={"not_run_static_only": True}),
-                _check("pack_strict_audit_passes", "Pack strict audit passes", True, detail={"not_run_static_only": True}),
-                _build_release_demo_check(None, root=resolved_root, workspace_id=workspace_id, run=False, write=False),
-                _build_demand_gate_wired_check(None, root=resolved_root, workspace_id=workspace_id, run=False, write=False),
-            ]
-        )
+        checks.append(_with_gate(demand_check, "docs", elapsed_seconds=demand_elapsed))
 
-    checks.append(
-        _build_redaction_fixture_check(
-            review_check,
-            redaction_override=_mapping_dict(overrides.get("redaction_fixtures")) or None,
+    critical_false_support_count: Any = None
+    if "benchmarks" in selected:
+        if run_runtime_checks or benchmark_report_override is not None:
+            review_check, elapsed = _timed_gate(
+                "Review benchmark",
+                "benchmarks",
+                timings,
+                lambda: _build_review_benchmark_check(
+                    report=benchmark_report_override or _mapping_dict(overrides.get("review_benchmark")) or None
+                ),
+            )
+        else:
+            started = time.perf_counter()
+            review_check = _check(
+                "review_benchmark_passes",
+                "Review benchmark passes",
+                True,
+                detail={"not_run_static_only": True},
+            )
+            elapsed = _elapsed_seconds(started)
+            timings.append({"gate": "benchmarks", "label": "Review benchmark", "elapsed_seconds": elapsed})
+        checks.append(_with_gate(review_check, "benchmarks", elapsed_seconds=elapsed))
+        critical_false_support_count = _mapping_dict(review_check.get("detail")).get("critical_false_evidence_count")
+
+        if run_runtime_checks:
+            spartan_check, elapsed = _timed_gate(
+                "Adversarial review-memory benchmark",
+                "benchmarks",
+                timings,
+                lambda: _build_spartan_benchmark_check(
+                    _mapping_dict(overrides.get("spartan_benchmark")) or None,
+                    root=resolved_root,
+                    write=write_subreports,
+                ),
+            )
+        else:
+            started = time.perf_counter()
+            spartan_check = _check(
+                "adversarial_review_memory_benchmark_passes",
+                "Adversarial review-memory benchmark passes",
+                True,
+                detail={"not_run_static_only": True},
+            )
+            elapsed = _elapsed_seconds(started)
+            timings.append(
+                {"gate": "benchmarks", "label": "Adversarial review-memory benchmark", "elapsed_seconds": elapsed}
+            )
+        checks.append(_with_gate(spartan_check, "benchmarks", elapsed_seconds=elapsed))
+
+        redaction_check, elapsed = _timed_gate(
+            "Redaction fixtures",
+            "benchmarks",
+            timings,
+            lambda: _build_redaction_fixture_check(
+                review_check,
+                redaction_override=_mapping_dict(overrides.get("redaction_fixtures")) or None,
+            ),
         )
-    )
-    checks.append(
-        _build_default_tests_check(
-            _mapping_dict(overrides.get("default_tests")) or None,
-            root=resolved_root,
-            run=bool(run_runtime_checks and default_tests_should_run),
+        checks.append(_with_gate(redaction_check, "benchmarks", elapsed_seconds=elapsed))
+
+    if "packs" in selected:
+        if run_runtime_checks:
+            lint_check, elapsed = _timed_gate(
+                "Evidence lint",
+                "packs",
+                timings,
+                lambda: _build_evidence_lint_check(
+                    _mapping_dict(overrides.get("evidence_lint")) or None,
+                    root=resolved_root,
+                ),
+            )
+        else:
+            started = time.perf_counter()
+            lint_check = _check("evidence_lint_passes", "Evidence lint passes", True, detail={"not_run_static_only": True})
+            elapsed = _elapsed_seconds(started)
+            timings.append({"gate": "packs", "label": "Evidence lint", "elapsed_seconds": elapsed})
+        checks.append(_with_gate(lint_check, "packs", elapsed_seconds=elapsed))
+
+        pack_override = overrides.get("pack_audits")
+        if run_runtime_checks:
+            pack_check, elapsed = _timed_gate(
+                "Strict pack audit",
+                "packs",
+                timings,
+                lambda: _build_pack_audit_check(
+                    pack_override if isinstance(pack_override, Sequence) and not isinstance(pack_override, (str, bytes)) else None,
+                    root=resolved_root,
+                ),
+            )
+        else:
+            started = time.perf_counter()
+            pack_check = _check("pack_strict_audit_passes", "Pack strict audit passes", True, detail={"not_run_static_only": True})
+            elapsed = _elapsed_seconds(started)
+            timings.append({"gate": "packs", "label": "Strict pack audit", "elapsed_seconds": elapsed})
+        checks.append(_with_gate(pack_check, "packs", elapsed_seconds=elapsed))
+
+    if "tests" in selected:
+        tests_should_run = bool(run_runtime_checks and (default_tests_should_run or explicit_gate_selection))
+        tests_check, elapsed = _timed_gate(
+            "Public demo default tests",
+            "tests",
+            timings,
+            lambda: _build_default_tests_check(
+                _mapping_dict(overrides.get("default_tests")) or None,
+                root=resolved_root,
+                run=tests_should_run,
+                timeout_seconds=test_timeout_seconds,
+            ),
         )
-    )
+        checks.append(_with_gate(tests_check, "tests", elapsed_seconds=elapsed))
+
+    total_elapsed = _elapsed_seconds(total_started)
+    timings.append({"gate": "total", "label": "Release check total", "elapsed_seconds": total_elapsed})
+
+    if not checks:
+        raise ValueError("At least one release check gate must be selected.")
 
     failing = [check for check in checks if check.get("status") != "pass"]
     private_doc_dependency_count = 0
@@ -809,26 +1037,38 @@ def build_release_candidate_report(
         ),
         {},
     )
+    timeout_count = sum(
+        1
+        for check in checks
+        if bool(_mapping_dict(check.get("detail")).get("timed_out"))
+    )
     metrics = {
         "release_check_strict_exit_code": 0 if strict and not failing else 1 if strict else None,
         "private_doc_dependency_count": private_doc_dependency_count,
         "api_key_required": any(check.get("id") == "no_api_key_required_for_demo" and check.get("status") != "pass" for check in checks),
-        "critical_false_support_count": _mapping_dict(review_check.get("detail")).get("critical_false_evidence_count"),
+        "critical_false_support_count": critical_false_support_count,
         "demand_gate_report_exists": bool(demand_gate_check_detail.get("report_exists")) if write_subreports else None,
         "demand_gate_report_rendered": bool(
             demand_gate_check_detail.get("report_exists") or demand_gate_check_detail.get("report_rendered")
         ),
+        "selected_gates": list(selected),
+        "strict_gate_timeout_count": timeout_count,
+        "strict_release_check_total_seconds": total_elapsed,
+        "test_timeout_seconds": test_timeout_seconds,
     }
     run_slug = timestamp_slug()
-    return {
+    report = {
         "schema_name": RELEASE_CANDIDATE_SCHEMA_NAME,
         "schema_version": RELEASE_CANDIDATE_SCHEMA_VERSION,
         "workspace_id": workspace_id,
         "generated_at_utc": timestamp_utc(),
         "strict": strict,
+        "selected_gates": list(selected),
+        "profile_enabled": bool(profile),
         "status": "pass" if not failing else "fail",
         "checks": checks,
         "failing_check_ids": [str(check.get("id")) for check in failing],
+        "timings": timings,
         "metrics": metrics,
         "guardrails": {
             "local_first": True,
@@ -846,6 +1086,9 @@ def build_release_candidate_report(
             "report_run_md_path": str(release_check_run_md_path(workspace_id=workspace_id, root=resolved_root, run_slug=run_slug)),
         },
     }
+    if profile:
+        report["profile"] = _build_release_profile(checks, timings)
+    return report
 
 
 def _safe_json_text(value: Any) -> str:
@@ -858,10 +1101,11 @@ def format_release_candidate_report_markdown(report: Mapping[str, Any]) -> str:
         "",
         f"- Status: `{report.get('status')}`",
         f"- Strict: `{str(bool(report.get('strict'))).lower()}`",
+        f"- Gates: `{', '.join(str(item) for item in report.get('selected_gates') or RELEASE_CHECK_GATES)}`",
         f"- Generated: `{report.get('generated_at_utc')}`",
         "",
-        "| Check | Status | Detail |",
-        "|---|---|---|",
+        "| Gate | Check | Status | Detail |",
+        "|---|---|---|---|",
     ]
     for check in report.get("checks") or []:
         if not isinstance(check, Mapping):
@@ -869,7 +1113,26 @@ def format_release_candidate_report_markdown(report: Mapping[str, Any]) -> str:
         detail = _safe_json_text(check.get("detail"))
         if len(detail) > 240:
             detail = detail[:237] + "..."
-        lines.append(f"| {check.get('label')} | `{check.get('status')}` | `{detail}` |")
+        lines.append(f"| {check.get('gate') or ''} | {check.get('label')} | `{check.get('status')}` | `{detail}` |")
+    timings = [item for item in report.get("timings") or [] if isinstance(item, Mapping)]
+    if timings:
+        lines.extend(["", "## Timing", "", "| Gate | Subcheck | Seconds |", "|---|---:|---:|"])
+        for item in timings:
+            lines.append(f"| {item.get('gate')} | {item.get('label')} | `{item.get('elapsed_seconds')}` |")
+    profile = _mapping_dict(report.get("profile"))
+    if profile:
+        lines.extend(["", "## Profile", ""])
+        slow_tests = [item for item in profile.get("slow_tests") or [] if isinstance(item, Mapping)]
+        if slow_tests:
+            lines.extend(["### Slow Tests", "", "| Test | Status | Seconds |", "|---|---|---:|"])
+            for item in slow_tests:
+                lines.append(f"| {item.get('path')} | `{item.get('status')}` | `{item.get('elapsed_seconds')}` |")
+            lines.append("")
+        slow_pack_audits = [item for item in profile.get("slow_pack_audits") or [] if isinstance(item, Mapping)]
+        if slow_pack_audits:
+            lines.extend(["### Slow Pack Audits", "", "| Pack | Verdict | Seconds |", "|---|---|---:|"])
+            for item in slow_pack_audits:
+                lines.append(f"| {item.get('pack')} | `{item.get('verdict')}` | `{item.get('elapsed_seconds')}` |")
     failing = [str(item) for item in report.get("failing_check_ids") or []]
     if failing:
         lines.extend(["", "## Failing Checks", ""])
@@ -896,6 +1159,9 @@ def record_release_candidate_report(
     strict: bool = False,
     run_runtime_checks: bool = True,
     run_default_tests: bool | None = None,
+    selected_gates: Iterable[str] | None = None,
+    test_timeout_seconds: int = DEFAULT_TEST_TIMEOUT_SECONDS,
+    profile: bool = False,
 ) -> tuple[dict[str, Any], str, Path, Path, Path, Path]:
     report = build_release_candidate_report(
         root=root,
@@ -904,6 +1170,9 @@ def record_release_candidate_report(
         run_runtime_checks=run_runtime_checks,
         run_default_tests=run_default_tests,
         write_subreports=True,
+        selected_gates=selected_gates,
+        test_timeout_seconds=test_timeout_seconds,
+        profile=profile,
     )
     markdown = format_release_candidate_report_markdown(report)
     paths = _mapping_dict(report.get("paths"))
@@ -1050,6 +1319,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Run release-candidate checks.")
     check_parser.add_argument("--strict", action="store_true", help="Run runtime gates and the public demo default test gate.")
+    check_parser.add_argument("--docs", action="store_true", help="Run only the public docs and guardrail gate.")
+    check_parser.add_argument("--benchmarks", action="store_true", help="Run only benchmark and redaction gates.")
+    check_parser.add_argument("--packs", action="store_true", help="Run only evidence lint and strict pack audit gates.")
+    check_parser.add_argument("--tests", action="store_true", help="Run only the public demo default test gate.")
+    check_parser.add_argument("--only", choices=RELEASE_CHECK_GATES, action="append", help="Run one named gate; repeat to combine.")
+    check_parser.add_argument("--timeout", type=int, default=DEFAULT_TEST_TIMEOUT_SECONDS, help="Timeout in seconds for the tests gate.")
+    check_parser.add_argument("--profile", action="store_true", help="Include slow test and pack audit profile details.")
     check_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id.")
     check_parser.add_argument("--no-write", action="store_true", help="Print only; do not persist report artifacts.")
     check_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
@@ -1067,13 +1343,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
+            selected_gates = selected_release_gates_from_args(args)
+            run_runtime_checks = bool(args.strict or selected_gates)
+            run_default_tests = bool(args.strict or (selected_gates is not None and "tests" in selected_gates))
             if args.no_write:
                 report = build_release_candidate_report(
                     root=args.root,
                     workspace_id=args.workspace_id,
                     strict=args.strict,
-                    run_runtime_checks=args.strict,
-                    run_default_tests=args.strict,
+                    run_runtime_checks=run_runtime_checks,
+                    run_default_tests=run_default_tests,
+                    selected_gates=selected_gates,
+                    test_timeout_seconds=args.timeout,
+                    profile=args.profile,
                 )
                 markdown = format_release_candidate_report_markdown(report)
             else:
@@ -1081,8 +1363,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     root=args.root,
                     workspace_id=args.workspace_id,
                     strict=args.strict,
-                    run_runtime_checks=args.strict,
-                    run_default_tests=args.strict,
+                    run_runtime_checks=run_runtime_checks,
+                    run_default_tests=run_default_tests,
+                    selected_gates=selected_gates,
+                    test_timeout_seconds=args.timeout,
+                    profile=args.profile,
                 )
             if args.format == "json":
                 print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -80,7 +80,9 @@ These are treated as baseline assets for the redesign, not as throwaway work.
 - `docs/public_demo_walkthrough.md`: no-provider public demo transcript
 - `docs/evidence_pack_contributor_guide.md`: public contributor guide for Evidence Packs
 - `docs/schema_changelog_and_compatibility.md`: core schema changelog and compatibility matrix
+- `docs/commercial_oss_strategy_v4.md`: public M18-M30 roadmap pointer
 - `examples/software_work_events/`: public `software_work_event` example gallery
+- `SECURITY.md` / `CONTRIBUTING.md`: security reporting and contribution policy
 
 ## Evidence-Gated Git Review
 
@@ -179,6 +181,9 @@ PYTHONPATH=scripts .venv/bin/python -m py_compile scripts/*.py tests/*.py
 .venv/bin/python scripts/satlab.py validation report --write --format md
 .venv/bin/python scripts/satlab.py release demo --no-api
 .venv/bin/python scripts/satlab.py release check --strict
+.venv/bin/python scripts/satlab.py release check --strict --profile
+.venv/bin/python scripts/satlab.py release check --strict --only benchmarks
+.venv/bin/python scripts/satlab.py release check --strict --only tests --timeout 180
 .venv/bin/python scripts/satlab.py demand gate --fixture-metrics examples/demand_gate/release_candidate_fixture.json --format md
 .venv/bin/python scripts/satlab.py demand gate --format md
 .venv/bin/python scripts/satlab.py pack list --builtin
