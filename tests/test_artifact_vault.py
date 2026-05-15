@@ -368,6 +368,39 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects")
             self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
 
+    def test_artifact_gc_dry_run_reports_broken_symlink_objects_root_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            objects_root = root / "artifacts" / "vault" / "objects"
+            objects_root.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                objects_root.symlink_to(root / "missing-objects", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["object_count"], 0)
+            self.assertEqual(report["counts"]["unreferenced_object_count"], 0)
+            self.assertEqual(report["counts"]["skipped_object_count"], 1)
+            self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects")
+            self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
+
+    def test_artifact_gc_dry_run_reports_non_utf8_refs_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.mkdir(parents=True, exist_ok=True)
+            bad_ref = refs_root / "artifact_nonutf8.json"
+            bad_ref.write_bytes(b"\xff\xfe\x00")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_nonutf8.json")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_utf8")
+
     def test_artifact_gc_dry_run_reports_invalid_sha256_refs_as_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

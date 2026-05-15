@@ -496,10 +496,10 @@ def _resolved_path_is_inside(path: Path, *, root: Path) -> bool:
 def _walk_vault_object_files(objects_root: Path, *, root: Path) -> tuple[list[Path], list[dict[str, str]]]:
     object_paths: list[Path] = []
     skipped_objects: list[dict[str, str]] = []
-    if not objects_root.exists():
-        return object_paths, skipped_objects
     if objects_root.is_symlink():
         skipped_objects.append(_skipped_object_entry(objects_root, root=root, reason="symlink_refused"))
+        return object_paths, skipped_objects
+    if not objects_root.exists():
         return object_paths, skipped_objects
 
     objects_root_resolved = objects_root.resolve()
@@ -532,6 +532,8 @@ def _walk_vault_object_files(objects_root: Path, *, root: Path) -> tuple[list[Pa
 def _load_gc_ref(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return None, "invalid_utf8"
     except json.JSONDecodeError:
         return None, "invalid_json"
     except OSError:
