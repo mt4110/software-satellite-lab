@@ -321,6 +321,57 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
             self.assertIn("Skipped objects: 1", formatted)
 
+    def test_artifact_gc_dry_run_reports_symlink_object_directories_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            root = base / "workspace"
+            root.mkdir()
+            outside_dir = base / "outside-object-dir"
+            outside_dir.mkdir()
+            (outside_dir / "escaped-object").write_text("outside vault\n", encoding="utf-8")
+            symlink_dir = root / "artifacts" / "vault" / "objects" / "aa"
+            symlink_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                symlink_dir.symlink_to(outside_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink setup unavailable: {exc}")
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["object_count"], 0)
+            self.assertEqual(report["counts"]["unreferenced_object_count"], 0)
+            self.assertEqual(report["counts"]["skipped_object_count"], 1)
+            self.assertEqual(report["skipped_objects"][0]["vault_path"], "artifacts/vault/objects/aa")
+            self.assertEqual(report["skipped_objects"][0]["reason"], "symlink_refused")
+
+    def test_artifact_gc_dry_run_reports_invalid_sha256_refs_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.mkdir(parents=True, exist_ok=True)
+            bad_ref = refs_root / "artifact_badsha.json"
+            bad_ref.write_text(
+                json.dumps(
+                    {
+                        "schema_name": "software-satellite-artifact-ref",
+                        "schema_version": 1,
+                        "artifact_id": "artifact_badsha",
+                        "capture_state": "captured",
+                        "sha256": "../not-a-sha",
+                        "vault_path": "artifacts/vault/objects/..",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["counts"]["missing_object_count"], 0)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_badsha.json")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_sha256")
+
 
 if __name__ == "__main__":
     unittest.main()

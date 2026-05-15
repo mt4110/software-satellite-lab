@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ DEFAULT_REPORT_EXCERPT_CHARS = 1200
 LONG_LINE_LIMIT = 240
 REDACTION_RULES_VERSION = 1
 ARTIFACT_ID_RE = re.compile(r"^artifact_[A-Za-z0-9_-]+$")
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 SECRET_PATTERNS = (
     re.compile(r"\b(sk-[A-Za-z0-9_-]{16,})\b"),
@@ -483,6 +485,47 @@ def _skipped_object_entry(path: Path, *, root: Path, reason: str) -> dict[str, s
     }
 
 
+def _resolved_path_is_inside(path: Path, *, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _walk_vault_object_files(objects_root: Path, *, root: Path) -> tuple[list[Path], list[dict[str, str]]]:
+    object_paths: list[Path] = []
+    skipped_objects: list[dict[str, str]] = []
+    if not objects_root.exists():
+        return object_paths, skipped_objects
+
+    objects_root_resolved = objects_root.resolve()
+    for current_root_text, dirnames, filenames in os.walk(objects_root, followlinks=False):
+        current_root = Path(current_root_text)
+        safe_dirnames: list[str] = []
+        for dirname in sorted(dirnames):
+            directory = current_root / dirname
+            if directory.is_symlink():
+                skipped_objects.append(_skipped_object_entry(directory, root=root, reason="symlink_refused"))
+                continue
+            safe_dirnames.append(dirname)
+        dirnames[:] = safe_dirnames
+
+        for filename in sorted(filenames):
+            candidate = current_root / filename
+            if candidate.is_symlink():
+                skipped_objects.append(_skipped_object_entry(candidate, root=root, reason="symlink_refused"))
+                continue
+            if not candidate.is_file():
+                continue
+            if not _resolved_path_is_inside(candidate, root=objects_root_resolved):
+                skipped_objects.append(_skipped_object_entry(candidate, root=root, reason="outside_vault"))
+                continue
+            object_paths.append(candidate.resolve())
+
+    return object_paths, skipped_objects
+
+
 def _load_gc_ref(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -499,6 +542,9 @@ def _load_gc_ref(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     artifact_id = _clean_text(payload.get("artifact_id"))
     if artifact_id is None or not ARTIFACT_ID_RE.match(artifact_id):
         return None, "invalid_artifact_id"
+    sha256 = _clean_text(payload.get("sha256"))
+    if sha256 is not None and not SHA256_RE.match(sha256):
+        return None, "invalid_sha256"
     return payload, None
 
 
@@ -507,21 +553,7 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
     objects_root = artifact_objects_root(resolved_root)
     refs_root = artifact_refs_root(resolved_root)
 
-    object_paths: list[Path] = []
-    skipped_objects: list[dict[str, str]] = []
-    if objects_root.exists():
-        for path in sorted(objects_root.rglob("*")):
-            if path.is_symlink():
-                skipped_objects.append(
-                    _skipped_object_entry(
-                        path,
-                        root=resolved_root,
-                        reason="symlink_refused",
-                    )
-                )
-                continue
-            if path.is_file():
-                object_paths.append(path.resolve())
+    object_paths, skipped_objects = _walk_vault_object_files(objects_root, root=resolved_root)
     object_by_key = {str(path): _object_inventory_entry(path, root=resolved_root) for path in object_paths}
     referenced: dict[str, dict[str, Any]] = {}
     missing_objects: list[dict[str, Any]] = []
