@@ -106,9 +106,16 @@ def _make_static_release_root(root: Path) -> None:
         "scripts/satlab.py",
         "scripts/release_candidate_checks.py",
         "scripts/demand_gate.py",
+        "scripts/pilot_evidence.py",
         "tests/test_release_candidate_checks.py",
+        "tests/test_pilot_evidence.py",
+        "schemas/pilot_evidence_record.schema.json",
+        "templates/pilot_interview_script.md",
+        "templates/pilot_demo_checklist.md",
+        "templates/paid_pilot_statement_of_value.md",
         "examples/review_memory_benchmark/synthetic_suite.json",
         "examples/agent_session_bundles/generic.json",
+        "examples/pilot_evidence/passing_gate_records.jsonl",
         "templates/failure-memory-pack.satellite.yaml",
         "templates/agent-session-pack.satellite.yaml",
     ):
@@ -116,6 +123,11 @@ def _make_static_release_root(root: Path) -> None:
     _write(
         root / "examples" / "demand_gate" / "release_candidate_fixture.json",
         json.dumps(_fixture_metrics(), ensure_ascii=False, indent=2) + "\n",
+    )
+    source_pilot_fixture = Path(__file__).resolve().parents[1] / "examples" / "pilot_evidence" / "passing_gate_records.jsonl"
+    _write(
+        root / "examples" / "pilot_evidence" / "passing_gate_records.jsonl",
+        source_pilot_fixture.read_text(encoding="utf-8"),
     )
 
 
@@ -213,6 +225,8 @@ class ReleaseCandidateChecksTests(unittest.TestCase):
         self.assertTrue(report["markdown_report_exists"])
         self.assertTrue(report["markdown_report_rendered"])
         self.assertIn("# Public Demo Walkthrough", markdown)
+        self.assertIn("## Paid-Pilot Gate Fixture", markdown)
+        self.assertEqual(report["pilot_gate_status"], "pass")
         self.assertFalse(report["guardrails"]["requires_api_key"])
         self.assertFalse(report["guardrails"]["uses_network"])
 
@@ -238,12 +252,16 @@ class ReleaseCandidateChecksTests(unittest.TestCase):
 
         demo_detail = next(check["detail"] for check in report["checks"] if check["id"] == "release_demo_markdown_report")
         demand_detail = next(check["detail"] for check in report["checks"] if check["id"] == "demand_gate_report_exists")
+        pilot_detail = next(check["detail"] for check in report["checks"] if check["id"] == "pilot_gate_report_exists")
         self.assertFalse(demo_detail["markdown_report_exists"])
         self.assertTrue(demo_detail["markdown_report_rendered"])
         self.assertTrue(demo_detail["not_run_static_only"])
         self.assertFalse(demand_detail["report_exists"])
         self.assertTrue(demand_detail["report_rendered"])
         self.assertTrue(demand_detail["not_run_static_only"])
+        self.assertFalse(pilot_detail["report_exists"])
+        self.assertTrue(pilot_detail["report_rendered"])
+        self.assertTrue(pilot_detail["not_run_static_only"])
 
     def test_release_check_no_write_keeps_spartan_benchmark_from_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -36,7 +36,7 @@ The command writes Markdown and JSON reports under `artifacts/release_candidate/
 .venv/bin/python scripts/satlab.py release check --strict
 ```
 
-The strict check runs release documentation checks, review-memory benchmarks, Evidence Lint, pack audits, redaction checks, the fixture-backed demand gate, and the public-demo default test gate under a timeout.
+The strict check runs release documentation checks, review-memory benchmarks, Evidence Lint, pack audits, redaction checks, the fixture-backed demand and paid-pilot gates, and the public-demo default test gate under a timeout.
 
 ## Demand Gate
 
@@ -54,6 +54,25 @@ Real local evidence:
 ```
 
 The fixture is only for demonstrating the gate. A public claim should be based on real dogfood review sessions, agent-session intakes, external technical-user inspections, and a timed fresh-clone demo attempt.
+
+## Paid-Pilot Gate
+
+Fixture demo:
+
+```bash
+.venv/bin/python scripts/satlab.py pilot report --fixture-records examples/pilot_evidence/passing_gate_records.jsonl --format md
+```
+
+Real local evidence:
+
+```bash
+.venv/bin/python scripts/satlab.py pilot record-interview --help
+.venv/bin/python scripts/satlab.py pilot record-demo --help
+.venv/bin/python scripts/satlab.py pilot record-loi --help
+.venv/bin/python scripts/satlab.py pilot report --format md
+```
+
+The fixture is only for demonstrating the report boundary. A paid-pilot decision should be based on real discovery calls, hands-on demos, and LOIs or paid-pilot commitments.
 
 ## Demo Transcript
 
@@ -74,7 +93,8 @@ This is a local, file-first release candidate demo. It uses public fixtures only
 
 1. Release checks finish with `pass`.
 2. Demand gate fixture finishes with `pass`.
-3. The operator reads the generated Markdown and only treats real demand evidence as release evidence.
+3. Paid-pilot gate fixture finishes with `pass`.
+4. The operator reads the generated Markdown and only treats real demand and pilot records as decision evidence.
 ```
 
 ## Notes For Reviewers

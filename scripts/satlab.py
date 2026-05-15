@@ -85,6 +85,17 @@ from demand_gate import (
     record_demand_gate_report,
 )
 from evaluation_loop import format_learning_dataset_preview_report, record_learning_dataset_preview
+from pilot_evidence import (
+    PILOT_JUDGEMENTS,
+    build_pilot_report,
+    format_pilot_report_markdown,
+    pilot_templates_markdown,
+    record_pilot_demo,
+    record_pilot_interview,
+    record_pilot_loi,
+    record_pilot_report,
+    write_pilot_templates,
+)
 from release_candidate_checks import (
     DEFAULT_TEST_TIMEOUT_SECONDS,
     RELEASE_CHECK_GATES,
@@ -652,6 +663,198 @@ def build_parser() -> argparse.ArgumentParser:
     validation_report_parser.add_argument("--write", action="store_true", help="Persist latest and run report artifacts.")
     validation_report_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
     validation_report_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
+
+    pilot_parser = subparsers.add_parser(
+        "pilot",
+        help="Record paid-pilot evidence and evaluate the M19 gate.",
+    )
+    pilot_subparsers = pilot_parser.add_subparsers(dest="pilot_command", required=True)
+
+    pilot_template_parser = pilot_subparsers.add_parser(
+        "template",
+        help="Print or write pilot interview, demo, and paid-pilot templates.",
+    )
+    pilot_template_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for Markdown templates.",
+    )
+    pilot_template_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pilot_interview_parser = pilot_subparsers.add_parser(
+        "record-interview",
+        help="Record a discovery-call interview as paid-pilot evidence.",
+    )
+    pilot_interview_parser.add_argument("--participant", required=True, help="Participant label or anonymized id.")
+    pilot_interview_parser.add_argument("--segment", required=True, help="Buyer/user segment.")
+    pilot_interview_parser.add_argument("--notes-file", type=Path, required=True, help="Local interview notes file.")
+    pilot_interview_parser.add_argument(
+        "--exact-pain",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Whether the exact pain was recognized.",
+    )
+    pilot_interview_parser.add_argument(
+        "--wants-to-try",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Whether the participant wants to try it.",
+    )
+    pilot_interview_parser.add_argument(
+        "--willing-to-install-locally",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Whether local install is acceptable.",
+    )
+    pilot_interview_parser.add_argument(
+        "--willingness-to-pay",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Willingness to pay signal.",
+    )
+    pilot_interview_parser.add_argument(
+        "--security-sensitive",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Security/compliance-sensitive user signal.",
+    )
+    pilot_interview_parser.add_argument(
+        "--no-code-upload-matters",
+        choices=PILOT_JUDGEMENTS,
+        required=True,
+        help="Whether no-code-upload matters.",
+    )
+    pilot_interview_parser.add_argument(
+        "--budget-path",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Whether a budget path exists.",
+    )
+    pilot_interview_parser.add_argument(
+        "--audit-trail-priority",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Whether audit trail matters more than review comments.",
+    )
+    pilot_interview_parser.add_argument("--current-workaround", default=None, help="Current workaround summary.")
+    pilot_interview_parser.add_argument(
+        "--failure-example",
+        default=None,
+        help="Failure example they are allowed to describe.",
+    )
+    pilot_interview_parser.add_argument(
+        "--objection",
+        action="append",
+        default=[],
+        help="Security/compliance objection. Repeatable.",
+    )
+    pilot_interview_parser.add_argument("--note", default="", help="Short note for the record.")
+    pilot_interview_parser.add_argument(
+        "--workspace-id",
+        default=DEFAULT_WORKSPACE_ID,
+        help="Workspace id for artifacts.",
+    )
+    pilot_interview_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pilot_demo_parser = pilot_subparsers.add_parser(
+        "record-demo",
+        help="Record a hands-on pilot demo checklist.",
+    )
+    pilot_demo_parser.add_argument("--participant", required=True, help="Participant label or anonymized id.")
+    pilot_demo_parser.add_argument("--segment", required=True, help="Buyer/user segment.")
+    pilot_demo_parser.add_argument("--notes-file", type=Path, required=True, help="Local demo notes file.")
+    pilot_demo_parser.add_argument("--failure-memory", action="store_true", help="Failure memory was shown.")
+    pilot_demo_parser.add_argument("--signed-evidence", action="store_true", help="Signed evidence was shown.")
+    pilot_demo_parser.add_argument(
+        "--no-code-upload",
+        action="store_true",
+        help="No-code-upload boundary was confirmed.",
+    )
+    pilot_demo_parser.add_argument(
+        "--transcript-claim-rejection",
+        action="store_true",
+        help="Transcript claim rejection was shown.",
+    )
+    pilot_demo_parser.add_argument(
+        "--wants-to-try",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Whether the participant wants to try it.",
+    )
+    pilot_demo_parser.add_argument(
+        "--exact-pain",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Whether the exact pain was recognized.",
+    )
+    pilot_demo_parser.add_argument(
+        "--security-sensitive",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Security/compliance-sensitive user signal.",
+    )
+    pilot_demo_parser.add_argument("--note", default="", help="Short note for the record.")
+    pilot_demo_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    pilot_demo_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pilot_loi_parser = pilot_subparsers.add_parser(
+        "record-loi",
+        help="Record a paid-pilot commitment or letter of intent.",
+    )
+    pilot_loi_parser.add_argument("--participant", required=True, help="Participant label or anonymized id.")
+    pilot_loi_parser.add_argument("--segment", required=True, help="Buyer/user segment.")
+    pilot_loi_parser.add_argument("--notes-file", type=Path, required=True, help="Local LOI or commitment notes file.")
+    pilot_loi_parser.add_argument(
+        "--commitment-kind",
+        choices=("loi", "paid-pilot"),
+        default="loi",
+        help="Commitment type.",
+    )
+    pilot_loi_parser.add_argument("--amount", default=None, help="Amount or budget note.")
+    pilot_loi_parser.add_argument("--decision-maker", default=None, help="Decision-maker or approval path note.")
+    pilot_loi_parser.add_argument("--pilot-shape", default=None, help="Pilot shape or scope note.")
+    pilot_loi_parser.add_argument(
+        "--exact-pain",
+        choices=PILOT_JUDGEMENTS,
+        default="yes",
+        help="Whether the exact pain was recognized.",
+    )
+    pilot_loi_parser.add_argument(
+        "--wants-to-try",
+        choices=PILOT_JUDGEMENTS,
+        default="yes",
+        help="Whether the participant wants to try it.",
+    )
+    pilot_loi_parser.add_argument(
+        "--security-sensitive",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Security/compliance-sensitive user signal.",
+    )
+    pilot_loi_parser.add_argument(
+        "--budget-path",
+        choices=PILOT_JUDGEMENTS,
+        default="unclear",
+        help="Whether a budget path exists.",
+    )
+    pilot_loi_parser.add_argument("--note", default="", help="Short note for the record.")
+    pilot_loi_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    pilot_loi_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format.")
+
+    pilot_report_parser = pilot_subparsers.add_parser(
+        "report",
+        help="Generate the paid-pilot evidence gate report.",
+    )
+    pilot_report_parser.add_argument(
+        "--fixture-records",
+        type=Path,
+        default=None,
+        help="Optional public fixture ledger or JSON record set.",
+    )
+    pilot_report_parser.add_argument("--write", action="store_true", help="Persist latest and run report artifacts.")
+    pilot_report_parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID, help="Workspace id for artifacts.")
+    pilot_report_parser.add_argument("--format", choices=("md", "json"), default="md", help="Output format.")
 
     release_parser = subparsers.add_parser(
         "release",
@@ -1384,6 +1587,155 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(markdown)
             return 0
+
+    if args.command == "pilot":
+        if args.pilot_command == "template":
+            try:
+                if args.output_dir is not None:
+                    paths = write_pilot_templates(args.output_dir, root=args.root)
+                    if args.format == "json":
+                        print(json.dumps({"template_paths": paths}, ensure_ascii=False, indent=2))
+                    else:
+                        print("\n".join([f"{name}: {path}" for name, path in paths.items()]))
+                    return 0
+                template = pilot_templates_markdown()
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps({"template_markdown": template}, ensure_ascii=False, indent=2))
+            else:
+                print(template)
+            return 0
+
+        if args.pilot_command == "record-interview":
+            try:
+                result = record_pilot_interview(
+                    participant_label=args.participant,
+                    participant_segment=args.segment,
+                    notes_file=args.notes_file,
+                    exact_pain_recognized=args.exact_pain,
+                    wants_to_try=args.wants_to_try,
+                    willing_to_install_locally=args.willing_to_install_locally,
+                    willingness_to_pay=args.willingness_to_pay,
+                    security_sensitive_user=args.security_sensitive,
+                    no_code_upload_matters=args.no_code_upload_matters,
+                    budget_path=args.budget_path,
+                    audit_trail_more_important_than_review_comments=args.audit_trail_priority,
+                    current_workaround=args.current_workaround,
+                    failure_example_allowed=args.failure_example,
+                    objections=args.objection,
+                    note=args.note.strip() or None,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    "\n".join(
+                        [
+                            f"Pilot record: {result['pilot_record_id']}",
+                            f"Type: {result['record_type']}",
+                            f"Participant: {result['participant_label']}",
+                            f"Ledger: {result['paths']['pilot_evidence_ledger_path']}",
+                        ]
+                    )
+                )
+            return 0
+
+        if args.pilot_command == "record-demo":
+            try:
+                result = record_pilot_demo(
+                    participant_label=args.participant,
+                    participant_segment=args.segment,
+                    notes_file=args.notes_file,
+                    failure_memory_reviewed=args.failure_memory,
+                    signed_evidence_reviewed=args.signed_evidence,
+                    no_code_upload_confirmed=args.no_code_upload,
+                    transcript_claim_rejection_reviewed=args.transcript_claim_rejection,
+                    wants_to_try=args.wants_to_try,
+                    exact_pain_recognized=args.exact_pain,
+                    security_sensitive_user=args.security_sensitive,
+                    note=args.note.strip() or None,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    "\n".join(
+                        [
+                            f"Pilot record: {result['pilot_record_id']}",
+                            f"Type: {result['record_type']}",
+                            f"Demo checklist passed: {result['score']['demo_checklist_passed']}",
+                            f"Ledger: {result['paths']['pilot_evidence_ledger_path']}",
+                        ]
+                    )
+                )
+            return 0
+
+        if args.pilot_command == "record-loi":
+            try:
+                result = record_pilot_loi(
+                    participant_label=args.participant,
+                    participant_segment=args.segment,
+                    notes_file=args.notes_file,
+                    commitment_kind=args.commitment_kind,
+                    amount=args.amount,
+                    decision_maker=args.decision_maker,
+                    pilot_shape=args.pilot_shape,
+                    exact_pain_recognized=args.exact_pain,
+                    wants_to_try=args.wants_to_try,
+                    security_sensitive_user=args.security_sensitive,
+                    budget_path=args.budget_path,
+                    note=args.note.strip() or None,
+                    workspace_id=args.workspace_id,
+                    root=args.root,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    "\n".join(
+                        [
+                            f"Pilot record: {result['pilot_record_id']}",
+                            f"Type: {result['record_type']}",
+                            f"Paid-pilot commitment: {result['score']['paid_pilot_commitment']}",
+                            f"Ledger: {result['paths']['pilot_evidence_ledger_path']}",
+                        ]
+                    )
+                )
+            return 0
+
+        if args.pilot_command == "report":
+            try:
+                if args.write:
+                    report, markdown, _latest_json, _latest_md, _run_json, _run_md = record_pilot_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        records_path=args.fixture_records,
+                    )
+                else:
+                    report = build_pilot_report(
+                        workspace_id=args.workspace_id,
+                        root=args.root,
+                        records_path=args.fixture_records,
+                    )
+                    markdown = format_pilot_report_markdown(report)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                parser.error(str(exc))
+            if args.format == "json":
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print(markdown)
+            return 0 if report.get("status") == "pass" else 1
 
     if args.command == "release":
         if args.release_command == "check":

@@ -18,6 +18,7 @@ python3 scripts/satlab.py release check --strict --only tests --timeout 180
 python3 scripts/satlab.py release demo --no-api
 python3 scripts/satlab.py validation report --write --format md
 python3 scripts/satlab.py demand gate --format md
+python3 scripts/satlab.py pilot report --fixture-records examples/pilot_evidence/passing_gate_records.jsonl --format md
 ```
 
 ## What This Is Not
@@ -62,7 +63,8 @@ The public demo path is intentionally narrow:
 3. Run Evidence Lint.
 4. Audit built-in Evidence Pack v1 manifests in strict mode.
 5. Run a fixture-backed demand gate to prove the pass/fail boundary.
-6. Read the generated Markdown report.
+6. Run a fixture-backed paid-pilot gate to prove the M19 report boundary.
+7. Read the generated Markdown report.
 
 The demo does not call a provider, fetch remote assets, or read private notes.
 
@@ -116,6 +118,30 @@ The `demand gate` command enforces the v0.1 release-message boundary:
 - fresh-clone demo minutes <= 15.
 
 The public demo includes a synthetic fixture so the gate can be demonstrated without private data. Real release messaging should use local dogfood and external-user records, not the fixture.
+
+## Paid-Pilot Gate Summary
+
+The `pilot` command records M19 commercial validation evidence:
+
+```bash
+python3 scripts/satlab.py pilot record-interview --help
+python3 scripts/satlab.py pilot record-demo --help
+python3 scripts/satlab.py pilot record-loi --help
+python3 scripts/satlab.py pilot report --format md
+```
+
+The paid-pilot gate requires:
+
+- discovery calls >= 20,
+- hands-on demos >= 5,
+- security-sensitive users >= 5,
+- exact-pain recognition >= 12,
+- wants-to-try users >= 5,
+- paid-pilot commitments or LOIs >= 2.
+
+If fewer than two paid-pilot commitments or LOIs are recorded, do not build the team registry yet. Refine the wedge around static audit reports, CI evidence, or agent transcript firewall.
+
+The public demo includes a synthetic pilot fixture so the gate can be demonstrated without private data. Real commercial decisions should use local pilot records, not the fixture.
 
 ## Security/Privacy Caveats
 
