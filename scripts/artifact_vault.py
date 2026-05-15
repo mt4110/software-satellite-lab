@@ -547,6 +547,9 @@ def _load_gc_ref(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     artifact_id = _clean_text(payload.get("artifact_id"))
     if artifact_id is None or not ARTIFACT_ID_RE.match(artifact_id):
         return None, "invalid_artifact_id"
+    capture_state = _clean_text(payload.get("capture_state"))
+    if capture_state not in CAPTURE_STATES:
+        return None, "invalid_capture_state"
     sha256 = _clean_text(payload.get("sha256"))
     if sha256 is not None and not SHA256_RE.match(sha256):
         return None, "invalid_sha256"
@@ -565,6 +568,7 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
     malformed_refs: list[dict[str, str]] = []
     valid_ref_count = 0
     captured_ref_count = 0
+    verification_cache: dict[tuple[str | None, str | None], tuple[bool, str | None]] = {}
 
     ref_paths = sorted(refs_root.glob("*.json")) if refs_root.exists() else []
     for ref_path in ref_paths:
@@ -587,7 +591,11 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
         sha256 = _clean_text(ref.get("sha256"))
         object_path = resolve_vault_object_path(ref, root=resolved_root)
         expected_path = _vault_path_for_sha(sha256, root=resolved_root).resolve() if sha256 else object_path
-        verified, reason = artifact_ref_object_verified(ref, root=resolved_root)
+        object_key = str(object_path.resolve()) if object_path else None
+        verification_key = (sha256, object_key)
+        if verification_key not in verification_cache:
+            verification_cache[verification_key] = artifact_ref_object_verified(ref, root=resolved_root)
+        verified, reason = verification_cache[verification_key]
         if not verified or object_path is None:
             missing_objects.append(
                 {
@@ -604,7 +612,7 @@ def artifact_gc_dry_run(*, root: Path | None = None) -> dict[str, Any]:
             )
             continue
 
-        key = str(object_path.resolve())
+        key = object_key or str(object_path.resolve())
         entry = referenced.setdefault(
             key,
             {

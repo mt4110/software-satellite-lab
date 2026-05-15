@@ -14,6 +14,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import artifact_vault as artifact_vault_module  # noqa: E402
 from artifact_vault import (  # noqa: E402
     artifact_gc_dry_run,
     artifact_ref_object_verified,
@@ -428,6 +429,67 @@ class ArtifactVaultTests(unittest.TestCase):
             self.assertEqual(report["counts"]["missing_object_count"], 0)
             self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_badsha.json")
             self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_sha256")
+
+    def test_artifact_gc_dry_run_reports_invalid_capture_state_refs_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            refs_root = root / "artifacts" / "vault" / "refs"
+            refs_root.mkdir(parents=True, exist_ok=True)
+            bad_ref = refs_root / "artifact_badstate.json"
+            bad_ref.write_text(
+                json.dumps(
+                    {
+                        "schema_name": "software-satellite-artifact-ref",
+                        "schema_version": 1,
+                        "artifact_id": "artifact_badstate",
+                        "capture_state": "capturd",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = artifact_gc_dry_run(root=root)
+
+            self.assertEqual(report["counts"]["ref_count"], 0)
+            self.assertEqual(report["counts"]["malformed_ref_count"], 1)
+            self.assertEqual(report["malformed_refs"][0]["ref_path"], "artifacts/vault/refs/artifact_badstate.json")
+            self.assertEqual(report["malformed_refs"][0]["reason"], "invalid_capture_state")
+
+    def test_artifact_gc_dry_run_reuses_verification_for_duplicate_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "duplicate.txt"
+            source.write_text("shared object\n", encoding="utf-8")
+            ref = capture_artifact(
+                source,
+                kind="review_note",
+                root=root,
+                captured_at_utc="2026-05-12T00:00:00+00:00",
+            )
+            duplicate_ref = {
+                **ref,
+                "artifact_id": "artifact_duplicate",
+                "captured_at_utc": "2026-05-12T00:00:01+00:00",
+            }
+            duplicate_ref_path = root / "artifacts" / "vault" / "refs" / "artifact_duplicate.json"
+            duplicate_ref_path.write_text(json.dumps(duplicate_ref, sort_keys=True), encoding="utf-8")
+
+            original = artifact_vault_module.artifact_ref_object_verified
+            calls = []
+
+            def spy(ref_payload: dict[str, object], *, root: Path | None = None) -> tuple[bool, str | None]:
+                calls.append(ref_payload.get("artifact_id"))
+                return original(ref_payload, root=root)
+
+            artifact_vault_module.artifact_ref_object_verified = spy
+            try:
+                report = artifact_gc_dry_run(root=root)
+            finally:
+                artifact_vault_module.artifact_ref_object_verified = original
+
+            self.assertEqual(calls, [ref["artifact_id"]])
+            self.assertEqual(report["counts"]["referenced_object_count"], 1)
+            self.assertEqual(report["referenced_objects"][0]["ref_count"], 2)
 
 
 if __name__ == "__main__":
